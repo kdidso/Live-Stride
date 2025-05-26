@@ -300,6 +300,57 @@ stopBroadcastBtn.onclick = () => {
   broadcastBtn.style.display = 'block';
 };
 
+searchInput.addEventListener('input', () => {
+  const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  db.ref('runners').once('value', snapshot => {
+    const all = snapshot.val();
+    if (!all) return;
+
+    for (let key in all) {
+      if (key.includes(query)) {
+        if (activeListener) activeListener.off();
+        const ref = db.ref(`runners/${key}`);
+        activeListener = ref;
+
+        ref.on('value', snap => {
+          const data = snap.val();
+          if (!data || !data.current) return;
+
+          if (!viewerMarker) {
+            viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
+          } else {
+            viewerMarker.setLngLat(data.current);
+          }
+
+          if (!map.getSource('run-path')) {
+            map.addSource('run-path', {
+              type: 'geojson',
+              data: { type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } }
+            });
+            map.addLayer({
+              id: 'run-line',
+              type: 'line',
+              source: 'run-path',
+              layout: { 'line-join': 'round', 'line-cap': 'round' },
+              paint: { 'line-color': '#00FFFF', 'line-width': 4 }
+            });
+          } else {
+            map.getSource('run-path').setData({
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: data.path || [] }
+            });
+          }
+
+          updateStatsDisplay(data.distance, data.pace, data.avgPace);
+          map.flyTo({ center: data.current, zoom: 16 });
+        });
+
+        break; // only connect to the first matching runner
+      }
+    }
+  });
+});
 
     map.on('load', () => setMode('runner'));
   </script>

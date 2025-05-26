@@ -19,22 +19,17 @@
       width: 100%;
       height: 100%;
     }
-    #controls {
-      position: absolute;
-      top: 10px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 999;
-      display: flex;
-      gap: 10px;
-    }
-    #broadcastControls {
+    #buttonWrapper {
       position: absolute;
       top: 10px;
       left: 10px;
       z-index: 999;
       display: flex;
       flex-direction: column;
+      gap: 10px;
+    }
+    #controls {
+      display: flex;
       gap: 10px;
     }
     button {
@@ -45,8 +40,7 @@
       background-color: #007BFF;
       color: white;
       cursor: pointer;
-      min-width: 120px;
-      text-align: center;
+      min-width: 140px;
     }
     button:disabled {
       background-color: #888;
@@ -66,12 +60,12 @@
 </head>
 <body>
   <div id="map"></div>
-  <div id="controls">
-    <button id="startBtn">Start</button>
-    <button id="stopBtn" disabled>Stop</button>
-  </div>
-  <div id="broadcastControls" style="display:none">
-    <button id="broadcastBtn">Broadcast</button>
+  <div id="buttonWrapper">
+    <div id="controls">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn" disabled>Stop</button>
+    </div>
+    <button id="broadcastBtn" style="display:none">Broadcast</button>
     <button id="stopBroadcastBtn" style="display:none">Stop Broadcast</button>
   </div>
   <div id="statsBar" style="display: none;"></div>
@@ -111,7 +105,6 @@
     let runnerName = null;
     let broadcasting = false;
 
-    const broadcastControls = document.getElementById('broadcastControls');
     const broadcastBtn = document.getElementById('broadcastBtn');
     const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
     const startBtn = document.getElementById('startBtn');
@@ -158,7 +151,7 @@
     }
 
     geoControl.on('trackuserlocationstart', () => {
-      broadcastControls.style.display = 'flex';
+      broadcastBtn.style.display = 'block';
     });
 
     broadcastBtn.addEventListener('click', () => {
@@ -170,7 +163,7 @@
         broadcasting = true;
         stopBroadcastBtn.style.display = 'block';
         broadcastBtn.style.display = 'none';
-      }, 50); // slight delay improves input display on iOS
+      }, 50);
     });
 
     stopBroadcastBtn.addEventListener('click', () => {

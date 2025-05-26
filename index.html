@@ -39,14 +39,15 @@
     #searchBar {
       position: absolute;
       top: 10px;
-      right: 10px;
+      left: 50%;
+      transform: translateX(-50%);
       z-index: 999;
       display: none;
     }
     #searchInput {
       padding: 10px;
       font-size: 16px;
-      width: 180px;
+      width: 220px;
       border-radius: 6px;
       border: 1px solid #ccc;
     }
@@ -146,13 +147,13 @@
 
     function setMode(mode) {
       if (mode === 'runner') {
-        map.addControl(geoControl, 'bottom-right');
+        if (!map._controls.includes(geoControl)) map.addControl(geoControl, 'bottom-right');
         document.getElementById('controls').style.display = 'flex';
         broadcastBtn.style.display = 'none';
         stopBroadcastBtn.style.display = 'none';
         searchBar.style.display = 'none';
       } else {
-        map.removeControl(geoControl);
+        if (map._controls.includes(geoControl)) map.removeControl(geoControl);
         document.getElementById('controls').style.display = 'none';
         broadcastBtn.style.display = 'none';
         stopBroadcastBtn.style.display = 'none';
@@ -331,6 +332,9 @@
         }
       });
     });
+
+    // Default to runner mode
+    setMode('runner');
   </script>
 </body>
 </html>

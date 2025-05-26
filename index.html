@@ -38,13 +38,16 @@
     button:disabled {
       background-color: #888;
     }
-    .stats-box {
-      background-color: rgba(255, 255, 255, 0.8);
-      padding: 6px 12px;
-      border-radius: 8px;
+    #statsBar {
+      position: absolute;
+      bottom: 0;
+      width: 100%;
+      background-color: rgba(0, 0, 0, 0.7);
+      color: white;
       font-size: 14px;
+      padding: 8px 12px;
       text-align: center;
-      box-shadow: 0 0 6px rgba(0, 0, 0, 0.25);
+      z-index: 999;
     }
   </style>
 </head>
@@ -54,6 +57,8 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
   </div>
+  <div id="statsBar" style="display: none;"></div>
+
   <script>
     const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC';
     const map = new maplibregl.Map({
@@ -84,6 +89,7 @@
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
+    const statsBar = document.getElementById('statsBar');
 
     function metersToMiles(meters) {
       return meters / 1609.34;
@@ -91,27 +97,30 @@
 
     function haversineDistance(coord1, coord2) {
       const toRad = x => x * Math.PI / 180;
-      const R = 6371000; // meters
+      const R = 6371000;
       const lat1 = toRad(coord1[1]);
       const lat2 = toRad(coord2[1]);
       const deltaLat = toRad(coord2[1] - coord1[1]);
       const deltaLng = toRad(coord2[0] - coord1[0]);
-
-      const a = Math.sin(deltaLat/2)**2 +
-                Math.cos(lat1) * Math.cos(lat2) *
-                Math.sin(deltaLng/2)**2;
+      const a = Math.sin(deltaLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng/2)**2;
       const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       return R * c;
     }
 
-    function formatStatsBox(distanceMiles, instantSpeed, avgSpeed) {
-      return `
-        <div class="stats-box">
-          <strong>${distanceMiles.toFixed(2)} mi</strong><br/>
-          ${instantSpeed.toFixed(2)} mi/min<br/>
-          Avg: ${avgSpeed.toFixed(2)} mi/min
-        </div>
+    function formatPace(minsPerMile) {
+      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+      const minutes = Math.floor(minsPerMile);
+      const seconds = Math.round((minsPerMile - minutes) * 60);
+      return `${minutes}:${seconds.toString().padStart(2, '0')} /mi`;
+    }
+
+    function updateStatsDisplay(distanceMiles, instPace, avgPace) {
+      statsBar.innerHTML = `
+        Distance: ${distanceMiles.toFixed(2)} mi &nbsp; | &nbsp;
+        Pace: ${formatPace(instPace)} &nbsp; | &nbsp;
+        Avg Pace: ${formatPace(avgPace)}
       `;
+      statsBar.style.display = 'block';
     }
 
     function addOrUpdatePath() {
@@ -159,6 +168,7 @@
       startBtn.disabled = true;
       stopBtn.disabled = false;
       map.removeControl(geoControl);
+      statsBar.style.display = 'block';
 
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
@@ -168,12 +178,7 @@
           const coord = [lng, lat];
 
           if (!userMarker) {
-            const el = document.createElement('div');
-            el.innerHTML = formatStatsBox(0, 0, 0);
-            el.className = 'stats-box';
-            el.style.transform = 'translate(-50%, -100%)';
-
-            userMarker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+            userMarker = new maplibregl.Marker({ color: 'red' })
               .setLngLat(coord)
               .addTo(map);
             map.flyTo({ center: coord, zoom: 16 });
@@ -183,16 +188,15 @@
 
           if (pathCoords.length > 0) {
             const prev = pathCoords[pathCoords.length - 1];
-            const timeDeltaMin = (now - lastPointTime) / 60000; // ms → min
-            const segmentDist = haversineDistance(prev, coord); // meters
-            const segmentSpeed = metersToMiles(segmentDist) / timeDeltaMin; // mi/min
+            const timeDeltaMin = (now - lastPointTime) / 60000;
+            const segmentDist = haversineDistance(prev, coord);
+            const instPace = timeDeltaMin / metersToMiles(segmentDist);
 
             totalDistanceMeters += segmentDist;
             const totalTimeMin = (now - startTime) / 60000;
-            const avgSpeed = metersToMiles(totalDistanceMeters) / totalTimeMin;
+            const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
 
-            const el = userMarker.getElement();
-            el.innerHTML = formatStatsBox(metersToMiles(totalDistanceMeters), segmentSpeed, avgSpeed);
+            updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
           } else {
             startTime = now;
           }
@@ -219,6 +223,7 @@
       startBtn.disabled = false;
       stopBtn.disabled = true;
       map.addControl(geoControl, 'bottom-right');
+      // Stats stay visible — not cleared
     }
 
     startBtn.addEventListener('click', startTracking);

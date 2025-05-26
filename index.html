@@ -38,6 +38,14 @@
     button:disabled {
       background-color: #888;
     }
+    .stats-box {
+      background-color: rgba(255, 255, 255, 0.8);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      text-align: center;
+      box-shadow: 0 0 6px rgba(0, 0, 0, 0.25);
+    }
   </style>
 </head>
 <body>
@@ -57,16 +65,6 @@
 
     map.addControl(new maplibregl.NavigationControl());
 
-    let pathCoords = [];
-    let lineSourceId = 'run-path';
-    let lineLayerId = 'run-line';
-    let userMarker = null;
-    let watchId = null;
-
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-
-    // Create the geolocate control (follows user before/after run)
     const geoControl = new maplibregl.GeolocateControl({
       positionOptions: { enableHighAccuracy: true },
       trackUserLocation: true,
@@ -74,6 +72,47 @@
       showUserLocation: true
     });
     map.addControl(geoControl, 'bottom-right');
+
+    let pathCoords = [];
+    let lineSourceId = 'run-path';
+    let lineLayerId = 'run-line';
+    let userMarker = null;
+    let watchId = null;
+    let startTime = null;
+    let lastPointTime = null;
+    let totalDistanceMeters = 0;
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    function metersToMiles(meters) {
+      return meters / 1609.34;
+    }
+
+    function haversineDistance(coord1, coord2) {
+      const toRad = x => x * Math.PI / 180;
+      const R = 6371000; // meters
+      const lat1 = toRad(coord1[1]);
+      const lat2 = toRad(coord2[1]);
+      const deltaLat = toRad(coord2[1] - coord1[1]);
+      const deltaLng = toRad(coord2[0] - coord1[0]);
+
+      const a = Math.sin(deltaLat/2)**2 +
+                Math.cos(lat1) * Math.cos(lat2) *
+                Math.sin(deltaLng/2)**2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function formatStatsBox(distanceMiles, instantSpeed, avgSpeed) {
+      return `
+        <div class="stats-box">
+          <strong>${distanceMiles.toFixed(2)} mi</strong><br/>
+          ${instantSpeed.toFixed(2)} mi/min<br/>
+          Avg: ${avgSpeed.toFixed(2)} mi/min
+        </div>
+      `;
+    }
 
     function addOrUpdatePath() {
       if (!map.getSource(lineSourceId)) {
@@ -114,20 +153,27 @@
 
     function startTracking() {
       pathCoords = [];
+      totalDistanceMeters = 0;
+      startTime = null;
+      lastPointTime = null;
       startBtn.disabled = true;
       stopBtn.disabled = false;
-
-      // Remove blue locate button and stop auto-follow
       map.removeControl(geoControl);
 
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const lng = pos.coords.longitude;
           const lat = pos.coords.latitude;
+          const now = Date.now();
           const coord = [lng, lat];
 
           if (!userMarker) {
-            userMarker = new maplibregl.Marker({ color: 'red' })
+            const el = document.createElement('div');
+            el.innerHTML = formatStatsBox(0, 0, 0);
+            el.className = 'stats-box';
+            el.style.transform = 'translate(-50%, -100%)';
+
+            userMarker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
               .setLngLat(coord)
               .addTo(map);
             map.flyTo({ center: coord, zoom: 16 });
@@ -135,14 +181,25 @@
             userMarker.setLngLat(coord);
           }
 
-          if (
-            pathCoords.length === 0 ||
-            pathCoords[pathCoords.length - 1][0] !== lng ||
-            pathCoords[pathCoords.length - 1][1] !== lat
-          ) {
-            pathCoords.push(coord);
-            addOrUpdatePath();
+          if (pathCoords.length > 0) {
+            const prev = pathCoords[pathCoords.length - 1];
+            const timeDeltaMin = (now - lastPointTime) / 60000; // ms → min
+            const segmentDist = haversineDistance(prev, coord); // meters
+            const segmentSpeed = metersToMiles(segmentDist) / timeDeltaMin; // mi/min
+
+            totalDistanceMeters += segmentDist;
+            const totalTimeMin = (now - startTime) / 60000;
+            const avgSpeed = metersToMiles(totalDistanceMeters) / totalTimeMin;
+
+            const el = userMarker.getElement();
+            el.innerHTML = formatStatsBox(metersToMiles(totalDistanceMeters), segmentSpeed, avgSpeed);
+          } else {
+            startTime = now;
           }
+
+          lastPointTime = now;
+          pathCoords.push(coord);
+          addOrUpdatePath();
         },
         (err) => {
           console.error("Geolocation error:", err);
@@ -159,11 +216,8 @@
         navigator.geolocation.clearWatch(watchId);
         watchId = null;
       }
-
       startBtn.disabled = false;
       stopBtn.disabled = true;
-
-      // Restore blue location tracking after stop
       map.addControl(geoControl, 'bottom-right');
     }
 

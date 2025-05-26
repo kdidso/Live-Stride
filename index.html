@@ -7,7 +7,7 @@
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
   <style>
     body, html {
       margin: 0;
@@ -27,6 +27,15 @@
       z-index: 999;
       display: flex;
       gap: 10px;
+    }
+    #broadcastControls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 999;
     }
     button {
       padding: 10px 20px;
@@ -59,6 +68,10 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
   </div>
+  <div id="broadcastControls" style="display:none">
+    <button id="broadcastBtn">Broadcast</button>
+    <button id="stopBroadcastBtn" style="display:none">Stop Broadcast</button>
+  </div>
   <div id="statsBar" style="display: none;"></div>
 
   <script>
@@ -72,6 +85,7 @@
       appId: "1:758438288478:web:def85c1fd5e08b6c2ee8cf"
     };
     firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
 
     const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC';
     const map = new maplibregl.Map({
@@ -91,18 +105,23 @@
     });
     map.addControl(geoControl, 'bottom-right');
 
+    let broadcastRef = null;
+    let runnerName = null;
+    let broadcasting = false;
+
+    const broadcastControls = document.getElementById('broadcastControls');
+    const broadcastBtn = document.getElementById('broadcastBtn');
+    const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statsBar = document.getElementById('statsBar');
+
     let pathCoords = [];
-    let lineSourceId = 'run-path';
-    let lineLayerId = 'run-line';
     let userMarker = null;
     let watchId = null;
     let startTime = null;
     let lastPointTime = null;
     let totalDistanceMeters = 0;
-
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const statsBar = document.getElementById('statsBar');
 
     function metersToMiles(meters) {
       return meters / 1609.34;
@@ -136,9 +155,30 @@
       statsBar.style.display = 'block';
     }
 
+    geoControl.on('trackuserlocationstart', () => {
+      broadcastControls.style.display = 'flex';
+    });
+
+    broadcastBtn.addEventListener('click', () => {
+      runnerName = prompt("Enter your name:");
+      if (!runnerName) return;
+      const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      broadcastRef = db.ref(`runners/${safeName}`);
+      broadcasting = true;
+      stopBroadcastBtn.style.display = 'block';
+      broadcastBtn.style.display = 'none';
+    });
+
+    stopBroadcastBtn.addEventListener('click', () => {
+      if (broadcastRef) broadcastRef.remove();
+      broadcasting = false;
+      broadcastBtn.style.display = 'block';
+      stopBroadcastBtn.style.display = 'none';
+    });
+
     function addOrUpdatePath() {
-      if (!map.getSource(lineSourceId)) {
-        map.addSource(lineSourceId, {
+      if (!map.getSource('run-path')) {
+        map.addSource('run-path', {
           type: 'geojson',
           data: {
             type: 'Feature',
@@ -150,9 +190,9 @@
         });
 
         map.addLayer({
-          id: lineLayerId,
+          id: 'run-line',
           type: 'line',
-          source: lineSourceId,
+          source: 'run-path',
           layout: {
             'line-join': 'round',
             'line-cap': 'round'
@@ -163,7 +203,7 @@
           }
         });
       } else {
-        map.getSource(lineSourceId).setData({
+        map.getSource('run-path').setData({
           type: 'Feature',
           geometry: {
             type: 'LineString',
@@ -210,6 +250,18 @@
             const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
 
             updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
+
+            if (broadcasting && broadcastRef) {
+              broadcastRef.set({
+                name: runnerName,
+                path: pathCoords,
+                current: coord,
+                distance: metersToMiles(totalDistanceMeters),
+                pace: instPace,
+                avgPace: avgPace,
+                timestamp: now
+              });
+            }
           } else {
             startTime = now;
           }

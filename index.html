@@ -11,22 +11,47 @@
       margin: 0;
       padding: 0;
       height: 100%;
+      font-family: sans-serif;
     }
     #map {
       width: 100%;
       height: 100%;
     }
+    #controls {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 999;
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      border: none;
+      border-radius: 6px;
+      background-color: #007BFF;
+      color: white;
+      cursor: pointer;
+    }
+    button:disabled {
+      background-color: #888;
+    }
   </style>
 </head>
 <body>
   <div id="map"></div>
+  <div id="controls">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
   <script>
-    const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC'; // Your MapTiler API Key
-
+    const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC';
     const map = new maplibregl.Map({
       container: 'map',
       style: `https://api.maptiler.com/maps/satellite/style.json?key=${maptilerKey}`,
-      center: [-113.6, 37.1], // Default center: St. George, UT
+      center: [-113.6, 37.1],
       zoom: 13
     });
 
@@ -36,6 +61,10 @@
     let lineSourceId = 'run-path';
     let lineLayerId = 'run-line';
     let userMarker = null;
+    let watchId = null;
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
 
     function addOrUpdatePath() {
       if (!map.getSource(lineSourceId)) {
@@ -64,8 +93,7 @@
           }
         });
       } else {
-        const source = map.getSource(lineSourceId);
-        source.setData({
+        map.getSource(lineSourceId).setData({
           type: 'Feature',
           geometry: {
             type: 'LineString',
@@ -75,15 +103,17 @@
       }
     }
 
-    // Start tracking
-    if (navigator.geolocation) {
-      navigator.geolocation.watchPosition(
+    function startTracking() {
+      pathCoords = [];
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+
+      watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const lng = pos.coords.longitude;
           const lat = pos.coords.latitude;
           const coord = [lng, lat];
 
-          // Update marker
           if (!userMarker) {
             userMarker = new maplibregl.Marker({ color: 'red' })
               .setLngLat(coord)
@@ -93,7 +123,6 @@
             userMarker.setLngLat(coord);
           }
 
-          // Push new point if it's different from the last one
           if (
             pathCoords.length === 0 ||
             pathCoords[pathCoords.length - 1][0] !== lng ||
@@ -111,9 +140,19 @@
           maximumAge: 1000
         }
       );
-    } else {
-      alert("Geolocation is not supported by your browser.");
     }
+
+    function stopTracking() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+
+    startBtn.addEventListener('click', startTracking);
+    stopBtn.addEventListener('click', stopTracking);
   </script>
 </body>
 </html>

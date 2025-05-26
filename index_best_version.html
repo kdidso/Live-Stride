@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>LiveStride – Satellite Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; }
+    #map { width: 100%; height: 100%; }
+    #buttonWrapper {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 999;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #controls, #modeToggle {
+      display: flex;
+      gap: 10px;
+    }
+    #searchBar {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 999;
+      display: none;
+    }
+    #searchInput {
+      padding: 10px;
+      font-size: 16px;
+      width: 220px;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      border: none;
+      border-radius: 6px;
+      background-color: #007BFF;
+      color: white;
+      cursor: pointer;
+      min-width: 140px;
+    }
+    button:disabled { background-color: #888; }
+    #statsBar {
+      position: absolute;
+      bottom: 0;
+      width: 100%;
+      background-color: rgba(0, 0, 0, 0.7);
+      color: white;
+      font-size: 14px;
+      padding: 8px 12px;
+      text-align: center;
+      z-index: 999;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="buttonWrapper">
+    <div id="modeToggle">
+      <button id="runnerModeBtn">🏃‍♂️ Runner</button>
+      <button id="viewerModeBtn">👁️ Viewer</button>
+    </div>
+    <div id="controls">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn" disabled>Stop</button>
+    </div>
+    <button id="broadcastBtn" style="display:none">Broadcast</button>
+    <button id="stopBroadcastBtn" style="display:none">Stop Broadcast</button>
+  </div>
+  <div id="searchBar"><input type="text" id="searchInput" placeholder="Search runner..."></div>
+  <div id="statsBar"></div>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
+      authDomain: "livestride.firebaseapp.com",
+      databaseURL: "https://livestride-default-rtdb.firebaseio.com",
+      projectId: "livestride",
+      storageBucket: "livestride.firebasestorage.app",
+      messagingSenderId: "758438288478",
+      appId: "1:758438288478:web:def85c1fd5e08b6c2ee8cf"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC';
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: `https://api.maptiler.com/maps/satellite/style.json?key=${maptilerKey}`,
+      center: [-113.6, 37.1],
+      zoom: 13
+    });
+
+    const geoControl = new maplibregl.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      showAccuracyCircle: false,
+      showUserLocation: true
+    });
+
+    map.addControl(new maplibregl.NavigationControl());
+
+    let pathCoords = [];
+    let watchId = null;
+    let userMarker = null;
+    let startTime = null;
+    let lastPointTime = null;
+    let totalDistanceMeters = 0;
+    let runnerName = null;
+    let broadcastRef = null;
+    let broadcasting = false;
+    let viewerMarker = null;
+    let activeListener = null;
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const broadcastBtn = document.getElementById('broadcastBtn');
+    const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
+    const statsBar = document.getElementById('statsBar');
+    const searchInput = document.getElementById('searchInput');
+    const runnerModeBtn = document.getElementById('runnerModeBtn');
+    const viewerModeBtn = document.getElementById('viewerModeBtn');
+
+    runnerModeBtn.onclick = () => setMode('runner');
+    viewerModeBtn.onclick = () => setMode('viewer');
+
+    function setMode(mode) {
+      if (mode === 'runner') {
+        if (!map._controls.includes(geoControl)) map.addControl(geoControl, 'bottom-right');
+        document.getElementById('controls').style.display = 'flex';
+        broadcastBtn.style.display = 'block';
+        stopBroadcastBtn.style.display = 'none';
+        document.getElementById('searchBar').style.display = 'none';
+        statsBar.style.display = 'none';
+        map.resize();
+      } else {
+        if (map._controls.includes(geoControl)) map.removeControl(geoControl);
+        document.getElementById('controls').style.display = 'none';
+        broadcastBtn.style.display = 'none';
+        stopBroadcastBtn.style.display = 'none';
+        document.getElementById('searchBar').style.display = 'block';
+        map.resize();
+      }
+    }
+
+    function metersToMiles(meters) {
+      return meters / 1609.34;
+    }
+
+    function haversineDistance(coord1, coord2) {
+      const toRad = x => x * Math.PI / 180;
+      const R = 6371000;
+      const lat1 = toRad(coord1[1]);
+      const lat2 = toRad(coord2[1]);
+      const deltaLat = toRad(coord2[1] - coord1[1]);
+      const deltaLng = toRad(coord2[0] - coord1[0]);
+      const a = Math.sin(deltaLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng/2)**2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function formatPace(minsPerMile) {
+      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+      let minutes = Math.floor(minsPerMile);
+      let seconds = Math.round((minsPerMile - minutes) * 60);
+      if (seconds === 60) { minutes += 1; seconds = 0; }
+      return `${minutes}:${seconds.toString().padStart(2, '0')} /mi`;
+    }
+
+    function updateStatsDisplay(distance, pace, avgPace) {
+      statsBar.innerHTML = `
+        Distance: ${distance.toFixed(2)} mi &nbsp; | &nbsp;
+        Pace: ${formatPace(pace)} &nbsp; | &nbsp;
+        Avg Pace: ${formatPace(avgPace)}
+      `;
+      statsBar.style.display = 'block';
+    }
+
+    function addOrUpdatePath() {
+      if (!map.getSource('run-path')) {
+        map.addSource('run-path', {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: pathCoords }
+          }
+        });
+        map.addLayer({
+          id: 'run-line',
+          type: 'line',
+          source: 'run-path',
+          layout: { 'line-join': 'round', 'line-cap': 'round' },
+          paint: { 'line-color': '#00FFFF', 'line-width': 4 }
+        });
+      } else {
+        map.getSource('run-path').setData({
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: pathCoords }
+        });
+      }
+    }
+
+    function startTracking() {
+      pathCoords = [];
+      totalDistanceMeters = 0;
+      startTime = null;
+      lastPointTime = null;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      map.removeControl(geoControl);
+      statsBar.style.display = 'block';
+
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const lng = pos.coords.longitude;
+          const lat = pos.coords.latitude;
+          const now = Date.now();
+          const coord = [lng, lat];
+
+          if (!userMarker) {
+            userMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(coord).addTo(map);
+            map.flyTo({ center: coord, zoom: 16 });
+          } else {
+            userMarker.setLngLat(coord);
+          }
+
+          if (pathCoords.length > 0) {
+            const prev = pathCoords[pathCoords.length - 1];
+            const timeDeltaMin = (now - lastPointTime) / 60000;
+            const segmentDist = haversineDistance(prev, coord);
+            const instPace = timeDeltaMin / metersToMiles(segmentDist);
+            totalDistanceMeters += segmentDist;
+            const totalTimeMin = (now - startTime) / 60000;
+            const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+            updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
+            if (broadcasting && broadcastRef) {
+              broadcastRef.set({
+                name: runnerName,
+                path: pathCoords,
+                current: coord,
+                distance: metersToMiles(totalDistanceMeters),
+                pace: instPace,
+                avgPace: avgPace,
+                timestamp: now
+              });
+            }
+          } else {
+            startTime = now;
+          }
+
+          lastPointTime = now;
+          pathCoords.push(coord);
+          addOrUpdatePath();
+        },
+        err => console.error("Geolocation error:", err),
+        { enableHighAccuracy: true, maximumAge: 1000 }
+      );
+    }
+
+    function stopTracking() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      map.addControl(geoControl, 'bottom-right');
+    }
+
+    startBtn.onclick = startTracking;
+    stopBtn.onclick = stopTracking;
+    broadcastBtn.onclick = () => {
+  runnerName = prompt("Enter your name:");
+  if (!runnerName) return;
+
+  const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  broadcastRef = db.ref(`runners/${safeName}`);
+  broadcasting = true;
+
+  stopBroadcastBtn.style.display = 'block';
+  broadcastBtn.style.display = 'none';
+};
+
+stopBroadcastBtn.onclick = () => {
+  if (broadcastRef) broadcastRef.remove();
+  broadcasting = false;
+
+  stopBroadcastBtn.style.display = 'none';
+  broadcastBtn.style.display = 'block';
+};
+
+
+    map.on('load', () => setMode('runner'));
+  </script>
+</body>
+</html>

@@ -57,6 +57,17 @@
 
     map.addControl(new maplibregl.NavigationControl());
 
+    // ✅ Add "center me" button to bottom right
+    map.addControl(
+      new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true },
+        trackUserLocation: false,
+        showAccuracyCircle: false,
+        showUserLocation: true
+      }),
+      'bottom-right'
+    );
+
     let pathCoords = [];
     let lineSourceId = 'run-path';
     let lineLayerId = 'run-line';

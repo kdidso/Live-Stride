@@ -21,34 +21,87 @@
 <body>
   <div id="map"></div>
   <script>
-    const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC'; // Your personal MapTiler key
+    const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC'; // Your MapTiler API Key
 
     const map = new maplibregl.Map({
       container: 'map',
       style: `https://api.maptiler.com/maps/satellite/style.json?key=${maptilerKey}`,
-      center: [-113.6, 37.1], // Default to St. George, UT
+      center: [-113.6, 37.1], // Default center: St. George, UT
       zoom: 13
     });
 
     map.addControl(new maplibregl.NavigationControl());
 
-    // Real-time GPS tracking
+    let pathCoords = [];
+    let lineSourceId = 'run-path';
+    let lineLayerId = 'run-line';
+    let userMarker = null;
+
+    function addOrUpdatePath() {
+      if (!map.getSource(lineSourceId)) {
+        map.addSource(lineSourceId, {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: pathCoords
+            }
+          }
+        });
+
+        map.addLayer({
+          id: lineLayerId,
+          type: 'line',
+          source: lineSourceId,
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round'
+          },
+          paint: {
+            'line-color': '#00FFFF',
+            'line-width': 4
+          }
+        });
+      } else {
+        const source = map.getSource(lineSourceId);
+        source.setData({
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: pathCoords
+          }
+        });
+      }
+    }
+
+    // Start tracking
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
         (pos) => {
           const lng = pos.coords.longitude;
           const lat = pos.coords.latitude;
+          const coord = [lng, lat];
 
-          if (!window.userMarker) {
-            window.userMarker = new maplibregl.Marker({ color: 'red' })
-              .setLngLat([lng, lat])
+          // Update marker
+          if (!userMarker) {
+            userMarker = new maplibregl.Marker({ color: 'red' })
+              .setLngLat(coord)
               .addTo(map);
-            map.flyTo({ center: [lng, lat], zoom: 16 });
+            map.flyTo({ center: coord, zoom: 16 });
           } else {
-            window.userMarker.setLngLat([lng, lat]);
+            userMarker.setLngLat(coord);
           }
 
-          // Later: store points here to compute distance, speed, etc.
+          // Push new point if it's different from the last one
+          if (
+            pathCoords.length === 0 ||
+            pathCoords[pathCoords.length - 1][0] !== lng ||
+            pathCoords[pathCoords.length - 1][1] !== lat
+          ) {
+            pathCoords.push(coord);
+            addOrUpdatePath();
+          }
         },
         (err) => {
           console.error("Geolocation error:", err);

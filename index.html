@@ -28,15 +28,6 @@
       display: flex;
       gap: 10px;
     }
-    #broadcastControls {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      z-index: 999;
-    }
     button {
       padding: 10px 20px;
       font-size: 16px;
@@ -68,10 +59,6 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
   </div>
-  <div id="broadcastControls" style="display:none">
-    <button id="broadcastBtn">Broadcast</button>
-    <button id="stopBroadcastBtn" style="display:none">Stop Broadcast</button>
-  </div>
   <div id="statsBar" style="display: none;"></div>
 
   <script>
@@ -84,8 +71,7 @@
       messagingSenderId: "758438288478",
       appId: "1:758438288478:web:def85c1fd5e08b6c2ee8cf"
     };
-    const app = firebase.initializeApp(firebaseConfig);
-    const db = firebase.database();
+    firebase.initializeApp(firebaseConfig);
 
     const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC';
     const map = new maplibregl.Map({
@@ -105,64 +91,89 @@
     });
     map.addControl(geoControl, 'bottom-right');
 
-    let broadcastRef = null;
-    let runnerName = null;
-    let broadcasting = false;
-
-    const broadcastControls = document.getElementById('broadcastControls');
-    const broadcastBtn = document.getElementById('broadcastBtn');
-    const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const statsBar = document.getElementById('statsBar');
-
     let pathCoords = [];
+    let lineSourceId = 'run-path';
+    let lineLayerId = 'run-line';
     let userMarker = null;
     let watchId = null;
     let startTime = null;
     let lastPointTime = null;
     let totalDistanceMeters = 0;
 
-    function metersToMiles(m) { return m / 1609.34; }
-    function formatPace(p) {
-      if (!isFinite(p) || p <= 0) return "—";
-      const min = Math.floor(p), sec = Math.round((p - min) * 60);
-      return `${min}:${sec.toString().padStart(2, '0')} /mi`;
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statsBar = document.getElementById('statsBar');
+
+    function metersToMiles(meters) {
+      return meters / 1609.34;
     }
-    function updateStatsDisplay(dist, instP, avgP) {
-      statsBar.innerHTML = `Distance: ${dist.toFixed(2)} mi | Pace: ${formatPace(instP)} | Avg Pace: ${formatPace(avgP)}`;
+
+    function haversineDistance(coord1, coord2) {
+      const toRad = x => x * Math.PI / 180;
+      const R = 6371000;
+      const lat1 = toRad(coord1[1]);
+      const lat2 = toRad(coord2[1]);
+      const deltaLat = toRad(coord2[1] - coord1[1]);
+      const deltaLng = toRad(coord2[0] - coord1[0]);
+      const a = Math.sin(deltaLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng/2)**2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function formatPace(minsPerMile) {
+      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+      const minutes = Math.floor(minsPerMile);
+      const seconds = Math.round((minsPerMile - minutes) * 60);
+      return `${minutes}:${seconds.toString().padStart(2, '0')} /mi`;
+    }
+
+    function updateStatsDisplay(distanceMiles, instPace, avgPace) {
+      statsBar.innerHTML = `
+        Distance: ${distanceMiles.toFixed(2)} mi &nbsp; | &nbsp;
+        Pace: ${formatPace(instPace)} &nbsp; | &nbsp;
+        Avg Pace: ${formatPace(avgPace)}
+      `;
       statsBar.style.display = 'block';
     }
-    function haversine(c1, c2) {
-      const toRad = deg => deg * Math.PI / 180;
-      const [lon1, lat1] = c1, [lon2, lat2] = c2;
-      const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
-      return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    function addOrUpdatePath() {
+      if (!map.getSource(lineSourceId)) {
+        map.addSource(lineSourceId, {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: pathCoords
+            }
+          }
+        });
+
+        map.addLayer({
+          id: lineLayerId,
+          type: 'line',
+          source: lineSourceId,
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round'
+          },
+          paint: {
+            'line-color': '#00FFFF',
+            'line-width': 4
+          }
+        });
+      } else {
+        map.getSource(lineSourceId).setData({
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: pathCoords
+          }
+        });
+      }
     }
 
-    geoControl.on('trackuserlocationstart', () => {
-      broadcastControls.style.display = 'flex';
-    });
-
-    broadcastBtn.addEventListener('click', () => {
-      runnerName = prompt("Enter your name:");
-      if (!runnerName) return;
-      const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-      broadcastRef = db.ref(`runners/${safeName}`);
-      broadcasting = true;
-      stopBroadcastBtn.style.display = 'block';
-      broadcastBtn.style.display = 'none';
-    });
-
-    stopBroadcastBtn.addEventListener('click', () => {
-      if (broadcastRef) broadcastRef.remove();
-      broadcasting = false;
-      broadcastBtn.style.display = 'block';
-      stopBroadcastBtn.style.display = 'none';
-    });
-
-    startBtn.addEventListener('click', () => {
+    function startTracking() {
       pathCoords = [];
       totalDistanceMeters = 0;
       startTime = null;
@@ -170,59 +181,65 @@
       startBtn.disabled = true;
       stopBtn.disabled = false;
       map.removeControl(geoControl);
+      statsBar.style.display = 'block';
 
-      watchId = navigator.geolocation.watchPosition((pos) => {
-        const lng = pos.coords.longitude, lat = pos.coords.latitude, now = Date.now();
-        const coord = [lng, lat];
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const lng = pos.coords.longitude;
+          const lat = pos.coords.latitude;
+          const now = Date.now();
+          const coord = [lng, lat];
 
-        if (!userMarker) {
-          userMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(coord).addTo(map);
-          map.flyTo({ center: coord, zoom: 16 });
-        } else {
-          userMarker.setLngLat(coord);
-        }
-
-        if (pathCoords.length > 0) {
-          const prev = pathCoords[pathCoords.length - 1];
-          const deltaMin = (now - lastPointTime) / 60000;
-          const segDist = haversine(prev, coord);
-          const instPace = deltaMin / metersToMiles(segDist);
-
-          totalDistanceMeters += segDist;
-          const totalTimeMin = (now - startTime) / 60000;
-          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-
-          updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
-
-          if (broadcasting) {
-            broadcastRef.set({
-              name: runnerName,
-              path: pathCoords,
-              current: coord,
-              distance: metersToMiles(totalDistanceMeters),
-              pace: instPace,
-              avgPace: avgPace,
-              timestamp: Date.now()
-            });
+          if (!userMarker) {
+            userMarker = new maplibregl.Marker({ color: 'red' })
+              .setLngLat(coord)
+              .addTo(map);
+            map.flyTo({ center: coord, zoom: 16 });
+          } else {
+            userMarker.setLngLat(coord);
           }
-        } else {
-          startTime = now;
+
+          if (pathCoords.length > 0) {
+            const prev = pathCoords[pathCoords.length - 1];
+            const timeDeltaMin = (now - lastPointTime) / 60000;
+            const segmentDist = haversineDistance(prev, coord);
+            const instPace = timeDeltaMin / metersToMiles(segmentDist);
+
+            totalDistanceMeters += segmentDist;
+            const totalTimeMin = (now - startTime) / 60000;
+            const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+
+            updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
+          } else {
+            startTime = now;
+          }
+
+          lastPointTime = now;
+          pathCoords.push(coord);
+          addOrUpdatePath();
+        },
+        (err) => {
+          console.error("Geolocation error:", err);
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 1000
         }
+      );
+    }
 
-        lastPointTime = now;
-        pathCoords.push(coord);
-      }, (err) => console.error("GPS error:", err), {
-        enableHighAccuracy: true,
-        maximumAge: 1000
-      });
-    });
-
-    stopBtn.addEventListener('click', () => {
-      if (watchId) navigator.geolocation.clearWatch(watchId);
+    function stopTracking() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
       startBtn.disabled = false;
       stopBtn.disabled = true;
       map.addControl(geoControl, 'bottom-right');
-    });
+    }
+
+    startBtn.addEventListener('click', startTracking);
+    stopBtn.addEventListener('click', stopTracking);
   </script>
 </body>
 </html>

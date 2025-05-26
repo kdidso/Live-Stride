@@ -32,10 +32,10 @@
       position: absolute;
       top: 10px;
       left: 10px;
+      z-index: 999;
       display: flex;
       flex-direction: column;
       gap: 10px;
-      z-index: 999;
     }
     button {
       padding: 10px 20px;
@@ -45,6 +45,8 @@
       background-color: #007BFF;
       color: white;
       cursor: pointer;
+      min-width: 120px;
+      text-align: center;
     }
     button:disabled {
       background-color: #888;
@@ -160,13 +162,15 @@
     });
 
     broadcastBtn.addEventListener('click', () => {
-      runnerName = prompt("Enter your name:");
-      if (!runnerName) return;
-      const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-      broadcastRef = db.ref(`runners/${safeName}`);
-      broadcasting = true;
-      stopBroadcastBtn.style.display = 'block';
-      broadcastBtn.style.display = 'none';
+      setTimeout(() => {
+        runnerName = prompt("Enter your name:");
+        if (!runnerName) return;
+        const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+        broadcastRef = db.ref(`runners/${safeName}`);
+        broadcasting = true;
+        stopBroadcastBtn.style.display = 'block';
+        broadcastBtn.style.display = 'none';
+      }, 50); // slight delay improves input display on iOS
     });
 
     stopBroadcastBtn.addEventListener('click', () => {

@@ -129,11 +129,15 @@
       return R * c;
     }
     function formatPace(minsPerMile) {
-      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
-      const minutes = Math.floor(minsPerMile);
-      const seconds = Math.round((minsPerMile - minutes) * 60);
-      return `${minutes}:${seconds.toString().padStart(2, '0')} /mi`;
-    }
+  if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+  let minutes = Math.floor(minsPerMile);
+  let seconds = Math.round((minsPerMile - minutes) * 60);
+  if (seconds === 60) {
+    minutes += 1;
+    seconds = 0;
+  }
+  return `${minutes}:${seconds.toString().padStart(2, '0')} /mi`;
+}
     function updateStatsDisplay(distanceMiles, instPace, avgPace) {
       statsBar.innerHTML = `Distance: ${distanceMiles.toFixed(2)} mi &nbsp; | &nbsp; Pace: ${formatPace(instPace)} &nbsp; | &nbsp; Avg Pace: ${formatPace(avgPace)}`;
       statsBar.style.display = 'block';

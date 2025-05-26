@@ -280,6 +280,26 @@
 
     startBtn.onclick = startTracking;
     stopBtn.onclick = stopTracking;
+    broadcastBtn.onclick = () => {
+  runnerName = prompt("Enter your name:");
+  if (!runnerName) return;
+
+  const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  broadcastRef = db.ref(`runners/${safeName}`);
+  broadcasting = true;
+
+  stopBroadcastBtn.style.display = 'block';
+  broadcastBtn.style.display = 'none';
+};
+
+stopBroadcastBtn.onclick = () => {
+  if (broadcastRef) broadcastRef.remove();
+  broadcasting = false;
+
+  stopBroadcastBtn.style.display = 'none';
+  broadcastBtn.style.display = 'block';
+};
+
 
     map.on('load', () => setMode('runner'));
   </script>

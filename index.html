@@ -229,11 +229,12 @@
           const coord = [lng, lat];
 
           if (!userMarker) {
-            userMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(coord).addTo(map);
-            map.flyTo({ center: coord, zoom: 16 });
-          } else {
-            userMarker.setLngLat(coord);
-          }
+  userMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(coord).addTo(map);
+} else {
+  userMarker.setLngLat(coord);
+}
+map.setCenter(coord); 
+
 
           if (pathCoords.length > 0) {
             const prev = pathCoords[pathCoords.length - 1];
@@ -343,7 +344,7 @@ searchInput.addEventListener('input', () => {
           }
 
           updateStatsDisplay(data.distance, data.pace, data.avgPace);
-          map.flyTo({ center: data.current, zoom: 16 });
+          map.setCenter(data.current);
         });
 
         break; // only connect to the first matching runner

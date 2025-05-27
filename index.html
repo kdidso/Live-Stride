@@ -62,6 +62,21 @@
       z-index: 999;
       display: none;
     }
+    #recenterBtn {
+      position: absolute;
+      bottom: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 999;
+      padding: 10px 20px;
+      font-size: 14px;
+      background-color: #28a745;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      display: none;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -80,6 +95,7 @@
   </div>
   <div id="searchBar"><input type="text" id="searchInput" placeholder="Search runner..."></div>
   <div id="statsBar"></div>
+  <button id="recenterBtn">Recenter</button>
 
   <script>
     const firebaseConfig = {
@@ -123,6 +139,9 @@
     let viewerMarker = null;
     let activeListener = null;
 
+    let isFollowing = true;
+    let viewerFollowing = true;
+
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const broadcastBtn = document.getElementById('broadcastBtn');
@@ -131,9 +150,27 @@
     const searchInput = document.getElementById('searchInput');
     const runnerModeBtn = document.getElementById('runnerModeBtn');
     const viewerModeBtn = document.getElementById('viewerModeBtn');
+    const recenterBtn = document.getElementById('recenterBtn');
 
     runnerModeBtn.onclick = () => setMode('runner');
     viewerModeBtn.onclick = () => setMode('viewer');
+
+    map.on('dragstart', () => {
+      isFollowing = false;
+      viewerFollowing = false;
+      recenterBtn.style.display = 'block';
+    });
+    map.on('zoomstart', () => {
+      isFollowing = false;
+      viewerFollowing = false;
+      recenterBtn.style.display = 'block';
+    });
+
+    recenterBtn.onclick = () => {
+      isFollowing = true;
+      viewerFollowing = true;
+      recenterBtn.style.display = 'none';
+    };
 
     function setMode(mode) {
       if (mode === 'runner') {
@@ -143,6 +180,8 @@
         stopBroadcastBtn.style.display = 'none';
         document.getElementById('searchBar').style.display = 'none';
         statsBar.style.display = 'none';
+        recenterBtn.style.display = 'none';
+        isFollowing = true;
         map.resize();
       } else {
         if (map._controls.includes(geoControl)) map.removeControl(geoControl);
@@ -150,6 +189,9 @@
         broadcastBtn.style.display = 'none';
         stopBroadcastBtn.style.display = 'none';
         document.getElementById('searchBar').style.display = 'block';
+        statsBar.style.display = 'block';
+        recenterBtn.style.display = 'none';
+        viewerFollowing = true;
         map.resize();
       }
     }
@@ -184,7 +226,6 @@
         Pace: ${formatPace(pace)} &nbsp; | &nbsp;
         Avg Pace: ${formatPace(avgPace)}
       `;
-      statsBar.style.display = 'block';
     }
 
     function addOrUpdatePath() {
@@ -229,12 +270,11 @@
           const coord = [lng, lat];
 
           if (!userMarker) {
-  userMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(coord).addTo(map);
-} else {
-  userMarker.setLngLat(coord);
-}
-map.setCenter(coord); 
-
+            userMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(coord).addTo(map);
+          } else {
+            userMarker.setLngLat(coord);
+          }
+          if (isFollowing) map.setCenter(coord);
 
           if (pathCoords.length > 0) {
             const prev = pathCoords[pathCoords.length - 1];
@@ -282,78 +322,68 @@ map.setCenter(coord);
     startBtn.onclick = startTracking;
     stopBtn.onclick = stopTracking;
     broadcastBtn.onclick = () => {
-  runnerName = prompt("Enter your name:");
-  if (!runnerName) return;
+      runnerName = prompt("Enter your name:");
+      if (!runnerName) return;
+      const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      broadcastRef = db.ref(`runners/${safeName}`);
+      broadcasting = true;
+      stopBroadcastBtn.style.display = 'block';
+      broadcastBtn.style.display = 'none';
+    };
+    stopBroadcastBtn.onclick = () => {
+      if (broadcastRef) broadcastRef.remove();
+      broadcasting = false;
+      stopBroadcastBtn.style.display = 'none';
+      broadcastBtn.style.display = 'block';
+    };
 
-  const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-  broadcastRef = db.ref(`runners/${safeName}`);
-  broadcasting = true;
-
-  stopBroadcastBtn.style.display = 'block';
-  broadcastBtn.style.display = 'none';
-};
-
-stopBroadcastBtn.onclick = () => {
-  if (broadcastRef) broadcastRef.remove();
-  broadcasting = false;
-
-  stopBroadcastBtn.style.display = 'none';
-  broadcastBtn.style.display = 'block';
-};
-
-searchInput.addEventListener('input', () => {
-  const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-  db.ref('runners').once('value', snapshot => {
-    const all = snapshot.val();
-    if (!all) return;
-
-    for (let key in all) {
-      if (key.includes(query)) {
-        if (activeListener) activeListener.off();
-        const ref = db.ref(`runners/${key}`);
-        activeListener = ref;
-
-        ref.on('value', snap => {
-          const data = snap.val();
-          if (!data || !data.current) return;
-
-          if (!viewerMarker) {
-            viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
-          } else {
-            viewerMarker.setLngLat(data.current);
+    searchInput.addEventListener('input', () => {
+      const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
+      db.ref('runners').once('value', snapshot => {
+        const all = snapshot.val();
+        if (!all) return;
+        for (let key in all) {
+          if (key.includes(query)) {
+            if (activeListener) activeListener.off();
+            const ref = db.ref(`runners/${key}`);
+            activeListener = ref;
+            ref.on('value', snap => {
+              const data = snap.val();
+              if (!data || !data.current) return;
+              if (!viewerMarker) {
+                viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
+              } else {
+                viewerMarker.setLngLat(data.current);
+              }
+              if (!map.getSource('run-path')) {
+                map.addSource('run-path', {
+                  type: 'geojson',
+                  data: { type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } }
+                });
+                map.addLayer({
+                  id: 'run-line',
+                  type: 'line',
+                  source: 'run-path',
+                  layout: { 'line-join': 'round', 'line-cap': 'round' },
+                  paint: { 'line-color': '#00FFFF', 'line-width': 4 }
+                });
+              } else {
+                map.getSource('run-path').setData({
+                  type: 'Feature',
+                  geometry: { type: 'LineString', coordinates: data.path || [] }
+                });
+              }
+              updateStatsDisplay(data.distance, data.pace, data.avgPace);
+              if (viewerFollowing) map.setCenter(data.current);
+            });
+            break;
           }
-
-          if (!map.getSource('run-path')) {
-            map.addSource('run-path', {
-              type: 'geojson',
-              data: { type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } }
-            });
-            map.addLayer({
-              id: 'run-line',
-              type: 'line',
-              source: 'run-path',
-              layout: { 'line-join': 'round', 'line-cap': 'round' },
-              paint: { 'line-color': '#00FFFF', 'line-width': 4 }
-            });
-          } else {
-            map.getSource('run-path').setData({
-              type: 'Feature',
-              geometry: { type: 'LineString', coordinates: data.path || [] }
-            });
-          }
-
-          updateStatsDisplay(data.distance, data.pace, data.avgPace);
-          map.setCenter(data.current);
-        });
-
-        break; // only connect to the first matching runner
-      }
-    }
-  });
-});
+        }
+      });
+    });
 
     map.on('load', () => setMode('runner'));
   </script>
 </body>
 </html>
+

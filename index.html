@@ -106,7 +106,7 @@
       positionOptions: { enableHighAccuracy: true },
       trackUserLocation: true,
       showAccuracyCircle: false,
-      showUserLocation: true
+      showUserLocation: false // hides blue dot
     });
     map.addControl(new maplibregl.NavigationControl());
     map.addControl(geoControl, 'bottom-right');
@@ -347,5 +347,3 @@
   </script>
 </body>
 </html>
-
-

@@ -102,38 +102,37 @@
       zoom: 13
     });
 
+    map.addControl(new maplibregl.NavigationControl());
+
     const geoControl = new maplibregl.GeolocateControl({
       positionOptions: { enableHighAccuracy: true },
       trackUserLocation: true,
-      showAccuracyCircle: false,
-      showUserLocation: true
+      showUserLocation: false  // We will handle location marker ourselves
     });
-    map.addControl(new maplibregl.NavigationControl());
     map.addControl(geoControl, 'bottom-right');
 
     let pathCoords = [];
     let watchId = null;
     let userMarker = null;
-    let startTime = null;
-    let lastPointTime = null;
-    let totalDistanceMeters = 0;
     let runnerName = null;
     let broadcastRef = null;
     let broadcasting = false;
+    let startTime = null;
+    let lastPointTime = null;
+    let totalDistanceMeters = 0;
+    let statsBar = document.getElementById('statsBar');
     let viewerMarker = null;
     let activeListener = null;
-
     let isFollowing = true;
     let viewerFollowing = true;
 
+    const runnerModeBtn = document.getElementById('runnerModeBtn');
+    const viewerModeBtn = document.getElementById('viewerModeBtn');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const broadcastBtn = document.getElementById('broadcastBtn');
     const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
-    const statsBar = document.getElementById('statsBar');
     const searchInput = document.getElementById('searchInput');
-    const runnerModeBtn = document.getElementById('runnerModeBtn');
-    const viewerModeBtn = document.getElementById('viewerModeBtn');
 
     runnerModeBtn.onclick = () => setMode('runner');
     viewerModeBtn.onclick = () => setMode('viewer');
@@ -215,6 +214,15 @@
       }
     }
 
+    function createCustomMarker() {
+      const el = document.createElement('img');
+      el.src = 'https://img.icons8.com/emoji/48/000000/person-running-emoji.png';
+      el.style.width = '32px';
+      el.style.height = '32px';
+      el.style.transform = 'translate(-50%, -50%)';
+      return el;
+    }
+
     function startTracking() {
       pathCoords = [];
       totalDistanceMeters = 0;
@@ -224,51 +232,49 @@
       stopBtn.disabled = false;
       statsBar.style.display = 'block';
 
-      watchId = navigator.geolocation.watchPosition(
-        (pos) => {
-          const lng = pos.coords.longitude;
-          const lat = pos.coords.latitude;
-          const now = Date.now();
-          const coord = [lng, lat];
+      watchId = navigator.geolocation.watchPosition((pos) => {
+        const lng = pos.coords.longitude;
+        const lat = pos.coords.latitude;
+        const now = Date.now();
+        const coord = [lng, lat];
 
-          if (!userMarker) {
-            userMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(coord).addTo(map);
-          } else {
-            userMarker.setLngLat(coord);
+        if (!userMarker) {
+          userMarker = new maplibregl.Marker({ element: createCustomMarker() }).setLngLat(coord).addTo(map);
+        } else {
+          userMarker.setLngLat(coord);
+        }
+        if (isFollowing) map.setCenter(coord);
+
+        if (pathCoords.length > 0) {
+          const prev = pathCoords[pathCoords.length - 1];
+          const timeDeltaMin = (now - lastPointTime) / 60000;
+          const segmentDist = haversineDistance(prev, coord);
+          const instPace = timeDeltaMin / metersToMiles(segmentDist);
+          totalDistanceMeters += segmentDist;
+          const totalTimeMin = (now - startTime) / 60000;
+          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+          updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: coord,
+              distance: metersToMiles(totalDistanceMeters),
+              pace: instPace,
+              avgPace: avgPace,
+              timestamp: now
+            });
           }
-          if (isFollowing) map.setCenter(coord);
+        } else {
+          startTime = now;
+        }
 
-          if (pathCoords.length > 0) {
-            const prev = pathCoords[pathCoords.length - 1];
-            const timeDeltaMin = (now - lastPointTime) / 60000;
-            const segmentDist = haversineDistance(prev, coord);
-            const instPace = timeDeltaMin / metersToMiles(segmentDist);
-            totalDistanceMeters += segmentDist;
-            const totalTimeMin = (now - startTime) / 60000;
-            const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-            updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
-            if (broadcasting && broadcastRef) {
-              broadcastRef.set({
-                name: runnerName,
-                path: pathCoords,
-                current: coord,
-                distance: metersToMiles(totalDistanceMeters),
-                pace: instPace,
-                avgPace: avgPace,
-                timestamp: now
-              });
-            }
-          } else {
-            startTime = now;
-          }
-
-          lastPointTime = now;
-          pathCoords.push(coord);
-          addOrUpdatePath();
-        },
-        err => console.error("Geolocation error:", err),
-        { enableHighAccuracy: true, maximumAge: 1000 }
-      );
+        lastPointTime = now;
+        pathCoords.push(coord);
+        addOrUpdatePath();
+      },
+      err => console.error("Geolocation error:", err),
+      { enableHighAccuracy: true, maximumAge: 1000 });
     }
 
     function stopTracking() {
@@ -312,7 +318,7 @@
               const data = snap.val();
               if (!data || !data.current) return;
               if (!viewerMarker) {
-                viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
+                viewerMarker = new maplibregl.Marker({ element: createCustomMarker() }).setLngLat(data.current).addTo(map);
               } else {
                 viewerMarker.setLngLat(data.current);
               }
@@ -347,5 +353,3 @@
   </script>
 </body>
 </html>
-
-

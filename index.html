@@ -62,21 +62,6 @@
       z-index: 999;
       display: none;
     }
-    #recenterBtn {
-      position: absolute;
-      bottom: 60px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 999;
-      padding: 10px 20px;
-      font-size: 14px;
-      background-color: #28a745;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      display: none;
-      cursor: pointer;
-    }
   </style>
 </head>
 <body>
@@ -95,7 +80,6 @@
   </div>
   <div id="searchBar"><input type="text" id="searchInput" placeholder="Search runner..."></div>
   <div id="statsBar"></div>
-  <button id="recenterBtn">Recenter</button>
 
   <script>
     const firebaseConfig = {
@@ -124,8 +108,8 @@
       showAccuracyCircle: false,
       showUserLocation: true
     });
-
     map.addControl(new maplibregl.NavigationControl());
+    map.addControl(geoControl, 'bottom-right');
 
     let pathCoords = [];
     let watchId = null;
@@ -150,7 +134,6 @@
     const searchInput = document.getElementById('searchInput');
     const runnerModeBtn = document.getElementById('runnerModeBtn');
     const viewerModeBtn = document.getElementById('viewerModeBtn');
-    const recenterBtn = document.getElementById('recenterBtn');
 
     runnerModeBtn.onclick = () => setMode('runner');
     viewerModeBtn.onclick = () => setMode('viewer');
@@ -158,42 +141,25 @@
     map.on('dragstart', () => {
       isFollowing = false;
       viewerFollowing = false;
-      recenterBtn.style.display = 'block';
     });
     map.on('zoomstart', () => {
       isFollowing = false;
       viewerFollowing = false;
-      recenterBtn.style.display = 'block';
     });
-
-    recenterBtn.onclick = () => {
+    geoControl.on('trackuserlocationstart', () => {
       isFollowing = true;
       viewerFollowing = true;
-      recenterBtn.style.display = 'none';
-    };
+    });
 
     function setMode(mode) {
-      if (mode === 'runner') {
-        if (!map._controls.includes(geoControl)) map.addControl(geoControl, 'bottom-right');
-        document.getElementById('controls').style.display = 'flex';
-        broadcastBtn.style.display = 'block';
-        stopBroadcastBtn.style.display = 'none';
-        document.getElementById('searchBar').style.display = 'none';
-        statsBar.style.display = 'none';
-        recenterBtn.style.display = 'none';
-        isFollowing = true;
-        map.resize();
-      } else {
-        if (map._controls.includes(geoControl)) map.removeControl(geoControl);
-        document.getElementById('controls').style.display = 'none';
-        broadcastBtn.style.display = 'none';
-        stopBroadcastBtn.style.display = 'none';
-        document.getElementById('searchBar').style.display = 'block';
-        statsBar.style.display = 'block';
-        recenterBtn.style.display = 'none';
-        viewerFollowing = true;
-        map.resize();
-      }
+      document.getElementById('controls').style.display = mode === 'runner' ? 'flex' : 'none';
+      broadcastBtn.style.display = mode === 'runner' ? 'block' : 'none';
+      stopBroadcastBtn.style.display = 'none';
+      document.getElementById('searchBar').style.display = mode === 'viewer' ? 'block' : 'none';
+      statsBar.style.display = mode === 'viewer' ? 'block' : 'none';
+      isFollowing = true;
+      viewerFollowing = true;
+      map.resize();
     }
 
     function metersToMiles(meters) {
@@ -232,10 +198,7 @@
       if (!map.getSource('run-path')) {
         map.addSource('run-path', {
           type: 'geojson',
-          data: {
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: pathCoords }
-          }
+          data: { type: 'Feature', geometry: { type: 'LineString', coordinates: pathCoords } }
         });
         map.addLayer({
           id: 'run-line',
@@ -259,7 +222,6 @@
       lastPointTime = null;
       startBtn.disabled = true;
       stopBtn.disabled = false;
-      map.removeControl(geoControl);
       statsBar.style.display = 'block';
 
       watchId = navigator.geolocation.watchPosition(
@@ -316,7 +278,6 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      map.addControl(geoControl, 'bottom-right');
     }
 
     startBtn.onclick = startTracking;
@@ -386,4 +347,5 @@
   </script>
 </body>
 </html>
+
 

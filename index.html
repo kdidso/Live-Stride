@@ -35,7 +35,7 @@
     #searchInput {
       padding: 10px;
       font-size: 16px;
-      width: 220px;
+      width: 250px;
       border-radius: 6px;
       border: 1px solid #ccc;
     }
@@ -62,8 +62,40 @@
       z-index: 999;
       display: none;
     }
-    datalist option {
-      color: black;
+    #viewerRecenterBtn {
+      position: absolute;
+      bottom: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 999;
+      padding: 10px 20px;
+      font-size: 14px;
+      background-color: #28a745;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      display: none;
+      cursor: pointer;
+    }
+    ul#suggestionsList {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      position: absolute;
+      top: 40px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 999;
+      background: white;
+      border: 1px solid #ccc;
+      width: 250px;
+    }
+    ul#suggestionsList li {
+      padding: 10px;
+      cursor: pointer;
+    }
+    ul#suggestionsList li:hover {
+      background-color: #f0f0f0;
     }
   </style>
 </head>
@@ -82,10 +114,11 @@
     <button id="stopBroadcastBtn" style="display:none">Stop Broadcast</button>
   </div>
   <div id="searchBar">
-    <input list="runnerSuggestions" id="searchInput" placeholder="Search runner...">
-    <datalist id="runnerSuggestions"></datalist>
+    <input type="text" id="searchInput" placeholder="Search runner...">
+    <ul id="suggestionsList"></ul>
   </div>
   <div id="statsBar"></div>
+  <button id="viewerRecenterBtn">Recenter</button>
 
   <script>
     const firebaseConfig = {
@@ -107,7 +140,6 @@
       center: [-113.6, 37.1],
       zoom: 13
     });
-
     const geoControl = new maplibregl.GeolocateControl({
       positionOptions: { enableHighAccuracy: true },
       trackUserLocation: true,
@@ -117,18 +149,9 @@
     map.addControl(new maplibregl.NavigationControl());
     map.addControl(geoControl, 'bottom-right');
 
-    let pathCoords = [];
-    let watchId = null;
-    let startTime = null;
-    let lastPointTime = null;
-    let totalDistanceMeters = 0;
-    let runnerName = null;
-    let broadcastRef = null;
-    let broadcasting = false;
-    let viewerMarker = null;
-    let activeListener = null;
-    let isFollowing = true;
-    let viewerFollowing = true;
+    let pathCoords = [], watchId = null, startTime = null, lastPointTime = null, totalDistanceMeters = 0;
+    let runnerName = null, broadcastRef = null, broadcasting = false, viewerMarker = null, activeListener = null;
+    let isFollowing = true, viewerFollowing = true, selectedRunner = null;
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
@@ -136,12 +159,14 @@
     const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
     const statsBar = document.getElementById('statsBar');
     const searchInput = document.getElementById('searchInput');
-    const suggestions = document.getElementById('runnerSuggestions');
+    const suggestionsList = document.getElementById('suggestionsList');
     const runnerModeBtn = document.getElementById('runnerModeBtn');
     const viewerModeBtn = document.getElementById('viewerModeBtn');
+    const viewerRecenterBtn = document.getElementById('viewerRecenterBtn');
 
     runnerModeBtn.onclick = () => setMode('runner');
     viewerModeBtn.onclick = () => setMode('viewer');
+    viewerRecenterBtn.onclick = () => viewerFollowing = true;
 
     map.on('dragstart', () => { isFollowing = false; viewerFollowing = false; });
     map.on('zoomstart', () => { isFollowing = false; viewerFollowing = false; });
@@ -153,6 +178,7 @@
       stopBroadcastBtn.style.display = 'none';
       document.getElementById('searchBar').style.display = mode === 'viewer' ? 'block' : 'none';
       statsBar.style.display = mode === 'viewer' ? 'block' : 'none';
+      viewerRecenterBtn.style.display = mode === 'viewer' ? 'block' : 'none';
       isFollowing = true;
       viewerFollowing = true;
       map.resize();
@@ -193,43 +219,38 @@
       stopBtn.disabled = false;
       statsBar.style.display = 'block';
 
-      watchId = navigator.geolocation.watchPosition(
-        (pos) => {
-          const coord = [pos.coords.longitude, pos.coords.latitude];
-          const now = Date.now();
-          if (isFollowing) map.setCenter(coord);
+      watchId = navigator.geolocation.watchPosition(pos => {
+        const coord = [pos.coords.longitude, pos.coords.latitude];
+        const now = Date.now();
+        if (isFollowing) map.setCenter(coord);
 
-          if (pathCoords.length > 0) {
-            const prev = pathCoords[pathCoords.length - 1];
-            const timeDeltaMin = (now - lastPointTime) / 60000;
-            const segmentDist = haversineDistance(prev, coord);
-            totalDistanceMeters += segmentDist;
-            const instPace = timeDeltaMin / metersToMiles(segmentDist);
-            const totalTimeMin = (now - startTime) / 60000;
-            const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-            updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
-            if (broadcasting && broadcastRef) {
-              broadcastRef.set({
-                name: runnerName,
-                path: pathCoords,
-                current: coord,
-                distance: metersToMiles(totalDistanceMeters),
-                pace: instPace,
-                avgPace: avgPace,
-                timestamp: now
-              });
-            }
-          } else {
-            startTime = now;
+        if (pathCoords.length > 0) {
+          const prev = pathCoords[pathCoords.length - 1];
+          const timeDeltaMin = (now - lastPointTime) / 60000;
+          const segmentDist = haversineDistance(prev, coord);
+          totalDistanceMeters += segmentDist;
+          const instPace = timeDeltaMin / metersToMiles(segmentDist);
+          const totalTimeMin = (now - startTime) / 60000;
+          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+          updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: coord,
+              distance: metersToMiles(totalDistanceMeters),
+              pace: instPace,
+              avgPace: avgPace,
+              timestamp: now
+            });
           }
-
-          lastPointTime = now;
-          pathCoords.push(coord);
-          addOrUpdatePath();
-        },
-        err => console.error("Geolocation error:", err),
-        { enableHighAccuracy: true, maximumAge: 1000 }
-      );
+        } else {
+          startTime = now;
+        }
+        lastPointTime = now;
+        pathCoords.push(coord);
+        addOrUpdatePath();
+      }, err => console.error("Geolocation error:", err), { enableHighAccuracy: true, maximumAge: 1000 });
     }
 
     function stopTracking() {
@@ -259,56 +280,65 @@
       broadcastBtn.style.display = 'block';
     };
 
-    function populateSuggestions(activeRunners) {
-      suggestions.innerHTML = '';
-      for (let key in activeRunners) {
-        const option = document.createElement('option');
-        option.value = activeRunners[key].name || key;
-        suggestions.appendChild(option);
-      }
-    }
-
     searchInput.addEventListener('input', () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
+      suggestionsList.innerHTML = '';
+      if (!query) return;
+
       db.ref('runners').once('value', snapshot => {
         const all = snapshot.val();
         if (!all) return;
-        populateSuggestions(all);
+
         for (let key in all) {
-          if (key.includes(query)) {
-            if (activeListener) activeListener.off();
-            const ref = db.ref(`runners/${key}`);
-            activeListener = ref;
-            viewerFollowing = true;
-            ref.on('value', snap => {
-              const data = snap.val();
-              if (!data || !data.current) return;
-              if (!viewerMarker) {
-                viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
-              } else {
-                viewerMarker.setLngLat(data.current);
-              }
-              if (!map.getSource('run-path')) {
-                map.addSource('run-path', {
-                  type: 'geojson',
-                  data: { type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } }
-                });
-                map.addLayer({
-                  id: 'run-line', type: 'line', source: 'run-path',
-                  layout: { 'line-join': 'round', 'line-cap': 'round' },
-                  paint: { 'line-color': '#00FFFF', 'line-width': 4 }
-                });
-              } else {
-                map.getSource('run-path').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } });
-              }
-              updateStatsDisplay(data.distance, data.pace, data.avgPace);
-              if (viewerFollowing) map.setCenter(data.current);
-            });
-            break;
+          const displayName = all[key].name || key;
+          if (displayName.toLowerCase().includes(query)) {
+            const li = document.createElement('li');
+            li.textContent = displayName;
+            li.onclick = () => {
+              searchInput.value = displayName;
+              viewerFollowing = true;
+              selectedRunner = key;
+              trackRunner(key);
+              suggestionsList.innerHTML = '';
+            };
+            suggestionsList.appendChild(li);
           }
         }
       });
     });
+
+    function trackRunner(key) {
+      if (activeListener) activeListener.off();
+      const ref = db.ref(`runners/${key}`);
+      activeListener = ref;
+
+      ref.on('value', snap => {
+        const data = snap.val();
+        if (!data || !data.current) return;
+        if (!viewerMarker) {
+          viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
+        } else {
+          viewerMarker.setLngLat(data.current);
+        }
+        if (!map.getSource('run-path')) {
+          map.addSource('run-path', {
+            type: 'geojson',
+            data: { type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } }
+          });
+          map.addLayer({
+            id: 'run-line', type: 'line', source: 'run-path',
+            layout: { 'line-join': 'round', 'line-cap': 'round' },
+            paint: { 'line-color': '#00FFFF', 'line-width': 4 }
+          });
+        } else {
+          map.getSource('run-path').setData({
+            type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] }
+          });
+        }
+        updateStatsDisplay(data.distance, data.pace, data.avgPace);
+        if (viewerFollowing) map.flyTo({ center: data.current, zoom: 16 });
+      });
+    }
 
     map.on('load', () => setMode('runner'));
   </script>

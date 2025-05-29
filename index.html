@@ -64,15 +64,15 @@
     }
     #recenterBtn {
       position: absolute;
-      bottom: 60px;
+      bottom: 10px;
       right: 10px;
       z-index: 999;
-      padding: 10px 20px;
-      font-size: 14px;
+      padding: 10px;
       background-color: #28a745;
-      color: white;
       border: none;
       border-radius: 6px;
+      color: white;
+      font-size: 14px;
       display: none;
       cursor: pointer;
     }
@@ -110,14 +110,13 @@
       <button id="stopBtn" disabled>Stop</button>
     </div>
     <button id="broadcastBtn" style="display:none">Broadcast</button>
-    <button id="stopBroadcastBtn" style="display:none">Stop Broadcast</button>
   </div>
   <div id="searchBar">
     <input type="text" id="searchInput" placeholder="Search runner...">
     <ul id="suggestionsList"></ul>
   </div>
   <div id="statsBar"></div>
-  <button id="recenterBtn" style="display:none">Recenter</button>
+  <button id="recenterBtn">Recenter</button>
 
   <script>
     const firebaseConfig = {
@@ -132,10 +131,9 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    const maptilerKey = 'Ii8JoWt1QkDL9pFlSQXC';
     const map = new maplibregl.Map({
       container: 'map',
-      style: `https://api.maptiler.com/maps/satellite/style.json?key=${maptilerKey}`,
+      style: `https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
       center: [-113.6, 37.1],
       zoom: 13
     });
@@ -150,12 +148,11 @@
 
     let pathCoords = [], watchId = null, startTime = null, lastPointTime = null, totalDistanceMeters = 0;
     let runnerName = null, broadcastRef = null, broadcasting = false, viewerMarker = null, activeListener = null;
-    let isFollowing = true, viewerFollowing = true, selectedRunner = null, lastRunnerCoord = null;
+    let isFollowing = true, viewerFollowing = true, selectedRunner = null;
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const broadcastBtn = document.getElementById('broadcastBtn');
-    const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
     const statsBar = document.getElementById('statsBar');
     const searchInput = document.getElementById('searchInput');
     const suggestionsList = document.getElementById('suggestionsList');
@@ -163,32 +160,28 @@
     const viewerModeBtn = document.getElementById('viewerModeBtn');
     const recenterBtn = document.getElementById('recenterBtn');
 
-    runnerModeBtn.onclick = () => setMode('runner');
-    viewerModeBtn.onclick = () => setMode('viewer');
-
-    recenterBtn.onclick = () => {
-      if (viewerMarker) {
-        const lngLat = viewerMarker.getLngLat();
-        map.flyTo({ center: [lngLat.lng, lngLat.lat], zoom: 16 });
-        viewerFollowing = true;
-      }
-    };
-
-    map.on('dragstart', () => { isFollowing = false; viewerFollowing = false; });
-    map.on('zoomstart', () => { isFollowing = false; viewerFollowing = false; });
-    geoControl.on('trackuserlocationstart', () => { isFollowing = true; viewerFollowing = true; });
-
     function setMode(mode) {
       document.getElementById('controls').style.display = mode === 'runner' ? 'flex' : 'none';
       broadcastBtn.style.display = mode === 'runner' ? 'block' : 'none';
-      stopBroadcastBtn.style.display = 'none';
       document.getElementById('searchBar').style.display = mode === 'viewer' ? 'block' : 'none';
       statsBar.style.display = mode === 'viewer' ? 'block' : 'none';
       recenterBtn.style.display = mode === 'viewer' ? 'block' : 'none';
-      isFollowing = true;
-      viewerFollowing = true;
+      isFollowing = viewerFollowing = true;
       map.resize();
     }
+
+    runnerModeBtn.onclick = () => setMode('runner');
+    viewerModeBtn.onclick = () => setMode('viewer');
+
+    map.on('dragstart', () => { isFollowing = false; viewerFollowing = false; });
+    map.on('zoomstart', () => { isFollowing = false; viewerFollowing = false; });
+
+    recenterBtn.onclick = () => {
+      if (viewerMarker) {
+        viewerFollowing = true;
+        map.flyTo({ center: viewerMarker.getLngLat(), zoom: 16 });
+      }
+    };
 
     function metersToMiles(m) { return m / 1609.34; }
     function haversineDistance(a, b) {
@@ -207,6 +200,7 @@
     function updateStatsDisplay(d, p, a) {
       statsBar.innerHTML = `Distance: ${d.toFixed(2)} mi &nbsp; | &nbsp; Pace: ${formatPace(p)} &nbsp; | &nbsp; Avg Pace: ${formatPace(a)}`;
     }
+
     function addOrUpdatePath() {
       if (!map.getSource('run-path')) {
         map.addSource('run-path', {
@@ -214,9 +208,7 @@
           data: { type: 'Feature', geometry: { type: 'LineString', coordinates: pathCoords } }
         });
         map.addLayer({
-          id: 'run-line',
-          type: 'line',
-          source: 'run-path',
+          id: 'run-line', type: 'line', source: 'run-path',
           layout: { 'line-join': 'round', 'line-cap': 'round' },
           paint: { 'line-color': '#00FFFF', 'line-width': 4 }
         });
@@ -277,6 +269,10 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
+      if (broadcastRef) {
+        setTimeout(() => broadcastRef.remove(), 30 * 60 * 1000);
+        broadcasting = false;
+      }
     }
 
     startBtn.onclick = startTracking;
@@ -287,25 +283,16 @@
       const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
       broadcastRef = db.ref(`runners/${safeName}`);
       broadcasting = true;
-      stopBroadcastBtn.style.display = 'block';
       broadcastBtn.style.display = 'none';
-    };
-    stopBroadcastBtn.onclick = () => {
-      if (broadcastRef) broadcastRef.remove();
-      broadcasting = false;
-      stopBroadcastBtn.style.display = 'none';
-      broadcastBtn.style.display = 'block';
     };
 
     searchInput.addEventListener('input', () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
       suggestionsList.innerHTML = '';
       if (!query) return;
-
       db.ref('runners').once('value', snapshot => {
         const all = snapshot.val();
         if (!all) return;
-
         for (let key in all) {
           const displayName = all[key].name || key;
           if (displayName.toLowerCase().includes(query)) {
@@ -328,11 +315,9 @@
       if (activeListener) activeListener.off();
       const ref = db.ref(`runners/${key}`);
       activeListener = ref;
-
       ref.on('value', snap => {
         const data = snap.val();
         if (!data || !data.current) return;
-        lastRunnerCoord = data.current;
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
         } else {

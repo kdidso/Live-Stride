@@ -19,10 +19,11 @@ snapshot = ref.get()
 if snapshot:
     removed = 0
     for key, data in snapshot.items():
-        stop_time = data.get("stopTime")
+        stop_time = data.get("path", {}).get("timestamp")
         if stop_time and stop_time < cutoff:
             ref.child(key).delete()
             removed += 1
     print(f"Removed {removed} old runner(s).")
 else:
     print("No runners found.")
+

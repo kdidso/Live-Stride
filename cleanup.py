@@ -2,7 +2,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 import time
 
-# Initialize Firebase with service account
+# Initialize Firebase
 cred = credentials.Certificate("serviceAccountKey.json")
 firebase_admin.initialize_app(cred, {
     "databaseURL": "https://livestride-default-rtdb.firebaseio.com"
@@ -18,18 +18,16 @@ removed = 0
 
 if snapshot:
     for key, data in snapshot.items():
-        # Get timestamp if path exists and contains at least one coordinate
         stop_time = None
-        path = data.get("path")
-        if isinstance(path, list) and path:
-            last_point = path[-1]
-            stop_time = last_point.get("timestamp")
-        elif isinstance(path, dict):
-            stop_time = path.get("timestamp")
+
+        # Safely access the timestamp
+        path_data = data.get("path")
+        if isinstance(path_data, dict):
+            stop_time = path_data.get("timestamp")
 
         if stop_time and stop_time < cutoff:
-            print(f"Deleting: {key} (timestamp: {stop_time})")
+            print(f"Deleting runner {key} (timestamp: {stop_time})")
             ref.child(key).delete()
             removed += 1
 
-print(f"Removed {removed} runner(s).")
+print(f"Finished. Removed {removed} old runner(s).")

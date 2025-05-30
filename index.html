@@ -287,19 +287,6 @@
     };
 
     searchInput.addEventListener('input', () => {
-
-      // Cleanup any entries older than 30 minutes
-      const now = Date.now();
-      const cutoff = now - (30 * 60 * 1000);
-      for (let key in all) {
-        const data = all[key];
-        const timestamp = data?.timestamp;
-        if (timestamp && timestamp < cutoff) {
-          db.ref(`runners/${key}`).remove();
-          delete all[key]; // prevent deleted from being suggested
-        }
-      }
-
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
       suggestionsList.innerHTML = '';
       if (!query) return;

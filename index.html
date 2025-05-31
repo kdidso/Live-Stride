@@ -278,13 +278,18 @@
     startBtn.onclick = startTracking;
     stopBtn.onclick = stopTracking;
     broadcastBtn.onclick = () => {
-      runnerName = prompt("Enter your name:");
-      if (!runnerName) return;
-      const safeName = runnerName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-      broadcastRef = db.ref(`runners/${safeName}`);
-      broadcasting = true;
-      broadcastBtn.style.display = 'none';
-    };
+  let first = prompt("Enter your **first name**:")?.trim();
+  if (!first || first.length < 2) return alert("First name is required.");
+
+  let last = prompt("Enter your **last name**:")?.trim();
+  if (!last || last.length < 2) return alert("Last name is required.");
+
+  runnerName = `${first} ${last}`;
+  const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  broadcastRef = db.ref(`runners/${safeName}`);
+  broadcasting = true;
+  broadcastBtn.style.display = 'none';
+};
 
     searchInput.addEventListener('input', () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');

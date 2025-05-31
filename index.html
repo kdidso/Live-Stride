@@ -118,5 +118,96 @@
   </div>
   <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
+      authDomain: "livestride.firebaseapp.com",
+      databaseURL: "https://livestride-default-rtdb.firebaseio.com",
+      projectId: "livestride",
+      storageBucket: "livestride.firebasestorage.app",
+      messagingSenderId: "758438288478",
+      appId: "1:758438288478:web:def85c1fd5e08b6c2ee8cf"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: 'https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC',
+      center: [-113.6, 37.1],
+      zoom: 13
+    });
+
+    const geoControl = new maplibregl.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      showAccuracyCircle: false,
+      showUserLocation: true
+    });
+    map.addControl(new maplibregl.NavigationControl());
+    map.addControl(geoControl, 'bottom-right');
+
+    let pathCoords = [], watchId = null, startTime = null, lastPointTime = null, totalDistanceMeters = 0;
+    let runnerName = null, broadcastRef = null, broadcasting = false, viewerMarker = null, activeListener = null;
+    let isFollowing = true, viewerFollowing = true, selectedRunner = null;
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const broadcastBtn = document.getElementById('broadcastBtn');
+    const statsBar = document.getElementById('statsBar');
+    const searchInput = document.getElementById('searchInput');
+    const suggestionsList = document.getElementById('suggestionsList');
+    const runnerModeBtn = document.getElementById('runnerModeBtn');
+    const viewerModeBtn = document.getElementById('viewerModeBtn');
+    const recenterBtn = document.getElementById('recenterBtn');
+
+    function setMode(mode) {
+      document.getElementById('controls').style.display = mode === 'runner' ? 'flex' : 'none';
+      broadcastBtn.style.display = mode === 'runner' ? 'block' : 'none';
+      document.getElementById('searchBar').style.display = mode === 'viewer' ? 'block' : 'none';
+      statsBar.style.display = mode === 'viewer' ? 'block' : 'none';
+      recenterBtn.style.display = mode === 'viewer' ? 'block' : 'none';
+      isFollowing = viewerFollowing = true;
+      map.resize();
+    }
+
+    runnerModeBtn.onclick = () => setMode('runner');
+    viewerModeBtn.onclick = () => setMode('viewer');
+
+    map.on('dragstart', () => { isFollowing = false; viewerFollowing = false; });
+    map.on('zoomstart', () => { isFollowing = false; viewerFollowing = false; });
+
+    recenterBtn.onclick = () => {
+      if (viewerMarker) {
+        viewerFollowing = true;
+        map.flyTo({ center: viewerMarker.getLngLat(), zoom: 16 });
+      }
+    };
+
+    function metersToMiles(m) { return m / 1609.34; }
+    function formatPace(minsPerMile) {
+      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+      const m = Math.floor(minsPerMile);
+      const s = Math.round((minsPerMile - m) * 60);
+      return `${m}:${s.toString().padStart(2,'0')} /mi`;
+    }
+
+    function formatTime(ms) {
+      const totalSec = Math.floor(ms / 1000);
+      const h = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+      const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+      const s = String(totalSec % 60).padStart(2, '0');
+      return `${h}:${m}:${s}`;
+    }
+
+    function updateStatsDisplay(d, p, a, elapsedMs = null) {
+      const timeDisplay = elapsedMs !== null ? `<div style="margin-bottom: 4px;">Time: ${formatTime(elapsedMs)}</div>` : '';
+      statsBar.innerHTML = `
+        ${timeDisplay}
+        <div>Distance: ${d.toFixed(2)} mi &nbsp; | &nbsp; Pace: ${formatPace(p)} &nbsp; | &nbsp; Avg Pace: ${formatPace(a)}</div>
+      `;
+    }
+  </script>
 </body>
 </html>

@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html>
 <head>
@@ -134,11 +133,10 @@
 
     const map = new maplibregl.Map({
       container: 'map',
-      style: 'https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC',
+      style: `https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
       center: [-113.6, 37.1],
       zoom: 13
     });
-
     const geoControl = new maplibregl.GeolocateControl({
       positionOptions: { enableHighAccuracy: true },
       trackUserLocation: true,
@@ -148,9 +146,19 @@
     map.addControl(new maplibregl.NavigationControl());
     map.addControl(geoControl, 'bottom-right');
 
-    let pathCoords = [], watchId = null, startTime = null, lastPointTime = null, totalDistanceMeters = 0;
-    let runnerName = null, broadcastRef = null, broadcasting = false, viewerMarker = null, activeListener = null;
-    let isFollowing = true, viewerFollowing = true, selectedRunner = null;
+    let pathCoords = [], 
+        watchId = null, 
+        startTime = null, 
+        lastPointTime = null, 
+        totalDistanceMeters = 0;
+    let runnerName = null, 
+        broadcastRef = null, 
+        broadcasting = false, 
+        viewerMarker = null, 
+        activeListener = null;
+    let isFollowing = true, 
+        viewerFollowing = true, 
+        selectedRunner = null;
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
@@ -189,18 +197,37 @@
     function haversineDistance(a, b) {
       const toRad = x => x * Math.PI / 180;
       const R = 6371000, lat1 = toRad(a[1]), lat2 = toRad(b[1]);
-      const dLat = toRad(b[1]-a[1]), dLng = toRad(b[0]-a[0]);
-      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
-      return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1-h));
+      const dLat = toRad(b[1] - a[1]), dLng = toRad(b[0] - a[0]);
+      const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
     }
+    function formatTime(ms) {
+      const totalSec = Math.floor(ms / 1000);
+      const h = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+      const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+      const s = String(totalSec % 60).padStart(2, '0');
+      return `${h}:${m}:${s}`;
+    }
+
+    let timeIntervalId = null;
     function formatPace(minsPerMile) {
       if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
       const m = Math.floor(minsPerMile);
       const s = Math.round((minsPerMile - m) * 60);
-      return `${m}:${s.toString().padStart(2,'0')} /mi`;
+      return `${m}:${s.toString().padStart(2, '0')} /mi`;
     }
-    function updateStatsDisplay(d, p, a) {
-      statsBar.innerHTML = `Distance: ${d.toFixed(2)} mi &nbsp; | &nbsp; Pace: ${formatPace(p)} &nbsp; | &nbsp; Avg Pace: ${formatPace(a)}`;
+    function updateStatsDisplay(d, p, a, elapsedMs = null) {
+      const timeDisplay = elapsedMs !== null 
+        ? `<div style="margin-bottom: 4px;">Time: ${formatTime(elapsedMs)}</div>` 
+        : '';
+      statsBar.innerHTML = `
+        ${timeDisplay}
+        <div>
+          Distance: ${d.toFixed(2)} mi &nbsp; | &nbsp;
+          Pace: ${formatPace(p)} &nbsp; | &nbsp;
+          Avg Pace: ${formatPace(a)}
+        </div>
+      `;
     }
 
     function addOrUpdatePath() {
@@ -210,13 +237,16 @@
           data: { type: 'Feature', geometry: { type: 'LineString', coordinates: pathCoords } }
         });
         map.addLayer({
-          id: 'run-line', type: 'line', source: 'run-path',
+          id: 'run-line',
+          type: 'line',
+          source: 'run-path',
           layout: { 'line-join': 'round', 'line-cap': 'round' },
           paint: { 'line-color': '#00FFFF', 'line-width': 4 }
         });
       } else {
         map.getSource('run-path').setData({
-          type: 'Feature', geometry: { type: 'LineString', coordinates: pathCoords }
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: pathCoords }
         });
       }
     }
@@ -243,7 +273,14 @@
           const instPace = timeDeltaMin / metersToMiles(segmentDist);
           const totalTimeMin = (now - startTime) / 60000;
           const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-          updateStatsDisplay(metersToMiles(totalDistanceMeters), instPace, avgPace);
+          const totalTimeMs = now - startTime;
+          updateStatsDisplay(
+            metersToMiles(totalDistanceMeters),
+            instPace,
+            avgPace,
+            totalTimeMs
+          );
+
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
               name: runnerName,
@@ -258,10 +295,14 @@
         } else {
           startTime = now;
         }
+
         lastPointTime = now;
         pathCoords.push(coord);
         addOrUpdatePath();
-      }, err => console.error("Geolocation error:", err), { enableHighAccuracy: true, maximumAge: 1000 });
+      }, err => console.error("Geolocation error:", err), {
+        enableHighAccuracy: true,
+        maximumAge: 1000
+      });
     }
 
     function stopTracking() {
@@ -271,6 +312,8 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
+      updateStatsDisplay(0, 0, 0, 0);
+
       if (broadcastRef) {
         setTimeout(() => broadcastRef.remove(), 30 * 60 * 1000);
         broadcasting = false;
@@ -280,18 +323,18 @@
     startBtn.onclick = startTracking;
     stopBtn.onclick = stopTracking;
     broadcastBtn.onclick = () => {
-  let first = prompt("Enter your **first name**:")?.trim();
-  if (!first || first.length < 2) return alert("First name is required.");
+      let first = prompt("Enter your **first name**:")?.trim();
+      if (!first || first.length < 2) return alert("First name is required.");
 
-  let last = prompt("Enter your **last name**:")?.trim();
-  if (!last || last.length < 2) return alert("Last name is required.");
+      let last = prompt("Enter your **last name**:")?.trim();
+      if (!last || last.length < 2) return alert("Last name is required.");
 
-  runnerName = `${first} ${last}`;
-  const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, '-');
-  broadcastRef = db.ref(`runners/${safeName}`);
-  broadcasting = true;
-  broadcastBtn.style.display = 'none';
-};
+      runnerName = `${first} ${last}`;
+      const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      broadcastRef = db.ref(`runners/${safeName}`);
+      broadcasting = true;
+      broadcastBtn.style.display = 'none';
+    };
 
     searchInput.addEventListener('input', () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -326,7 +369,9 @@
         const data = snap.val();
         if (!data || !data.current) return;
         if (!viewerMarker) {
-          viewerMarker = new maplibregl.Marker({ color: 'red' }).setLngLat(data.current).addTo(map);
+          viewerMarker = new maplibregl.Marker({ color: 'red' })
+            .setLngLat(data.current)
+            .addTo(map);
         } else {
           viewerMarker.setLngLat(data.current);
         }
@@ -336,16 +381,20 @@
             data: { type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } }
           });
           map.addLayer({
-            id: 'run-line', type: 'line', source: 'run-path',
+            id: 'run-line',
+            type: 'line',
+            source: 'run-path',
             layout: { 'line-join': 'round', 'line-cap': 'round' },
             paint: { 'line-color': '#00FFFF', 'line-width': 4 }
           });
         } else {
           map.getSource('run-path').setData({
-            type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] }
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: data.path || [] }
           });
         }
-        updateStatsDisplay(data.distance, data.pace, data.avgPace);
+        const elapsed = data.timestamp ? Date.now() - data.timestamp : 0;
+        updateStatsDisplay(data.distance, data.pace, data.avgPace, elapsed);
         if (viewerFollowing) map.flyTo({ center: data.current, zoom: 16 });
       });
     }
@@ -354,4 +403,3 @@
   </script>
 </body>
 </html>
-

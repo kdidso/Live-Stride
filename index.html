@@ -187,11 +187,9 @@
 
     // → Function to add (or re-add) controls after each style load
     function addControls() {
-      // If controls already exist on the map, remove them first
       if (navControl) map.removeControl(navControl);
       if (geoControl) map.removeControl(geoControl);
 
-      // Create fresh controls
       navControl = new maplibregl.NavigationControl();
       geoControl = new maplibregl.GeolocateControl({
         positionOptions: { enableHighAccuracy: true },
@@ -200,16 +198,13 @@
         showUserLocation: true
       });
 
-      // Add to map
       map.addControl(navControl, 'top-right');
       map.addControl(geoControl, 'bottom-right');
     }
-
-    // → Add controls on initial style load and on every subsequent change
     map.on('style.load', addControls);
 
     // → State variables for tracking
-    let pathCoords = [];
+    let pathCoords = [];            // Now holds objects with full point data
     let watchId = null;
     let startTime = null;
     let lastPointTime = null;
@@ -335,10 +330,16 @@
 
     // → Draw or update the runner’s path on the map
     function addOrUpdatePath() {
+      // Build an array of [lon, lat] pairs from pathCoords objects
+      const coordArray = pathCoords.map(pt => [pt.lon, pt.lat]);
+
       if (!map.getSource('run-path')) {
         map.addSource('run-path', {
           type: 'geojson',
-          data: { type: 'Feature', geometry: { type: 'LineString', coordinates: pathCoords } }
+          data: {
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: coordArray }
+          }
         });
         map.addLayer({
           id: 'run-line',
@@ -350,7 +351,7 @@
       } else {
         map.getSource('run-path').setData({
           type: 'Feature',
-          geometry: { type: 'LineString', coordinates: pathCoords }
+          geometry: { type: 'LineString', coordinates: coordArray }
         });
       }
     }
@@ -370,27 +371,40 @@
         const now = Date.now();
         if (isFollowing) map.setCenter(coord);
 
-        // Fetch elevation and convert to feet
+        // Fetch elevation (meters) and convert to feet
         let elevationFt = null;
         const [lon, lat] = coord;
         const elevMeters = await fetchElevation(lat, lon);
         if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
         if (pathCoords.length > 0) {
-          const prev = pathCoords[pathCoords.length - 1];
+          // Previous point object
+          const prevPoint = pathCoords[pathCoords.length - 1];
+          const prevCoord = [prevPoint.lon, prevPoint.lat];
+
+          // Time delta in minutes
           const timeDeltaMin = (now - lastPointTime) / 60000;
-          const segmentDist = haversineDistance(prev, coord);
+          // Distance from previous coordinate
+          const segmentDist = haversineDistance(prevCoord, coord);
           totalDistanceMeters += segmentDist;
+
+          // Instantaneous pace (min/mi) at this segment
           const instPace = timeDeltaMin / metersToMiles(segmentDist);
+
+          // Total elapsed time in minutes from start
           const totalTimeMin = (now - startTime) / 60000;
+          // Average pace for entire run so far
           const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+
+          // Elapsed in ms
           const totalTimeMs = now - startTime;
 
+          // If broadcasting, push full structured path and stats to Firebase
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
               name: runnerName,
-              path: pathCoords,
-              current: coord,
+              path: pathCoords,            // now array of objects
+              current: coord,              // current as [lon, lat]
               distance: metersToMiles(totalDistanceMeters),
               pace: instPace,
               avgPace: avgPace,
@@ -399,6 +413,7 @@
             });
           }
 
+          // Update on-screen stats
           updateStatsDisplay(
             metersToMiles(totalDistanceMeters),
             instPace,
@@ -408,6 +423,7 @@
           );
 
         } else {
+          // First point of the run
           startTime = now;
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
@@ -424,8 +440,26 @@
           updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
 
+        // Update lastPointTime to now (for next iteration)
         lastPointTime = now;
-        pathCoords.push(coord);
+
+        // Build the full point object and push into pathCoords
+        const pointData = {
+          lat: coord[1],
+          lon: coord[0],
+          timestamp: now,
+          time: new Date(now).toISOString(), // ISO‐8601, for GPX export
+          elevation: elevMeters ?? null,
+          distance: metersToMiles(totalDistanceMeters),
+          instPace: (pathCoords.length > 0) ? ((now - lastPointTime)/60000 / metersToMiles(haversineDistance(
+            [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat],
+            coord
+          ))) : 0,
+          avgPace: (pathCoords.length > 0) ? ((now - startTime)/60000 / metersToMiles(totalDistanceMeters)) : 0
+        };
+        pathCoords.push(pointData);
+
+        // Redraw or update the polyline on the map
         addOrUpdatePath();
       },
       err => console.error("Geolocation error:", err),
@@ -466,7 +500,7 @@
         broadcastRef.set({
           name: runnerName,
           path: pathCoords,
-          current: pathCoords.length > 0 ? pathCoords[pathCoords.length - 1] : null,
+          current: pathCoords.length > 0 ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat] : null,
           distance: metersToMiles(totalDistanceMeters),
           pace: 0,
           avgPace: 0,
@@ -511,6 +545,7 @@
         const data = snap.val();
         if (!data || !data.current) return;
 
+        // Update or create the red marker for the runner’s “current” location
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: 'red' })
             .setLngLat(data.current)
@@ -519,10 +554,13 @@
           viewerMarker.setLngLat(data.current);
         }
 
+        // Build a GeoJSON LineString from data.path (array of objects)
+        const coords = (data.path || []).map(pt => [pt.lon, pt.lat]);
+
         if (!map.getSource('run-path')) {
           map.addSource('run-path', {
             type: 'geojson',
-            data: { type: 'Feature', geometry: { type: 'LineString', coordinates: data.path || [] } }
+            data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
           });
           map.addLayer({
             id: 'run-line',
@@ -534,14 +572,16 @@
         } else {
           map.getSource('run-path').setData({
             type: 'Feature',
-            geometry: { type: 'LineString', coordinates: data.path || [] }
+            geometry: { type: 'LineString', coordinates: coords }
           });
         }
 
+        // Compute elapsed time for stats display
         const elapsed = (data.startTime != null && data.timestamp != null)
           ? (data.timestamp - data.startTime)
           : 0;
 
+        // Get elevation for the “current” location (optional)
         let elevationFt = null;
         const [lon, lat] = data.current;
         const elevMeters = await fetchElevation(lat, lon);

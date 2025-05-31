@@ -52,7 +52,7 @@
     }
     button:disabled { background-color: #888; }
 
-    /* Stats bar now aligned left instead of centered */
+    /* Stats bar: left-aligned, with a two-column layout */
     #statsBar {
       position: absolute;
       bottom: 0;
@@ -61,12 +61,27 @@
       color: white;
       font-size: 14px;
       padding: 8px 12px;
-      text-align: left;        /* left-align text */
-      z-index: 999;
+      text-align: left;
       display: none;
+      z-index: 999;
+    }
+    /* Make the inside a flex container */
+    #statsBar .stats-container {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      width: 100%;
+    }
+    #statsBar .left-stack {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.2;
+    }
+    #statsBar .right-row {
+      /* keep Pace and Avg Pace on one line */
     }
 
-    /* Recenter button stays on right */
+    /* Recenter button */
     #recenterBtn {
       position: absolute;
       bottom: 37px;
@@ -123,7 +138,9 @@
     <ul id="suggestionsList"></ul>
   </div>
 
-  <div id="statsBar"></div>
+  <div id="statsBar">
+    <!-- Content populated by JavaScript -->
+  </div>
   <button id="recenterBtn">Recenter</button>
 
   <script>
@@ -237,21 +254,29 @@
       return `${m}:${s.toString().padStart(2, '0')} /mi`;
     }
 
-    // → Update stats bar: Time above Distance, left-aligned
-    function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs = null) {
-      const timeLine = elapsedMs !== null
-        ? `<div style="margin-bottom:4px;">Time: ${formatTime(elapsedMs)}</div>`
-        : `<div style="margin-bottom:4px;">Time: 00:00:00</div>`;
+    /* 
+      → Update stats bar: 
+         - “Time” over “Distance” on the left 
+         - “Pace | Avg Pace” on the same line, on the right 
+         - Once stopped, elapsed uses data.timestamp so it freezes 
+    */
+    function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs) {
+      // Create the HTML flex container
+      const elapsedHtml = (elapsedMs != null)
+        ? `Time: ${formatTime(elapsedMs)}`
+        : "Time: 00:00:00";
+
+      const distHtml = `Distance: ${distanceMi.toFixed(2)} mi`;
+      const paceHtml = `Pace: ${formatPace(instPace)} | Avg Pace: ${formatPace(avgPace)}`;
 
       statsBar.innerHTML = `
-        ${timeLine}
-        <div style="margin-bottom:4px;">
-          Distance: ${distanceMi.toFixed(2)} mi
-        </div>
-        <div>
-          Pace: ${formatPace(instPace)} &nbsp;|&nbsp; Avg Pace: ${formatPace(avgPace)}
-        </div>
-      `;
+        <div class="stats-container">
+          <div class="left-stack">
+            <div>${elapsedHtml}</div>
+            <div>${distHtml}</div>
+          </div>
+          <div class="right-row">${paceHtml}</div>
+        </div>`;
     }
 
     // → Draw or update the runner’s path on the map
@@ -340,7 +365,7 @@
               startTime: startTime
             });
           }
-          // Show zeroed stats until movement
+          // Show zeros initially
           updateStatsDisplay(0, 0, 0, 0);
         }
 
@@ -360,11 +385,12 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      // Do NOT clear statsBar here → runner sees final time/distance/pace until refresh
 
-      // If we're broadcasting, just stop sending updates; do NOT remove the DB record now
+      // Do NOT clear statsBar: runner sees final stats until refresh
+      // For the database, we now simply stop updating (no removal here)
       if (broadcasting && broadcastRef) {
         broadcasting = false;
+        // Last entry in Firebase already has final timestamp.
       }
     }
 
@@ -463,8 +489,10 @@
           });
         }
 
-        // Compute elapsed from data.startTime
-        const elapsed = data.startTime ? (Date.now() - data.startTime) : 0;
+        // Compute elapsed using data.timestamp so it freezes after stop
+        const elapsed = (data.startTime != null && data.timestamp != null)
+          ? (data.timestamp - data.startTime)
+          : 0;
 
         // Update viewer’s stats bar
         updateStatsDisplay(

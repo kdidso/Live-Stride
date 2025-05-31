@@ -52,7 +52,7 @@
     }
     button:disabled { background-color: #888; }
 
-    /* Stats bar: left-aligned, two-line layout with small divider */
+    /* Stats bar: left-aligned, two-line layout */
     #statsBar {
       position: absolute;
       bottom: 0;
@@ -64,6 +64,24 @@
       text-align: left;
       display: none;
       z-index: 999;
+    }
+
+    /* Layer toggle dropdown: positioned above stats bar on left */
+    #layerToggle {
+      position: absolute;
+      bottom: 60px;  /* high enough to clear the stats bar (which is ~50px tall) */
+      left: 10px;
+      z-index: 999;
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 14px;
+    }
+    #layerSelect {
+      font-size: 14px;
+      padding: 4px 6px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
     }
 
     /* Recenter button */
@@ -81,6 +99,7 @@
       display: none;
       cursor: pointer;
     }
+
     ul#suggestionsList {
       list-style: none;
       padding: 0;
@@ -123,6 +142,15 @@
     <ul id="suggestionsList"></ul>
   </div>
 
+  <!-- Map layer toggle dropdown -->
+  <div id="layerToggle">
+    <label for="layerSelect">Map:</label>
+    <select id="layerSelect">
+      <option value="satellite" selected>Satellite</option>
+      <option value="streets">Streets</option>
+    </select>
+  </div>
+
   <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
 
@@ -140,21 +168,31 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    // → Map setup
-    const map = new maplibregl.Map({
+    // → Initial style URLs
+    const STYLES = {
+      satellite: "https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC",
+      streets:   "https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC"
+    };
+
+    // → Create the map with default "satellite" style
+    let map = new maplibregl.Map({
       container: 'map',
-      style: `https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
+      style: STYLES.satellite,
       center: [-113.6, 37.1],
       zoom: 13
     });
-    const geoControl = new maplibregl.GeolocateControl({
-      positionOptions: { enableHighAccuracy: true },
-      trackUserLocation: true,
-      showAccuracyCircle: false,
-      showUserLocation: true
-    });
-    map.addControl(new maplibregl.NavigationControl());
-    map.addControl(geoControl, 'bottom-right');
+
+    // → Add navigation and geolocate controls after the style loads
+    function addControls() {
+      map.addControl(new maplibregl.NavigationControl(), 'top-right');
+      map.addControl(new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true },
+        trackUserLocation: true,
+        showAccuracyCircle: false,
+        showUserLocation: true
+      }), 'bottom-right');
+    }
+    map.on('style.load', addControls);
 
     // → State variables
     let pathCoords = [];
@@ -182,6 +220,7 @@
     const runnerModeBtn = document.getElementById('runnerModeBtn');
     const viewerModeBtn = document.getElementById('viewerModeBtn');
     const recenterBtn = document.getElementById('recenterBtn');
+    const layerSelect = document.getElementById('layerSelect');
 
     // → Switch between Runner / Viewer modes
     function setMode(mode) {
@@ -255,7 +294,7 @@
       → Update stats bar:
          - First line: Time: HH:MM:SS  |  Elev: XXX ft
          - Second line: Distance: X.XX mi  |  Pace: MM:SS /mi  |  Avg Pace: MM:SS /mi
-         - All left-aligned, with narrow vertical bars separating fields
+         - Left-aligned, narrow vertical bars between each field
     */
     function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationFt) {
       const timeHtml = `Time: ${formatTime(elapsedMs)}`;
@@ -317,7 +356,7 @@
         const now = Date.now();
         if (isFollowing) map.setCenter(coord);
 
-        // Fetch elevation immediately (in meters), convert to feet
+        // Fetch elevation (in meters) and convert to feet
         let elevationFt = null;
         const [lon, lat] = coord;
         const elevMeters = await fetchElevation(lat, lon);
@@ -348,7 +387,7 @@
             });
           }
 
-          // Show live stats to runner, including elevation
+          // Show live stats to runner (with elevation)
           updateStatsDisplay(
             metersToMiles(totalDistanceMeters),
             instPace,
@@ -372,7 +411,7 @@
               startTime: startTime
             });
           }
-          // Show zeros plus elevation
+          // Show zeros + elevation
           updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
 
@@ -392,10 +431,10 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      // Do not clear statsBar → runner sees final stats (including elevation)
+      // Do not clear statsBar → runner sees final stats (incl. elevation)
       if (broadcasting && broadcastRef) {
         broadcasting = false;
-        // Final timestamp already in Firebase
+        // Final timestamp already set
       }
     }
 
@@ -456,7 +495,7 @@
       });
     });
 
-    // → Viewer: follow a specific runner via Firebase, and fetch elevation from current coords
+    // → Viewer: follow a specific runner via Firebase, with elevation lookup
     function trackRunner(key) {
       if (activeListener) activeListener.off();
       const ref = db.ref(`runners/${key}`);
@@ -519,6 +558,14 @@
         }
       });
     }
+
+    // → Map layer toggle: change style URL and re-add controls
+    layerSelect.addEventListener('change', () => {
+      const chosen = layerSelect.value; // "satellite" or "streets"
+      const newStyle = STYLES[chosen] || STYLES.satellite;
+      map.setStyle(newStyle);
+      // Controls will re-add on 'style.load' event
+    });
 
     // → On map load, default to Runner mode
     map.on('load', () => setMode('runner'));

@@ -146,18 +146,18 @@
     map.addControl(new maplibregl.NavigationControl());
     map.addControl(geoControl, 'bottom-right');
 
-    let pathCoords = [], 
-        watchId = null, 
-        startTime = null, 
-        lastPointTime = null, 
+    let pathCoords = [],
+        watchId = null,
+        startTime = null,
+        lastPointTime = null,
         totalDistanceMeters = 0;
-    let runnerName = null, 
-        broadcastRef = null, 
-        broadcasting = false, 
-        viewerMarker = null, 
+    let runnerName = null,
+        broadcastRef = null,
+        broadcasting = false,
+        viewerMarker = null,
         activeListener = null;
-    let isFollowing = true, 
-        viewerFollowing = true, 
+    let isFollowing = true,
+        viewerFollowing = true,
         selectedRunner = null;
 
     const startBtn = document.getElementById('startBtn');
@@ -209,23 +209,25 @@
       return `${h}:${m}:${s}`;
     }
 
-    let timeIntervalId = null;
     function formatPace(minsPerMile) {
       if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
       const m = Math.floor(minsPerMile);
       const s = Math.round((minsPerMile - m) * 60);
       return `${m}:${s.toString().padStart(2, '0')} /mi`;
     }
-    function updateStatsDisplay(d, p, a, elapsedMs = null) {
-      const timeDisplay = elapsedMs !== null 
-        ? `<div style="margin-bottom: 4px;">Time: ${formatTime(elapsedMs)}</div>` 
-        : '';
+
+    function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs = null) {
+      // Now: Time above Distance, then Pace/Avg Pace on its own line
+      const timeLine = elapsedMs !== null
+        ? `<div style="margin-bottom: 4px;">Time: ${formatTime(elapsedMs)}</div>`
+        : '<div style="margin-bottom: 4px;">Time: 00:00:00</div>';
       statsBar.innerHTML = `
-        ${timeDisplay}
+        ${timeLine}
+        <div style="margin-bottom: 4px;">
+          Distance: ${distanceMi.toFixed(2)} mi
+        </div>
         <div>
-          Distance: ${d.toFixed(2)} mi &nbsp; | &nbsp;
-          Pace: ${formatPace(p)} &nbsp; | &nbsp;
-          Avg Pace: ${formatPace(a)}
+          Pace: ${formatPace(instPace)} &nbsp; | &nbsp; Avg Pace: ${formatPace(avgPace)}
         </div>
       `;
     }
@@ -274,13 +276,8 @@
           const totalTimeMin = (now - startTime) / 60000;
           const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
           const totalTimeMs = now - startTime;
-          updateStatsDisplay(
-            metersToMiles(totalDistanceMeters),
-            instPace,
-            avgPace,
-            totalTimeMs
-          );
 
+          // If broadcasting, push startTime every update so viewer can calculate total elapsed properly
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
               name: runnerName,
@@ -289,11 +286,35 @@
               distance: metersToMiles(totalDistanceMeters),
               pace: instPace,
               avgPace: avgPace,
-              timestamp: now
+              timestamp: now,
+              startTime: startTime
             });
           }
+
+          updateStatsDisplay(
+            metersToMiles(totalDistanceMeters),
+            instPace,
+            avgPace,
+            totalTimeMs
+          );
         } else {
+          // First point
           startTime = now;
+          if (broadcasting && broadcastRef) {
+            // Immediately write an initial broadcast with zero stats
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: coord,
+              distance: 0,
+              pace: 0,
+              avgPace: 0,
+              timestamp: now,
+              startTime: startTime
+            });
+          }
+          // Show 00:00:00, 0.00 mi etc.
+          updateStatsDisplay(0, 0, 0, 0);
         }
 
         lastPointTime = now;
@@ -312,9 +333,9 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      updateStatsDisplay(0, 0, 0, 0);
-
+      // Do NOT clear statsBar here. Keep the last displayed stats until page exit or refresh.
       if (broadcastRef) {
+        // Delay remove so viewer still sees final stats for 30 minutes, but runner will keep seeing local stats.
         setTimeout(() => broadcastRef.remove(), 30 * 60 * 1000);
         broadcasting = false;
       }
@@ -322,6 +343,7 @@
 
     startBtn.onclick = startTracking;
     stopBtn.onclick = stopTracking;
+
     broadcastBtn.onclick = () => {
       let first = prompt("Enter your **first name**:")?.trim();
       if (!first || first.length < 2) return alert("First name is required.");
@@ -334,6 +356,20 @@
       broadcastRef = db.ref(`runners/${safeName}`);
       broadcasting = true;
       broadcastBtn.style.display = 'none';
+
+      // If we already have a startTime (i.e., runner pressed Start first), immediately write a broadcast
+      if (startTime !== null) {
+        broadcastRef.set({
+          name: runnerName,
+          path: pathCoords,
+          current: pathCoords.length > 0 ? pathCoords[pathCoords.length - 1] : null,
+          distance: metersToMiles(totalDistanceMeters),
+          pace: 0,
+          avgPace: 0,
+          timestamp: Date.now(),
+          startTime: startTime
+        });
+      }
     };
 
     searchInput.addEventListener('input', () => {
@@ -368,6 +404,7 @@
       ref.on('value', snap => {
         const data = snap.val();
         if (!data || !data.current) return;
+        // Place or update viewer marker
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: 'red' })
             .setLngLat(data.current)
@@ -375,6 +412,7 @@
         } else {
           viewerMarker.setLngLat(data.current);
         }
+        // Draw or update path line for the viewer
         if (!map.getSource('run-path')) {
           map.addSource('run-path', {
             type: 'geojson',
@@ -393,9 +431,20 @@
             geometry: { type: 'LineString', coordinates: data.path || [] }
           });
         }
-        const elapsed = data.timestamp ? Date.now() - data.timestamp : 0;
-        updateStatsDisplay(data.distance, data.pace, data.avgPace, elapsed);
-        if (viewerFollowing) map.flyTo({ center: data.current, zoom: 16 });
+
+        // Compute elapsed using data.startTime (so it matches runner's “start” exactly)
+        const elapsed = data.startTime ? (Date.now() - data.startTime) : 0;
+
+        updateStatsDisplay(
+          data.distance || 0,
+          data.pace || 0,
+          data.avgPace || 0,
+          elapsed
+        );
+
+        if (viewerFollowing) {
+          map.flyTo({ center: data.current, zoom: 16 });
+        }
       });
     }
 

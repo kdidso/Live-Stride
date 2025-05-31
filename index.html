@@ -69,7 +69,7 @@
     /* Layer toggle dropdown: positioned above stats bar on left */
     #layerToggle {
       position: absolute;
-      bottom: 60px;  /* high enough to clear the stats bar (which is ~50px tall) */
+      bottom: 60px;  /* above stats bar */
       left: 10px;
       z-index: 999;
       background: rgba(255, 255, 255, 0.9);
@@ -168,13 +168,13 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    // → Initial style URLs
+    // → Style URLs for toggle
     const STYLES = {
       satellite: "https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC",
       streets:   "https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC"
     };
 
-    // → Create the map with default "satellite" style
+    // → Create map with default "satellite"
     let map = new maplibregl.Map({
       container: 'map',
       style: STYLES.satellite,
@@ -182,19 +182,33 @@
       zoom: 13
     });
 
-    // → Add navigation and geolocate controls after the style loads
+    // → Will hold references to controls so we can remove before re-adding
+    let navControl, geoControl;
+
+    // → Function to add (or re-add) controls after each style load
     function addControls() {
-      map.addControl(new maplibregl.NavigationControl(), 'top-right');
-      map.addControl(new maplibregl.GeolocateControl({
+      // If controls already exist on the map, remove them first
+      if (navControl) map.removeControl(navControl);
+      if (geoControl) map.removeControl(geoControl);
+
+      // Create fresh controls
+      navControl = new maplibregl.NavigationControl();
+      geoControl = new maplibregl.GeolocateControl({
         positionOptions: { enableHighAccuracy: true },
         trackUserLocation: true,
         showAccuracyCircle: false,
         showUserLocation: true
-      }), 'bottom-right');
+      });
+
+      // Add to map
+      map.addControl(navControl, 'top-right');
+      map.addControl(geoControl, 'bottom-right');
     }
+
+    // → Add controls on initial style load and on every subsequent change
     map.on('style.load', addControls);
 
-    // → State variables
+    // → State variables for tracking
     let pathCoords = [];
     let watchId = null;
     let startTime = null;
@@ -211,6 +225,7 @@
     let viewerFollowing = true;
     let selectedRunner = null;
 
+    // → DOM references
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const broadcastBtn = document.getElementById('broadcastBtn');
@@ -276,7 +291,7 @@
       return `${m}:${s.toString().padStart(2, '0')} /mi`;
     }
 
-    // → Fetch elevation (meters) from Open-Elevation API, return promise
+    // → Fetch elevation (meters) from Open-Elevation API
     async function fetchElevation(lat, lon) {
       try {
         const response = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${lat},${lon}`);
@@ -292,9 +307,8 @@
 
     /*
       → Update stats bar:
-         - First line: Time: HH:MM:SS  |  Elev: XXX ft
-         - Second line: Distance: X.XX mi  |  Pace: MM:SS /mi  |  Avg Pace: MM:SS /mi
-         - Left-aligned, narrow vertical bars between each field
+         - 1st line: Time: HH:MM:SS  |  Elev: XXX ft
+         - 2nd line: Distance: X.XX mi  |  Pace: MM:SS /mi  |  Avg Pace: MM:SS /mi
     */
     function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationFt) {
       const timeHtml = `Time: ${formatTime(elapsedMs)}`;
@@ -356,14 +370,13 @@
         const now = Date.now();
         if (isFollowing) map.setCenter(coord);
 
-        // Fetch elevation (in meters) and convert to feet
+        // Fetch elevation and convert to feet
         let elevationFt = null;
         const [lon, lat] = coord;
         const elevMeters = await fetchElevation(lat, lon);
         if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
         if (pathCoords.length > 0) {
-          // Calculate segment distance & pace
           const prev = pathCoords[pathCoords.length - 1];
           const timeDeltaMin = (now - lastPointTime) / 60000;
           const segmentDist = haversineDistance(prev, coord);
@@ -373,7 +386,6 @@
           const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
           const totalTimeMs = now - startTime;
 
-          // Broadcast for viewer if enabled
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
               name: runnerName,
@@ -387,7 +399,6 @@
             });
           }
 
-          // Show live stats to runner (with elevation)
           updateStatsDisplay(
             metersToMiles(totalDistanceMeters),
             instPace,
@@ -397,7 +408,6 @@
           );
 
         } else {
-          // First position fix → set startTime
           startTime = now;
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
@@ -411,7 +421,6 @@
               startTime: startTime
             });
           }
-          // Show zeros + elevation
           updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
 
@@ -431,11 +440,10 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      // Do not clear statsBar → runner sees final stats (incl. elevation)
       if (broadcasting && broadcastRef) {
         broadcasting = false;
-        // Final timestamp already set
       }
+      // Stats bar remains until page refresh
     }
 
     startBtn.onclick = startTracking;
@@ -454,7 +462,6 @@
       broadcasting = true;
       broadcastBtn.style.display = 'none';
 
-      // If startTime already set, push an initial broadcast immediately
       if (startTime !== null) {
         broadcastRef.set({
           name: runnerName,
@@ -504,7 +511,6 @@
         const data = snap.val();
         if (!data || !data.current) return;
 
-        // Place/update the red marker on the map
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: 'red' })
             .setLngLat(data.current)
@@ -513,7 +519,6 @@
           viewerMarker.setLngLat(data.current);
         }
 
-        // Draw/refresh the path line
         if (!map.getSource('run-path')) {
           map.addSource('run-path', {
             type: 'geojson',
@@ -533,18 +538,15 @@
           });
         }
 
-        // Compute elapsed so that once stopped, it freezes at data.timestamp
         const elapsed = (data.startTime != null && data.timestamp != null)
           ? (data.timestamp - data.startTime)
           : 0;
 
-        // Fetch elevation for viewer’s current coordinate
         let elevationFt = null;
         const [lon, lat] = data.current;
         const elevMeters = await fetchElevation(lat, lon);
         if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
-        // Update viewer’s stats bar with frozen or live data
         updateStatsDisplay(
           data.distance || 0,
           data.pace || 0,
@@ -564,7 +566,7 @@
       const chosen = layerSelect.value; // "satellite" or "streets"
       const newStyle = STYLES[chosen] || STYLES.satellite;
       map.setStyle(newStyle);
-      // Controls will re-add on 'style.load' event
+      // Controls will be re-added in 'style.load' handler
     });
 
     // → On map load, default to Runner mode

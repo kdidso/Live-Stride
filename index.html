@@ -52,7 +52,7 @@
     }
     button:disabled { background-color: #888; }
 
-    /* Stats bar: left-aligned, with a two-column layout */
+    /* Stats bar: left-aligned, simplified two-line layout */
     #statsBar {
       position: absolute;
       bottom: 0;
@@ -64,21 +64,6 @@
       text-align: left;
       display: none;
       z-index: 999;
-    }
-    /* Make the inside a flex container */
-    #statsBar .stats-container {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-      width: 100%;
-    }
-    #statsBar .left-stack {
-      display: flex;
-      flex-direction: column;
-      line-height: 1.2;
-    }
-    #statsBar .right-row {
-      /* keep Pace and Avg Pace on one line */
     }
 
     /* Recenter button */
@@ -138,9 +123,7 @@
     <ul id="suggestionsList"></ul>
   </div>
 
-  <div id="statsBar">
-    <!-- Content populated by JavaScript -->
-  </div>
+  <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
 
   <script>
@@ -254,28 +237,27 @@
       return `${m}:${s.toString().padStart(2, '0')} /mi`;
     }
 
-    /* 
-      → Update stats bar: 
-         - “Time” over “Distance” on the left 
-         - “Pace | Avg Pace” on the same line, on the right 
-         - Once stopped, elapsed uses data.timestamp so it freezes 
+    /*
+      → Update stats bar:
+         - “Time” on first line
+         - “Distance” and then a small vertical bar and “Pace | Avg Pace” on second line,
+           all left-aligned with minimal gap between distance and pace.
+         - Once stopped, use final timestamp so time freezes.
     */
     function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs) {
-      // Create the HTML flex container
       const elapsedHtml = (elapsedMs != null)
         ? `Time: ${formatTime(elapsedMs)}`
-        : "Time: 00:00:00";
+        : `Time: 00:00:00`;
 
       const distHtml = `Distance: ${distanceMi.toFixed(2)} mi`;
-      const paceHtml = `Pace: ${formatPace(instPace)} | Avg Pace: ${formatPace(avgPace)}`;
+      const paceHtml = `Pace: ${formatPace(instPace)} &nbsp;|&nbsp; Avg Pace: ${formatPace(avgPace)}`;
 
       statsBar.innerHTML = `
-        <div class="stats-container">
-          <div class="left-stack">
-            <div>${elapsedHtml}</div>
-            <div>${distHtml}</div>
-          </div>
-          <div class="right-row">${paceHtml}</div>
+        <div>${elapsedHtml}</div>
+        <div>
+          ${distHtml}
+          <span style="margin: 0 6px; color: white;">|</span>
+          ${paceHtml}
         </div>`;
     }
 

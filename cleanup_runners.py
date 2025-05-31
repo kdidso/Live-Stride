@@ -4,18 +4,18 @@ import time
 import json
 import os
 
-# === Load key from env ===
+# === Load Firebase key from GitHub secret ===
 firebase_key = os.environ['FIREBASE_KEY_JSON']
 key_data = json.loads(firebase_key)
 
-# === Initialize Firebase ===
+# === Initialize Firebase Admin SDK ===
 cred = credentials.Certificate(key_data)
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://livestride-default-rtdb.firebaseio.com'
 })
 
 def cleanup_old_runners():
-    now = int(time.time() * 1000)  # current time in ms
+    now = int(time.time() * 1000)  # Current time in milliseconds
     cutoff = now - 30 * 60 * 1000  # 30 minutes ago
 
     ref = db.reference('runners')

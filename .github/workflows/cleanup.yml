@@ -1,0 +1,27 @@
+name: Daily Firebase Runner Cleanup
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 6:00 AM UTC = 12:00 AM CST
+  workflow_dispatch:     # Allows manual triggering from the Actions tab
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install firebase-admin
+
+      - name: Run cleanup script
+        env:
+          FIREBASE_KEY_JSON: ${{ secrets.FIREBASE_KEY_JSON }}
+        run: python cleanup_runners.py

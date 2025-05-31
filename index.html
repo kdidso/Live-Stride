@@ -11,6 +11,7 @@
   <style>
     html, body { margin: 0; padding: 0; height: 100%; }
     #map { width: 100%; height: 100%; }
+
     #buttonWrapper {
       position: absolute;
       top: 10px;
@@ -50,6 +51,8 @@
       min-width: 140px;
     }
     button:disabled { background-color: #888; }
+
+    /* Stats bar now aligned left instead of centered */
     #statsBar {
       position: absolute;
       bottom: 0;
@@ -58,10 +61,12 @@
       color: white;
       font-size: 14px;
       padding: 8px 12px;
-      text-align: center;
+      text-align: left;        /* left-align text */
       z-index: 999;
       display: none;
     }
+
+    /* Recenter button stays on right */
     #recenterBtn {
       position: absolute;
       bottom: 37px;
@@ -100,6 +105,7 @@
 </head>
 <body>
   <div id="map"></div>
+
   <div id="buttonWrapper">
     <div id="modeToggle">
       <button id="runnerModeBtn">🏃‍♂️ Runner</button>
@@ -109,16 +115,19 @@
       <button id="startBtn">Start</button>
       <button id="stopBtn" disabled>Stop</button>
     </div>
-    <button id="broadcastBtn" style="display:none">Broadcast</button>
+    <button id="broadcastBtn" style="display: none;">Broadcast</button>
   </div>
+
   <div id="searchBar">
     <input type="text" id="searchInput" placeholder="Search runner...">
     <ul id="suggestionsList"></ul>
   </div>
+
   <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
 
   <script>
+    // → Firebase initialization
     const firebaseConfig = {
       apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
       authDomain: "livestride.firebaseapp.com",
@@ -131,6 +140,7 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
+    // → Map setup
     const map = new maplibregl.Map({
       container: 'map',
       style: `https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
@@ -146,19 +156,22 @@
     map.addControl(new maplibregl.NavigationControl());
     map.addControl(geoControl, 'bottom-right');
 
-    let pathCoords = [],
-        watchId = null,
-        startTime = null,
-        lastPointTime = null,
-        totalDistanceMeters = 0;
-    let runnerName = null,
-        broadcastRef = null,
-        broadcasting = false,
-        viewerMarker = null,
-        activeListener = null;
-    let isFollowing = true,
-        viewerFollowing = true,
-        selectedRunner = null;
+    // → State variables
+    let pathCoords = [];
+    let watchId = null;
+    let startTime = null;
+    let lastPointTime = null;
+    let totalDistanceMeters = 0;
+
+    let runnerName = null;
+    let broadcastRef = null;
+    let broadcasting = false;
+    let viewerMarker = null;
+    let activeListener = null;
+
+    let isFollowing = true;
+    let viewerFollowing = true;
+    let selectedRunner = null;
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
@@ -170,22 +183,24 @@
     const viewerModeBtn = document.getElementById('viewerModeBtn');
     const recenterBtn = document.getElementById('recenterBtn');
 
+    // → Switch between Runner / Viewer modes
     function setMode(mode) {
-      document.getElementById('controls').style.display = mode === 'runner' ? 'flex' : 'none';
-      broadcastBtn.style.display = mode === 'runner' ? 'block' : 'none';
-      document.getElementById('searchBar').style.display = mode === 'viewer' ? 'block' : 'none';
-      statsBar.style.display = mode === 'viewer' ? 'block' : 'none';
-      recenterBtn.style.display = mode === 'viewer' ? 'block' : 'none';
+      document.getElementById('controls').style.display = (mode === 'runner') ? 'flex' : 'none';
+      broadcastBtn.style.display = (mode === 'runner') ? 'block' : 'none';
+      document.getElementById('searchBar').style.display = (mode === 'viewer') ? 'block' : 'none';
+      statsBar.style.display = (mode === 'viewer') ? 'block' : 'none';
+      recenterBtn.style.display = (mode === 'viewer') ? 'block' : 'none';
       isFollowing = viewerFollowing = true;
       map.resize();
     }
-
     runnerModeBtn.onclick = () => setMode('runner');
     viewerModeBtn.onclick = () => setMode('viewer');
 
+    // → Stop following if user interacts with map
     map.on('dragstart', () => { isFollowing = false; viewerFollowing = false; });
     map.on('zoomstart', () => { isFollowing = false; viewerFollowing = false; });
 
+    // → Recenter button for viewer
     recenterBtn.onclick = () => {
       if (viewerMarker) {
         viewerFollowing = true;
@@ -193,14 +208,19 @@
       }
     };
 
+    // → Utility: meters ↔ miles
     function metersToMiles(m) { return m / 1609.34; }
     function haversineDistance(a, b) {
       const toRad = x => x * Math.PI / 180;
-      const R = 6371000, lat1 = toRad(a[1]), lat2 = toRad(b[1]);
+      const R = 6371000;
+      const lat1 = toRad(a[1]), lat2 = toRad(b[1]);
       const dLat = toRad(b[1] - a[1]), dLng = toRad(b[0] - a[0]);
-      const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+      const h = Math.sin(dLat / 2) ** 2 +
+                Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
       return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
     }
+
+    // → Format elapsed milliseconds as HH:MM:SS
     function formatTime(ms) {
       const totalSec = Math.floor(ms / 1000);
       const h = String(Math.floor(totalSec / 3600)).padStart(2, '0');
@@ -209,6 +229,7 @@
       return `${h}:${m}:${s}`;
     }
 
+    // → Format pace as MM:SS /mi
     function formatPace(minsPerMile) {
       if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
       const m = Math.floor(minsPerMile);
@@ -216,22 +237,24 @@
       return `${m}:${s.toString().padStart(2, '0')} /mi`;
     }
 
+    // → Update stats bar: Time above Distance, left-aligned
     function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs = null) {
-      // Now: Time above Distance, then Pace/Avg Pace on its own line
       const timeLine = elapsedMs !== null
-        ? `<div style="margin-bottom: 4px;">Time: ${formatTime(elapsedMs)}</div>`
-        : '<div style="margin-bottom: 4px;">Time: 00:00:00</div>';
+        ? `<div style="margin-bottom:4px;">Time: ${formatTime(elapsedMs)}</div>`
+        : `<div style="margin-bottom:4px;">Time: 00:00:00</div>`;
+
       statsBar.innerHTML = `
         ${timeLine}
-        <div style="margin-bottom: 4px;">
+        <div style="margin-bottom:4px;">
           Distance: ${distanceMi.toFixed(2)} mi
         </div>
         <div>
-          Pace: ${formatPace(instPace)} &nbsp; | &nbsp; Avg Pace: ${formatPace(avgPace)}
+          Pace: ${formatPace(instPace)} &nbsp;|&nbsp; Avg Pace: ${formatPace(avgPace)}
         </div>
       `;
     }
 
+    // → Draw or update the runner’s path on the map
     function addOrUpdatePath() {
       if (!map.getSource('run-path')) {
         map.addSource('run-path', {
@@ -253,6 +276,7 @@
       }
     }
 
+    // → Start tracking the runner’s position
     function startTracking() {
       pathCoords = [];
       totalDistanceMeters = 0;
@@ -268,6 +292,7 @@
         if (isFollowing) map.setCenter(coord);
 
         if (pathCoords.length > 0) {
+          // Calculate segment distance & pace
           const prev = pathCoords[pathCoords.length - 1];
           const timeDeltaMin = (now - lastPointTime) / 60000;
           const segmentDist = haversineDistance(prev, coord);
@@ -277,7 +302,7 @@
           const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
           const totalTimeMs = now - startTime;
 
-          // If broadcasting, push startTime every update so viewer can calculate total elapsed properly
+          // Broadcast for viewer if enabled
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
               name: runnerName,
@@ -291,17 +316,19 @@
             });
           }
 
+          // Show live stats to runner
           updateStatsDisplay(
             metersToMiles(totalDistanceMeters),
             instPace,
             avgPace,
             totalTimeMs
           );
+
         } else {
-          // First point
+          // First point → set startTime
           startTime = now;
+
           if (broadcasting && broadcastRef) {
-            // Immediately write an initial broadcast with zero stats
             broadcastRef.set({
               name: runnerName,
               path: pathCoords,
@@ -313,19 +340,19 @@
               startTime: startTime
             });
           }
-          // Show 00:00:00, 0.00 mi etc.
+          // Show zeroed stats until movement
           updateStatsDisplay(0, 0, 0, 0);
         }
 
         lastPointTime = now;
         pathCoords.push(coord);
         addOrUpdatePath();
-      }, err => console.error("Geolocation error:", err), {
-        enableHighAccuracy: true,
-        maximumAge: 1000
-      });
+      },
+      err => console.error("Geolocation error:", err),
+      { enableHighAccuracy: true, maximumAge: 1000 });
     }
 
+    // → Stop tracking: keep the last stats visible for the runner
     function stopTracking() {
       if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
@@ -333,10 +360,10 @@
       }
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      // Do NOT clear statsBar here. Keep the last displayed stats until page exit or refresh.
-      if (broadcastRef) {
-        // Delay remove so viewer still sees final stats for 30 minutes, but runner will keep seeing local stats.
-        setTimeout(() => broadcastRef.remove(), 30 * 60 * 1000);
+      // Do NOT clear statsBar here → runner sees final time/distance/pace until refresh
+
+      // If we're broadcasting, just stop sending updates; do NOT remove the DB record now
+      if (broadcasting && broadcastRef) {
         broadcasting = false;
       }
     }
@@ -344,10 +371,10 @@
     startBtn.onclick = startTracking;
     stopBtn.onclick = stopTracking;
 
+    // → Broadcast runner’s data into Firebase
     broadcastBtn.onclick = () => {
       let first = prompt("Enter your **first name**:")?.trim();
       if (!first || first.length < 2) return alert("First name is required.");
-
       let last = prompt("Enter your **last name**:")?.trim();
       if (!last || last.length < 2) return alert("Last name is required.");
 
@@ -357,7 +384,7 @@
       broadcasting = true;
       broadcastBtn.style.display = 'none';
 
-      // If we already have a startTime (i.e., runner pressed Start first), immediately write a broadcast
+      // If startTime already set, push an initial broadcast immediately
       if (startTime !== null) {
         broadcastRef.set({
           name: runnerName,
@@ -372,6 +399,7 @@
       }
     };
 
+    // → Search/filter runners (viewer side)
     searchInput.addEventListener('input', () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
       suggestionsList.innerHTML = '';
@@ -397,6 +425,7 @@
       });
     });
 
+    // → Viewer: follow a specific runner via Firebase
     function trackRunner(key) {
       if (activeListener) activeListener.off();
       const ref = db.ref(`runners/${key}`);
@@ -404,7 +433,8 @@
       ref.on('value', snap => {
         const data = snap.val();
         if (!data || !data.current) return;
-        // Place or update viewer marker
+
+        // Place/update the red marker on the map
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: 'red' })
             .setLngLat(data.current)
@@ -412,7 +442,8 @@
         } else {
           viewerMarker.setLngLat(data.current);
         }
-        // Draw or update path line for the viewer
+
+        // Draw/refresh the path line
         if (!map.getSource('run-path')) {
           map.addSource('run-path', {
             type: 'geojson',
@@ -432,9 +463,10 @@
           });
         }
 
-        // Compute elapsed using data.startTime (so it matches runner's “start” exactly)
+        // Compute elapsed from data.startTime
         const elapsed = data.startTime ? (Date.now() - data.startTime) : 0;
 
+        // Update viewer’s stats bar
         updateStatsDisplay(
           data.distance || 0,
           data.pace || 0,
@@ -448,6 +480,7 @@
       });
     }
 
+    // → On map load, default to Runner mode
     map.on('load', () => setMode('runner'));
   </script>
 </body>

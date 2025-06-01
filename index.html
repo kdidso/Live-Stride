@@ -4,10 +4,50 @@
   <meta charset="utf-8" />
   <title>LiveStride – Satellite Tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!--────────────────────────────────────────────────────────────────
+    ─── PERMISSION BOOTSTRAP ─────────────────────────────────────────────
+    We add this small snippet BEFORE everything else in <head> so that:
+     • In Android (Capacitor) we immediately request location+background permissions.
+     • In a normal browser, window.Capacitor is undefined → skip.
+  ────────────────────────────────────────────────────────────────────-->
+  <script type="module">
+    // Only run if Capacitor is present (i.e. inside your Android APK)
+    import { Capacitor } from 'https://cdn.jsdelivr.net/npm/@capacitor/core/+esm';
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      // Check for Capacitor and Android platform
+      if (window.Capacitor && Capacitor.getPlatform() === 'android') {
+        try {
+          // Import the Geolocation plugin from Capacitor
+          const { Geolocation } = await import('https://cdn.jsdelivr.net/npm/@capacitor/geolocation/+esm');
+
+          // Request BOTH foreground and background location permissions at once
+          const permResult = await Geolocation.requestPermissions({
+            permissions: ['location', 'locationBackground']
+          });
+          // permResult might look like: { location: 'granted', locationBackground: 'denied' } etc.
+          console.log('Permission result:', permResult);
+          if (permResult.location !== 'granted') {
+            alert('Foreground location permission is required for LiveStride to function.');
+          }
+          if (permResult.locationBackground !== 'granted') {
+            console.warn('Background location permission was denied. The app can still run in the foreground, but background tracking will be limited.');
+          }
+        } catch (e) {
+          console.error('Error requesting Capacitor geolocation permissions:', e);
+        }
+      }
+    });
+  </script>
+  <!--───────────────────────────────────────────────────────────────────────-->
+  
+  <!-- MapLibre & Firebase scripts (unchanged) -->
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
+
   <style>
     html, body { margin: 0; padding: 0; height: 100%; }
     #map { width: 100%; height: 100%; }

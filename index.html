@@ -6,23 +6,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <!--────────────────────────────────────────────────────────────────
-    ─── PERMISSION BOOTSTRAP ─────────────────────────────────────────────
-    • If running in Capacitor on Android, request both foreground + background
-      location at launch.
+    ─── PERMISSION & PLUGIN BOOTSTRAP ─────────────────────────────────
+    • If running in Capacitor on Android, import & expose the BackgroundGeolocation plugin.
+    • Then request both foreground + background location at launch via Capacitor Geolocation.
     • In a normal browser, `window.Capacitor` is undefined → skip entirely,
       so desktop/mobile‐browser users are unaffected.
   ────────────────────────────────────────────────────────────────────-->
   <script type="module">
     import { Capacitor } from 'https://cdn.jsdelivr.net/npm/@capacitor/core/+esm';
+    import { BackgroundGeolocation } from 'https://cdn.jsdelivr.net/npm/@capacitor-community/background-geolocation/+esm';
+
+    // Expose the plugin for startTracking/stopTracking to use:
+    window.BackgroundGeolocation = BackgroundGeolocation;
 
     document.addEventListener('DOMContentLoaded', async () => {
-      // Only run if Capacitor is present AND platform is Android
       if (window.Capacitor && Capacitor.getPlatform() === 'android') {
         try {
-          // Dynamically import the Geolocation plugin
+          // Dynamically import the Capacitor Geolocation plugin (for permission request)
           const { Geolocation } = await import('https://cdn.jsdelivr.net/npm/@capacitor/geolocation/+esm');
-
-          // Make sure our runtime knows about it for later
           window.CapGeolocation = Geolocation;
 
           // Request BOTH foreground (location) and background (locationBackground)
@@ -219,7 +220,8 @@
   <script>
     /*────────────────────────────────────────────────────────────────
       STEP A: Enable Cordova background‐mode (Android only)
-      We wait for 'deviceready' so that cordova.plugins.backgroundMode is available.
+      ----------------------------------------------------
+      Wait for 'deviceready' so that cordova.plugins.backgroundMode is available.
       Once enabled, the WebView will keep running even if the screen locks.
     ─────────────────────────────────────────────────────────────────*/
     document.addEventListener('deviceready', () => {
@@ -239,8 +241,6 @@
       }
     });
 
-
-
     /*────────────────────────────────────────────────────────────────
       STEP B: Firebase initialization (unchanged)
     ─────────────────────────────────────────────────────────────────*/
@@ -255,8 +255,6 @@
     };
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
-
-
 
     /*────────────────────────────────────────────────────────────────
       STEP C: MapLibre map + controls (unchanged)
@@ -293,14 +291,13 @@
     }
     map.on("style.load", addControls);
 
-
-
     /*────────────────────────────────────────────────────────────────
       STEP D: State + DOM variables
     ─────────────────────────────────────────────────────────────────*/
-    let pathCoords = [];         // Array of {lat, lon, timestamp, time, elevation, distance, instPace, avgPace}
-    let browserWatchId = null;   // ID returned by navigator.geolocation.watchPosition()
-    let pluginWatchId = null;    // ID returned by Capacitor Geolocation.watchPosition()
+    let pathCoords = [];           // Array of {lat, lon, timestamp, time, elevation, distance, instPace, avgPace}
+    let browserWatchId = null;     // ID returned by navigator.geolocation.watchPosition()
+    let bgLocationSubscription = null; // Subscription returned by BackgroundGeolocation.addListener()
+    let usingBackgroundPlugin = false;
     let startTime = null;
     let lastPointTime = null;
     let totalDistanceMeters = 0;
@@ -328,8 +325,6 @@
     const viewerModeBtn   = document.getElementById("viewerModeBtn");
     const recenterBtn     = document.getElementById("recenterBtn");
     const layerSelect     = document.getElementById("layerSelect");
-
-
 
     /*────────────────────────────────────────────────────────────────
       STEP E: Mode‐switcher (Runner vs. Viewer)
@@ -365,8 +360,6 @@
       // Controls will be re‐added on 'style.load'
     });
 
-
-
     /*────────────────────────────────────────────────────────────────
       STEP F: Utility functions (Meters↔Miles, Haversine, Formatting)
     ─────────────────────────────────────────────────────────────────*/
@@ -392,16 +385,15 @@
     }
 
     function formatPace(minsPerMile) {
-  if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
-  let m = Math.floor(minsPerMile);
-  let s = Math.round((minsPerMile - m) * 60);
-  // If rounding pushes seconds to 60, roll over to the next minute
-  if (s === 60) {
-    m += 1;
-    s = 0;
-  }
-  return `${m}:${s.toString().padStart(2, "0")} /mi`;
-}
+      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+      let m = Math.floor(minsPerMile);
+      let s = Math.round((minsPerMile - m) * 60);
+      if (s === 60) {
+        m += 1;
+        s = 0;
+      }
+      return `${m}:${s.toString().padStart(2, "0")} /mi`;
+    }
 
     async function fetchElevation(lat, lon) {
       try {
@@ -417,8 +409,6 @@
       }
       return null;
     }
-
-
 
     /*────────────────────────────────────────────────────────────────
       STEP G: Update Stats Display
@@ -447,8 +437,6 @@
           ${avgHtml}
         </div>`;
     }
-
-
 
     /*────────────────────────────────────────────────────────────────
       STEP H: Draw / Update the Polyline
@@ -479,16 +467,15 @@
       }
     }
 
-
-
     /*────────────────────────────────────────────────────────────────
       STEP I: START TRACKING
-      • We branch depending on “Am I in Capacitor/Android?” (window.CapGeolocation exists)
-      • If Android → use Capacitor Geolocation.watchPosition to get callbacks in background
+      • We branch depending on “Am I in Capacitor/Android with BG plugin?”
+      • If Android → use @capacitor-community/background-geolocation plugin
       • If NOT (e.g. web browser) → use navigator.geolocation.watchPosition
-      • We store separate IDs so that stopTracking() can clear the right one.
+      • We store either browserWatchId or bgLocationSubscription so that
+        stopTracking() can clear the right one.
     ─────────────────────────────────────────────────────────────────*/
-    function startTracking() {
+    async function startTracking() {
       pathCoords = [];
       totalDistanceMeters = 0;
       startTime = null;
@@ -497,31 +484,33 @@
       stopBtn.disabled = false;
       statsBar.style.display = "block";
 
-      // Do we have a Capacitor Geolocation plugin available?
-      const isAndroid =
+      const isAndroidBG =
         window.Capacitor &&
-        window.CapGeolocation &&
-        typeof window.CapGeolocation.watchPosition === "function";
+        window.BackgroundGeolocation &&
+        typeof window.BackgroundGeolocation.configure === "function";
 
-      if (isAndroid) {
-        // ─── ANDROID: USE CAPACITOR PLUGIN ─────────────────
-        const watchOptions = {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 1000,
-        };
+      if (isAndroidBG) {
+        // ─── ANDROID: USE @capacitor-community/background-geolocation ─────────────────
+        usingBackgroundPlugin = true;
 
-        pluginWatchId = window.CapGeolocation.watchPosition(
-          watchOptions,
-          async (position, err) => {
-            if (err) {
-              console.error("Capacitor Geolocation watch error:", err);
-              return;
-            }
-            // Extract coords
-            const coords = position.coords; // { latitude, longitude, … }
-            const lon = coords.longitude;
-            const lat = coords.latitude;
+        // Configure the background‐geolocation service for 1 Hz updates
+        await BackgroundGeolocation.configure({
+          desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
+          distanceFilter: 0,       // Report every meter change
+          interval: 1000,          // Request ~1 second interval
+          notificationTitle: 'LiveStride tracking',
+          notificationText: 'Recording your run…',
+          // iOS-specific (if you also build for iOS later):
+          // pausesLocationUpdatesAutomatically: false,
+          // allowsBackgroundLocationUpdates: true,
+        });
+
+        // Subscribe to location updates
+        bgLocationSubscription = BackgroundGeolocation.addListener(
+          'location',
+          async (location) => {
+            const lon = location.coords.longitude;
+            const lat = location.coords.latitude;
             const now = Date.now();
 
             if (isFollowing) {
@@ -534,7 +523,6 @@
             if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
             if (pathCoords.length > 0) {
-              // Compute distance/time deltas vs. previous point
               const prevPoint = pathCoords[pathCoords.length - 1];
               const prevCoord = [prevPoint.lon, prevPoint.lat];
 
@@ -587,7 +575,7 @@
 
             lastPointTime = now;
 
-            // Build the “point object” for GPX later
+            // Build point object for GPX later
             const pointData = {
               lat: lat,
               lon: lon,
@@ -615,8 +603,13 @@
             addOrUpdatePath();
           }
         );
+
+        // Start the background service
+        await BackgroundGeolocation.start();
       } else {
-        // ─── BROWSER: FALL BACK TO window.navigator.geolocation ─────────────────
+        // ─── BROWSER: FALL BACK TO navigator.geolocation.watchPosition ─────────────────
+        usingBackgroundPlugin = false;
+
         if (!("geolocation" in navigator)) {
           console.error("Navigator.geolocation not available!");
           return;
@@ -729,25 +722,31 @@
       }
     }
 
-
-
     /*────────────────────────────────────────────────────────────────
       STEP J: STOP TRACKING
-      • Clear whichever watcher ID was used:
+      • Clear whichever watcher was used:
         – browserWatchId (Navigator) or
-        – pluginWatchId (Capacitor)
+        – bgLocationSubscription + stop BackgroundGeolocation
       • Reveal “Convert to GPX” / “Upload to Strava” buttons.
     ─────────────────────────────────────────────────────────────────*/
-    function stopTracking() {
-      // Clear browser watcher if it exists:
-      if (browserWatchId !== null) {
-        navigator.geolocation.clearWatch(browserWatchId);
-        browserWatchId = null;
-      }
-      // Clear Capacitor plugin watcher if it exists:
-      if (pluginWatchId !== null && window.CapGeolocation) {
-        window.CapGeolocation.clearWatch({ id: pluginWatchId });
-        pluginWatchId = null;
+    async function stopTracking() {
+      if (usingBackgroundPlugin) {
+        // Remove the location listener and stop the service
+        if (bgLocationSubscription) {
+          bgLocationSubscription.remove();
+          bgLocationSubscription = null;
+        }
+        try {
+          await BackgroundGeolocation.stop();
+        } catch (e) {
+          console.error("Error stopping BackgroundGeolocation:", e);
+        }
+      } else {
+        // Clear browser watcher if it exists:
+        if (browserWatchId !== null) {
+          navigator.geolocation.clearWatch(browserWatchId);
+          browserWatchId = null;
+        }
       }
 
       startBtn.disabled = false;
@@ -764,12 +763,8 @@
     startBtn.addEventListener("click", startTracking);
     stopBtn.addEventListener("click", stopTracking);
 
-
-
     /*────────────────────────────────────────────────────────────────
-      STEP K: BROADCAST to Firebase
-      • The same as before.  “Broadcast” button is shown in runner mode; once
-        clicked, asks for name and creates a DB node.
+      STEP K: BROADCAST to Firebase (unchanged)
     ─────────────────────────────────────────────────────────────────*/
     broadcastBtn.addEventListener("click", () => {
       let first = prompt("Enter your **first name**:")?.trim();
@@ -801,8 +796,6 @@
         });
       }
     });
-
-
 
     /*────────────────────────────────────────────────────────────────
       STEP L: VIEWER SIDE (Same as before: watch Firebase for a selected runner)
@@ -900,8 +893,6 @@
       });
     }
 
-
-
     /*────────────────────────────────────────────────────────────────
       STEP M: GPX EXPORT + STRAVA UPLOAD (unchanged)
     ─────────────────────────────────────────────────────────────────*/
@@ -952,8 +943,6 @@
 
     exportGpxBtn.addEventListener("click", convertToGPX);
     uploadStravaBtn.addEventListener("click", uploadToStrava);
-
-
 
     /*────────────────────────────────────────────────────────────────
       On map load, default to Runner mode

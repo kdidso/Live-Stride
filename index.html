@@ -57,8 +57,7 @@
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
 
   <style>
-    html,
-    body {
+    html, body {
       margin: 0;
       padding: 0;
       height: 100%;
@@ -77,8 +76,7 @@
       flex-direction: column;
       gap: 10px;
     }
-    #controls,
-    #modeToggle {
+    #controls, #modeToggle {
       display: flex;
       gap: 10px;
     }
@@ -216,11 +214,16 @@
   <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
 
+  <!-- MapLibre GL JS -->
+  <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+
+  <!-- Firebase JS -->
+  <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
+
   <script>
     /*────────────────────────────────────────────────────────────────
       STEP A: Enable Cordova background‐mode (Android only)
-      We wait for 'deviceready' so that cordova.plugins.backgroundMode is available.
-      Once enabled, the WebView will keep running even if the screen locks.
     ─────────────────────────────────────────────────────────────────*/
     document.addEventListener('deviceready', () => {
       if (
@@ -231,8 +234,6 @@
       ) {
         cordova.plugins.backgroundMode.enable();
         console.log('🟢 Cordova backgroundMode enabled.');
-
-        // As a sanity‐check, listen for actual activation:
         cordova.plugins.backgroundMode.on('activate', () => {
           console.log('🟡 Background mode actually activated.');
         });
@@ -298,9 +299,10 @@
     /*────────────────────────────────────────────────────────────────
       STEP D: State + DOM variables
     ─────────────────────────────────────────────────────────────────*/
-    let pathCoords = [];         // Array of {lat, lon, timestamp, time, elevation, distance, instPace, avgPace}
-    let browserWatchId = null;   // ID returned by navigator.geolocation.watchPosition()
-    let pluginWatchId = null;    // ID returned by Capacitor Geolocation.watchPosition()
+    let pathCoords = [];
+    let browserWatchId = null;
+    let pluginWatchId = null;
+    let timerInterval = null;        // ← NEW: 1-second timer ID
     let startTime = null;
     let lastPointTime = null;
     let totalDistanceMeters = 0;
@@ -316,18 +318,18 @@
     let selectedRunner = null;
 
     // DOM references
-    const startBtn        = document.getElementById("startBtn");
-    const stopBtn         = document.getElementById("stopBtn");
-    const broadcastBtn    = document.getElementById("broadcastBtn");
-    const exportGpxBtn    = document.getElementById("exportGpxBtn");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const broadcastBtn = document.getElementById("broadcastBtn");
+    const exportGpxBtn = document.getElementById("exportGpxBtn");
     const uploadStravaBtn = document.getElementById("uploadStravaBtn");
-    const statsBar        = document.getElementById("statsBar");
-    const searchInput     = document.getElementById("searchInput");
+    const statsBar = document.getElementById("statsBar");
+    const searchInput = document.getElementById("searchInput");
     const suggestionsList = document.getElementById("suggestionsList");
-    const runnerModeBtn   = document.getElementById("runnerModeBtn");
-    const viewerModeBtn   = document.getElementById("viewerModeBtn");
-    const recenterBtn     = document.getElementById("recenterBtn");
-    const layerSelect     = document.getElementById("layerSelect");
+    const runnerModeBtn = document.getElementById("runnerModeBtn");
+    const viewerModeBtn = document.getElementById("viewerModeBtn");
+    const recenterBtn = document.getElementById("recenterBtn");
+    const layerSelect = document.getElementById("layerSelect");
 
 
 
@@ -362,7 +364,7 @@
       const chosen = layerSelect.value; // "satellite" or "streets"
       const newStyle = STYLES[chosen] || STYLES.satellite;
       map.setStyle(newStyle);
-      // Controls will be re‐added on 'style.load'
+      // Controls will be re‐added in 'style.load' handler
     });
 
 
@@ -400,9 +402,7 @@
 
     async function fetchElevation(lat, lon) {
       try {
-        const response = await fetch(
-          `https://api.open-elevation.com/api/v1/lookup?locations=${lat},${lon}`
-        );
+        const response = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${lat},${lon}`);
         const data = await response.json();
         if (data && data.results && data.results.length > 0) {
           return data.results[0].elevation; // in meters
@@ -417,13 +417,14 @@
 
     /*────────────────────────────────────────────────────────────────
       STEP G: Update Stats Display
-      • Called on every position callback (whether from browser or plugin).
+      • Called whenever we want to redraw the stats bar—now + once per GPS fix.
     ─────────────────────────────────────────────────────────────────*/
     function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationFt) {
       const timeHtml = `Time: ${formatTime(elapsedMs)}`;
       const elevHtml = (elevationFt != null)
         ? `Elev: ${Math.round(elevationFt)} ft`
         : "Elev: —";
+
       const distHtml = `Distance: ${distanceMi.toFixed(2)} mi`;
       const paceHtml = `Pace: ${formatPace(instPace)}`;
       const avgHtml = `Avg Pace: ${formatPace(avgPace)}`;
@@ -446,8 +447,7 @@
 
 
     /*────────────────────────────────────────────────────────────────
-      STEP H: Draw / Update the Polyline
-      • pathCoords is an array of {lat, lon, …}.  We extract [lon, lat].
+      STEP H: Draw / Update the Polyline (unchanged)
     ─────────────────────────────────────────────────────────────────*/
     function addOrUpdatePath() {
       const coordArray = pathCoords.map((pt) => [pt.lon, pt.lat]);
@@ -478,28 +478,63 @@
 
     /*────────────────────────────────────────────────────────────────
       STEP I: START TRACKING
-      • We branch depending on “Am I in Capacitor/Android?” (window.CapGeolocation exists)
-      • If Android → use Capacitor Geolocation.watchPosition to get callbacks in background
-      • If NOT (e.g. web browser) → use navigator.geolocation.watchPosition
-      • We store separate IDs so that stopTracking() can clear the right one.
+      • We still use watchPosition() exactly as before (browser vs. Capacitor).
+      • Right after enabling the stats bar & beginning watchPosition(),
+        we also start a 1-second setInterval called timerInterval.
+      • That timerInterval calls updateStatsDisplay(…) every second,
+        so even if GPS fixes come in slowly, “Time:” will tick once per second.
     ─────────────────────────────────────────────────────────────────*/
     function startTracking() {
       pathCoords = [];
       totalDistanceMeters = 0;
       startTime = null;
       lastPointTime = null;
+
       startBtn.disabled = true;
       stopBtn.disabled = false;
       statsBar.style.display = "block";
 
-      // Do we have a Capacitor Geolocation plugin available?
+      // ── START A 1 SECOND TICK TO UPDATE “Elapsed Time” ──
+      // Even if GPS fixes only come every 4 seconds, this ensures
+      // the “Time:” (and everything in statsBar) still updates every second.
+      if (timerInterval !== null) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+      timerInterval = setInterval(() => {
+        if (!startTime) return;
+        const now = Date.now();
+        const elapsedMs = now - startTime;
+
+        // Grab the very latest point (if any):
+        const latestPoint = pathCoords.length > 0
+          ? pathCoords[pathCoords.length - 1]
+          : null;
+
+        const instPace = latestPoint ? latestPoint.instPace : 0;
+        const avgPace  = latestPoint ? latestPoint.avgPace  : 0;
+        const elevationFt = (latestPoint && latestPoint.elevation != null)
+          ? latestPoint.elevation * 3.28084
+          : null;
+
+        updateStatsDisplay(
+          metersToMiles(totalDistanceMeters),
+          instPace,
+          avgPace,
+          elapsedMs,
+          elevationFt
+        );
+      }, 1000);
+
+
+      // ── NOW START THE ACTUAL WATCHPOSITION (UNCHANGED) ──
       const isAndroid =
         window.Capacitor &&
         window.CapGeolocation &&
         typeof window.CapGeolocation.watchPosition === "function";
 
       if (isAndroid) {
-        // ─── ANDROID: USE CAPACITOR PLUGIN ─────────────────
+        // Android via Capacitor
         const watchOptions = {
           enableHighAccuracy: true,
           timeout: 10000,
@@ -514,9 +549,8 @@
               return;
             }
             // Extract coords
-            const coords = position.coords; // { latitude, longitude, … }
-            const lon = coords.longitude;
-            const lat = coords.latitude;
+            const lat = position.coords.latitude;
+            const lon = position.coords.longitude;
             const now = Date.now();
 
             if (isFollowing) {
@@ -529,9 +563,8 @@
             if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
             if (pathCoords.length > 0) {
-              // Compute distance/time deltas vs. previous point
-              const prevPoint = pathCoords[pathCoords.length - 1];
-              const prevCoord = [prevPoint.lon, prevPoint.lat];
+              const prev = pathCoords[pathCoords.length - 1];
+              const prevCoord = [prev.lon, prev.lat];
 
               const timeDeltaMin = (now - lastPointTime) / 60000;
               const segmentDist = haversineDistance(prevCoord, [lon, lat]);
@@ -551,7 +584,7 @@
                   pace: instPace,
                   avgPace: avgPace,
                   timestamp: now,
-                  startTime: startTime,
+                  startTime: startTime
                 });
               }
 
@@ -574,7 +607,7 @@
                   pace: 0,
                   avgPace: 0,
                   timestamp: now,
-                  startTime: startTime,
+                  startTime: startTime
                 });
               }
               updateStatsDisplay(0, 0, 0, 0, elevationFt);
@@ -603,7 +636,7 @@
               avgPace:
                 pathCoords.length > 0
                   ? ((now - startTime) / 60000) / metersToMiles(totalDistanceMeters)
-                  : 0,
+                  : 0
             };
             pathCoords.push(pointData);
 
@@ -611,22 +644,20 @@
           }
         );
       } else {
-        // ─── BROWSER: FALL BACK TO window.navigator.geolocation ─────────────────
+        // Browser fallback
         if (!("geolocation" in navigator)) {
           console.error("Navigator.geolocation not available!");
           return;
         }
-
         const browserOptions = {
           enableHighAccuracy: true,
           maximumAge: 1000,
-          timeout: 10000,
+          timeout: 10000
         };
-
         browserWatchId = navigator.geolocation.watchPosition(
           async (pos) => {
-            const lon = pos.coords.longitude;
             const lat = pos.coords.latitude;
+            const lon = pos.coords.longitude;
             const now = Date.now();
 
             if (isFollowing) {
@@ -638,8 +669,8 @@
             if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
             if (pathCoords.length > 0) {
-              const prevPoint = pathCoords[pathCoords.length - 1];
-              const prevCoord = [prevPoint.lon, prevPoint.lat];
+              const prev = pathCoords[pathCoords.length - 1];
+              const prevCoord = [prev.lon, prev.lat];
 
               const timeDeltaMin = (now - lastPointTime) / 60000;
               const segmentDist = haversineDistance(prevCoord, [lon, lat]);
@@ -659,7 +690,7 @@
                   pace: instPace,
                   avgPace: avgPace,
                   timestamp: now,
-                  startTime: startTime,
+                  startTime: startTime
                 });
               }
 
@@ -682,7 +713,7 @@
                   pace: 0,
                   avgPace: 0,
                   timestamp: now,
-                  startTime: startTime,
+                  startTime: startTime
                 });
               }
               updateStatsDisplay(0, 0, 0, 0, elevationFt);
@@ -710,7 +741,7 @@
               avgPace:
                 pathCoords.length > 0
                   ? ((now - startTime) / 60000) / metersToMiles(totalDistanceMeters)
-                  : 0,
+                  : 0
             };
             pathCoords.push(pointData);
 
@@ -725,21 +756,23 @@
     }
 
 
-
     /*────────────────────────────────────────────────────────────────
       STEP J: STOP TRACKING
-      • Clear whichever watcher ID was used:
-        – browserWatchId (Navigator) or
-        – pluginWatchId (Capacitor)
-      • Reveal “Convert to GPX” / “Upload to Strava” buttons.
+      • Clear the 1-second timer, then clear whichever watchPosition was used.
     ─────────────────────────────────────────────────────────────────*/
     function stopTracking() {
-      // Clear browser watcher if it exists:
+      // ── CLEAR THE 1-SECOND TIMER ──
+      if (timerInterval !== null) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+
+      // Clear browser watcher if it exists
       if (browserWatchId !== null) {
         navigator.geolocation.clearWatch(browserWatchId);
         browserWatchId = null;
       }
-      // Clear Capacitor plugin watcher if it exists:
+      // Clear Capacitor plugin watcher if it exists
       if (pluginWatchId !== null && window.CapGeolocation) {
         window.CapGeolocation.clearWatch({ id: pluginWatchId });
         pluginWatchId = null;
@@ -751,7 +784,7 @@
         broadcasting = false;
       }
       // Show GPX/Strava buttons once run is finished
-      exportGpxBtn.style.display = "inline-block";
+      exportGpxBtn.style.display    = "inline-block";
       uploadStravaBtn.style.display = "inline-block";
       // Leave stats bar visible until page refresh
     }
@@ -762,9 +795,7 @@
 
 
     /*────────────────────────────────────────────────────────────────
-      STEP K: BROADCAST to Firebase
-      • The same as before.  “Broadcast” button is shown in runner mode; once
-        clicked, asks for name and creates a DB node.
+      STEP K: BROADCAST to Firebase (unchanged)
     ─────────────────────────────────────────────────────────────────*/
     broadcastBtn.addEventListener("click", () => {
       let first = prompt("Enter your **first name**:")?.trim();
@@ -792,7 +823,7 @@
           pace: 0,
           avgPace: 0,
           timestamp: Date.now(),
-          startTime: startTime,
+          startTime: startTime
         });
       }
     });
@@ -800,34 +831,32 @@
 
 
     /*────────────────────────────────────────────────────────────────
-      STEP L: VIEWER SIDE (Same as before: watch Firebase for a selected runner)
+      STEP L: VIEWER SIDE (unchanged)
     ─────────────────────────────────────────────────────────────────*/
     searchInput.addEventListener("input", () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, "");
       suggestionsList.innerHTML = "";
       if (!query) return;
 
-      db.ref("runners")
-        .once("value")
-        .then((snapshot) => {
-          const all = snapshot.val();
-          if (!all) return;
-          for (let key in all) {
-            const displayName = all[key].name || key;
-            if (displayName.toLowerCase().includes(query)) {
-              const li = document.createElement("li");
-              li.textContent = displayName;
-              li.onclick = () => {
-                searchInput.value = displayName;
-                viewerFollowing = true;
-                selectedRunner = key;
-                trackRunner(key);
-                suggestionsList.innerHTML = "";
-              };
-              suggestionsList.appendChild(li);
-            }
+      db.ref("runners").once("value").then((snapshot) => {
+        const all = snapshot.val();
+        if (!all) return;
+        for (let key in all) {
+          const displayName = all[key].name || key;
+          if (displayName.toLowerCase().includes(query)) {
+            const li = document.createElement("li");
+            li.textContent = displayName;
+            li.onclick = () => {
+              searchInput.value = displayName;
+              viewerFollowing = true;
+              selectedRunner = key;
+              trackRunner(key);
+              suggestionsList.innerHTML = "";
+            };
+            suggestionsList.appendChild(li);
           }
-        });
+        }
+      });
     });
 
     function trackRunner(key) {
@@ -838,7 +867,6 @@
         const data = snap.val();
         if (!data || !data.current) return;
 
-        // Update or create red marker
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: "red" })
             .setLngLat(data.current)
@@ -847,34 +875,31 @@
           viewerMarker.setLngLat(data.current);
         }
 
-        // Build a GeoJSON LineString from data.path (array of objects)
-        const coords = (data.path || []).map((pt) => [pt.lon, pt.lat]);
         if (!map.getSource("run-path")) {
           map.addSource("run-path", {
             type: "geojson",
             data: {
               type: "Feature",
-              geometry: { type: "LineString", coordinates: coords },
-            },
+              geometry: { type: "LineString", coordinates: data.path || [] }
+            }
           });
           map.addLayer({
             id: "run-line",
             type: "line",
             source: "run-path",
             layout: { "line-join": "round", "line-cap": "round" },
-            paint: { "line-color": "#00FFFF", "line-width": 4 },
+            paint: { "line-color": "#00FFFF", "line-width": 4 }
           });
         } else {
           map.getSource("run-path").setData({
             type: "Feature",
-            geometry: { type: "LineString", coordinates: coords },
+            geometry: { type: "LineString", coordinates: data.path || [] }
           });
         }
 
-        const elapsed =
-          data.startTime != null && data.timestamp != null
-            ? data.timestamp - data.startTime
-            : 0;
+        const elapsed = (data.startTime != null && data.timestamp != null)
+          ? (data.timestamp - data.startTime)
+          : 0;
 
         let elevationFt = null;
         const [lon, lat] = data.current;

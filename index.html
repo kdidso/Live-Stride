@@ -5,13 +5,11 @@
   <title>LiveStride – Satellite Tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-  <!--────────────────────────────────────────────────────────────────
-    ─── PERMISSION BOOTSTRAP ─────────────────────────────────────────────
-    We add this snippet BEFORE everything else in <head> so that:
-     • On Android (Capacitor) we request both foreground + background location 
-       at launch.
-     • In a normal browser, `window.Capacitor` is undefined → skip.
-  ────────────────────────────────────────────────────────────────────-->
+  <!--──────────────────────────────────────
+    PERMISSION BOOTSTRAP
+    • If running on Android (Capacitor), request both foreground + background location at launch.
+    • In a normal browser, `window.Capacitor` is undefined → skip.
+  ──────────────────────────────────────-->
   <script type="module">
     import { Capacitor } from 'https://cdn.jsdelivr.net/npm/@capacitor/core/+esm';
 
@@ -19,8 +17,10 @@
       // Only run if Capacitor is present AND platform is Android
       if (window.Capacitor && Capacitor.getPlatform() === 'android') {
         try {
-          // Dynamically import the Geolocation plugin from Capacitor
+          // Dynamically import the Geolocation plugin
           const { Geolocation } = await import('https://cdn.jsdelivr.net/npm/@capacitor/geolocation/+esm');
+          // Attach it to window so our startTracking() can use it later:
+          window.CapGeolocation = Geolocation;
 
           // Request BOTH foreground (location) and background (locationBackground)
           const permResult = await Geolocation.requestPermissions({
@@ -32,8 +32,7 @@
             alert('⚠️ Foreground location permission is required for LiveStride to function.');
           }
           if (permResult.locationBackground !== 'granted') {
-            console.warn('⚠️ Background location permission was denied. ' +
-                         'App will work in foreground only.');
+            console.warn('⚠️ Background location permission was denied. App will work in foreground only.');
           }
         } catch (e) {
           console.error('Error requesting Capacitor geolocation permissions:', e);
@@ -201,11 +200,22 @@
   <button id="recenterBtn">Recenter</button>
 
   <script>
-    // → Enable background mode as soon as device is ready (Android only)
+    // → Enable Cordova background mode as soon as device is ready (Android only)
     document.addEventListener('deviceready', () => {
-      if (window.Capacitor && cordova && cordova.plugins && cordova.plugins.backgroundMode) {
+      if (
+        window.Capacitor &&
+        window.cordova &&
+        cordova.plugins &&
+        cordova.plugins.backgroundMode
+      ) {
+        // Enable background mode
         cordova.plugins.backgroundMode.enable();
         console.log('🟢 Background mode enabled.');
+
+        // Also listen for when background mode actually activates
+        cordova.plugins.backgroundMode.on('activate', () => {
+          console.log('🟡 Background mode has been activated.');
+        });
       }
     });
 
@@ -236,7 +246,7 @@
       zoom: 13
     });
 
-    // → Will hold references to controls so we can remove them before re-adding
+    // → Will hold references to controls so we can remove before re-adding
     let navControl, geoControl;
 
     // → Add or re‐add controls each time the style loads
@@ -258,7 +268,7 @@
     map.on('style.load', addControls);
 
     // → State variables for tracking
-    let pathCoords = [];            // Now holds objects with full point data
+    let pathCoords = [];            // Will hold objects with full point data
     let watchId = null;
     let startTime = null;
     let lastPointTime = null;
@@ -414,7 +424,7 @@
       }
     }
 
-    // → Start tracking the runner’s position
+    // → Start tracking the runner’s position (Capacitor Geolocation)
     function startTracking() {
       pathCoords = [];
       totalDistanceMeters = 0;
@@ -424,14 +434,36 @@
       stopBtn.disabled = false;
       statsBar.style.display = 'block';
 
-      watchId = navigator.geolocation.watchPosition(async pos => {
-        const coord = [pos.coords.longitude, pos.coords.latitude];
+      // Use Capacitor Geolocation plugin (watchPosition) instead of browser navigator
+      if (!window.CapGeolocation) {
+        console.error("Capacitor Geolocation plugin not available!");
+        return;
+      }
+
+      const watchOptions = {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 1000
+      };
+
+      watchId = window.CapGeolocation.watchPosition(watchOptions, async (position, err) => {
+        if (err) {
+          console.error("Capacitor Geolocation watch error:", err);
+          return;
+        }
+
+        // Extract coords
+        const coords = position.coords; // { latitude, longitude, accuracy, altitude, heading, speed }
+        const lon = coords.longitude;
+        const lat = coords.latitude;
         const now = Date.now();
-        if (isFollowing) map.setCenter(coord);
+
+        if (isFollowing) {
+          map.setCenter([lon, lat]);
+        }
 
         // Fetch elevation (meters) and convert to feet
         let elevationFt = null;
-        const [lon, lat] = coord;
         const elevMeters = await fetchElevation(lat, lon);
         if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
@@ -443,7 +475,7 @@
           // Time delta in minutes
           const timeDeltaMin = (now - lastPointTime) / 60000;
           // Distance from previous coordinate
-          const segmentDist = haversineDistance(prevCoord, coord);
+          const segmentDist = haversineDistance(prevCoord, [lon, lat]);
           totalDistanceMeters += segmentDist;
 
           // Instantaneous pace (min/mi) at this segment
@@ -462,7 +494,7 @@
             broadcastRef.set({
               name: runnerName,
               path: pathCoords,            // now array of objects
-              current: coord,              // current as [lon, lat]
+              current: [lon, lat],         // current as [lon, lat]
               distance: metersToMiles(totalDistanceMeters),
               pace: instPace,
               avgPace: avgPace,
@@ -487,7 +519,7 @@
             broadcastRef.set({
               name: runnerName,
               path: pathCoords,
-              current: coord,
+              current: [lon, lat],
               distance: 0,
               pace: 0,
               avgPace: 0,
@@ -498,21 +530,21 @@
           updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
 
-        // Update lastPointTime to now for the next iteration
+        // Update lastPointTime for next iteration
         lastPointTime = now;
 
         // Build the full point object and push into pathCoords
         const pointData = {
-          lat: coord[1],
-          lon: coord[0],
+          lat: lat,
+          lon: lon,
           timestamp: now,
-          time: new Date(now).toISOString(),   // ISO‐8601 string for GPX export
+          time: new Date(now).toISOString(),   // ISO‐8601 string for GPX
           elevation: elevMeters ?? null,       // elevation in meters
           distance: metersToMiles(totalDistanceMeters),
           instPace: (pathCoords.length > 0)
             ? ((now - lastPointTime) / 60000) / metersToMiles(haversineDistance(
                 [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat],
-                coord
+                [lon, lat]
               ))
             : 0,
           avgPace: (pathCoords.length > 0)
@@ -523,16 +555,14 @@
 
         // Redraw or update the polyline on the map
         addOrUpdatePath();
-      },
-      err => console.error("Geolocation error:", err),
-      { enableHighAccuracy: true, maximumAge: 1000 });
+      });
     }
 
-    // → Stop tracking: keep last stats visible for runner,
-    //   and reveal the GPX/Strava buttons
+    // → Stop tracking: keeps the last stats visible,
+    //   and reveals the GPX/Strava buttons
     function stopTracking() {
       if (watchId !== null) {
-        navigator.geolocation.clearWatch(watchId);
+        window.CapGeolocation.clearWatch({ id: watchId });
         watchId = null;
       }
       startBtn.disabled = false;
@@ -563,12 +593,14 @@
       broadcastBtn.style.display = 'none';
 
       if (startTime !== null) {
+        const lastCoord = pathCoords.length > 0
+          ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
+          : null;
+
         broadcastRef.set({
           name: runnerName,
           path: pathCoords,
-          current: pathCoords.length > 0
-            ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
-            : null,
+          current: lastCoord,
           distance: metersToMiles(totalDistanceMeters),
           pace: 0,
           avgPace: 0,

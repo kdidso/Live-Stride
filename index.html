@@ -391,12 +391,17 @@
       return `${h}:${m}:${s}`;
     }
 
-    function formatPace(minsPerMile) {
-      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
-      const m = Math.floor(minsPerMile);
-      const s = Math.round((minsPerMile - m) * 60);
-      return `${m}:${s.toString().padStart(2, "0")} /mi`;
-    }
+   function formatPace(minsPerMile) {
+  if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+  let m = Math.floor(minsPerMile);
+  let s = Math.round((minsPerMile - m) * 60);
+  // If rounding pushes seconds to 60, roll over to the next minute
+  if (s === 60) {
+    m += 1;
+    s = 0;
+  }
+  return `${m}:${s.toString().padStart(2, "0")} /mi`;
+}
 
     async function fetchElevation(lat, lon) {
       try {

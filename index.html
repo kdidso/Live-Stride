@@ -48,7 +48,7 @@
   </script>
   <!--───────────────────────────────────────────────────────────────────-->
 
-  <!-- MapLibre & Firebase scripts (unchanged) -->
+  <!-- MapLibre & Firebase scripts -->
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <link
     href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css"
@@ -210,8 +210,8 @@
   <div id="layerToggle">
     <label for="layerSelect">Map:</label>
     <select id="layerSelect">
-      <option value="satellite" selected>Satellite</option>
-      <option value="streets">Streets</option>
+      <option value="default">Default</option>
+      <option value="satellite">Satellite</option>
     </select>
   </div>
 
@@ -236,17 +236,16 @@
 
     /*────────────────────────────────────────────────────────────────
       STEP C: MapLibre map + controls
+      (Use public MapLibre demo tiles so it always loads)
     ─────────────────────────────────────────────────────────────────*/
     const STYLES = {
-      satellite:
-        "https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC",
-      streets:
-        "https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC",
+      default: "https://demotiles.maplibre.org/style.json",
+      satellite: "https://demotiles.maplibre.org/style.json"
     };
 
     let map = new maplibregl.Map({
       container: "map",
-      style: STYLES.satellite,
+      style: STYLES.default,
       center: [-113.6, 37.1],
       zoom: 13,
     });
@@ -268,6 +267,12 @@
       map.addControl(geoControl, "bottom-right");
     }
     map.on("style.load", addControls);
+
+    layerSelect.addEventListener("change", () => {
+      const chosen = layerSelect.value; // "default" or "satellite"
+      const newStyle = STYLES[chosen] || STYLES.default;
+      map.setStyle(newStyle);
+    });
 
     /*────────────────────────────────────────────────────────────────
       STEP D: State + DOM variables
@@ -302,7 +307,6 @@
     const runnerModeBtn   = document.getElementById("runnerModeBtn");
     const viewerModeBtn   = document.getElementById("viewerModeBtn");
     const recenterBtn     = document.getElementById("recenterBtn");
-    const layerSelect     = document.getElementById("layerSelect");
 
     /*────────────────────────────────────────────────────────────────
       STEP E: Mode‐switcher (Runner vs. Viewer)
@@ -329,13 +333,6 @@
         viewerFollowing = true;
         map.flyTo({ center: viewerMarker.getLngLat(), zoom: 16 });
       }
-    });
-
-    layerSelect.addEventListener("change", () => {
-      const chosen = layerSelect.value; // "satellite" or "streets"
-      const newStyle = STYLES[chosen] || STYLES.satellite;
-      map.setStyle(newStyle);
-      // Controls will be re‐added on 'style.load'
     });
 
     /*────────────────────────────────────────────────────────────────

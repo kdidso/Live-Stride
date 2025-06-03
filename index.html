@@ -63,6 +63,7 @@
       margin: 0;
       padding: 0;
       height: 100%;
+      font-family: sans-serif;
     }
     #map {
       width: 100%;
@@ -219,30 +220,7 @@
 
   <script>
     /*────────────────────────────────────────────────────────────────
-      STEP A: Enable Cordova background‐mode (Android only)
-      ----------------------------------------------------
-      Wait for 'deviceready' so that cordova.plugins.backgroundMode is available.
-      Once enabled, the WebView will keep running even if the screen locks.
-    ─────────────────────────────────────────────────────────────────*/
-    document.addEventListener('deviceready', () => {
-      if (
-        window.Capacitor &&
-        window.cordova &&
-        cordova.plugins &&
-        cordova.plugins.backgroundMode
-      ) {
-        cordova.plugins.backgroundMode.enable();
-        console.log('🟢 Cordova backgroundMode enabled.');
-
-        // As a sanity‐check, listen for actual activation:
-        cordova.plugins.backgroundMode.on('activate', () => {
-          console.log('🟡 Background mode actually activated.');
-        });
-      }
-    });
-
-    /*────────────────────────────────────────────────────────────────
-      STEP B: Firebase initialization (unchanged)
+      STEP B: Firebase initialization
     ─────────────────────────────────────────────────────────────────*/
     const firebaseConfig = {
       apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
@@ -257,7 +235,7 @@
     const db = firebase.database();
 
     /*────────────────────────────────────────────────────────────────
-      STEP C: MapLibre map + controls (unchanged)
+      STEP C: MapLibre map + controls
     ─────────────────────────────────────────────────────────────────*/
     const STYLES = {
       satellite:
@@ -526,13 +504,18 @@
               const prevPoint = pathCoords[pathCoords.length - 1];
               const prevCoord = [prevPoint.lon, prevPoint.lat];
 
+              // ─── Compute time delta & segment distance:
               const timeDeltaMin = (now - lastPointTime) / 60000;
               const segmentDist = haversineDistance(prevCoord, [lon, lat]);
               totalDistanceMeters += segmentDist;
 
-              const instPace = timeDeltaMin / metersToMiles(segmentDist);
+              // ─── Compute instantaneous pace (min/mile):
+              const computedInstPace = timeDeltaMin / metersToMiles(segmentDist);
+
+              // ─── Compute average pace (min/mile):
               const totalTimeMin = (now - startTime) / 60000;
               const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+
               const totalTimeMs = now - startTime;
 
               if (broadcasting && broadcastRef) {
@@ -541,7 +524,7 @@
                   path: pathCoords,
                   current: [lon, lat],
                   distance: metersToMiles(totalDistanceMeters),
-                  pace: instPace,
+                  pace: computedInstPace,
                   avgPace: avgPace,
                   timestamp: now,
                   startTime: startTime,
@@ -550,7 +533,7 @@
 
               updateStatsDisplay(
                 metersToMiles(totalDistanceMeters),
-                instPace,
+                computedInstPace,
                 avgPace,
                 totalTimeMs,
                 elevationFt
@@ -573,30 +556,33 @@
               updateStatsDisplay(0, 0, 0, 0, elevationFt);
             }
 
+            // ─── Now update lastPointTime and build pointData:
+            let instForPoint = 0;
+            let avgForPoint = 0;
+            const elevMeters = await fetchElevation(lat, lon);
+            const distanceMi = metersToMiles(totalDistanceMeters);
+            if (pathCoords.length > 0) {
+              // We already computed computedInstPace above for the stats and Firebase
+              // Use that same value here as instForPoint
+              const timeDeltaMin = (now - lastPointTime) / 60000;
+              const prev = pathCoords[pathCoords.length - 1];
+              const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
+              instForPoint = timeDeltaMin / metersToMiles(segmentDist);
+              const totalTimeMin = (now - startTime) / 60000;
+              avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
+            }
+
             lastPointTime = now;
 
-            // Build point object for GPX later
             const pointData = {
               lat: lat,
               lon: lon,
               timestamp: now,
               time: new Date(now).toISOString(),
-              elevation: elevMeters ?? null,
-              distance: metersToMiles(totalDistanceMeters),
-              instPace:
-                pathCoords.length > 0
-                  ? ((now - lastPointTime) / 60000) /
-                    metersToMiles(
-                      haversineDistance(
-                        [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat],
-                        [lon, lat]
-                      )
-                    )
-                  : 0,
-              avgPace:
-                pathCoords.length > 0
-                  ? ((now - startTime) / 60000) / metersToMiles(totalDistanceMeters)
-                  : 0,
+              elevation: elevMeters != null ? elevMeters : null,
+              distance: distanceMi,
+              instPace: instForPoint,
+              avgPace: avgForPoint,
             };
             pathCoords.push(pointData);
 
@@ -643,7 +629,7 @@
               const segmentDist = haversineDistance(prevCoord, [lon, lat]);
               totalDistanceMeters += segmentDist;
 
-              const instPace = timeDeltaMin / metersToMiles(segmentDist);
+              const computedInstPace = timeDeltaMin / metersToMiles(segmentDist);
               const totalTimeMin = (now - startTime) / 60000;
               const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
               const totalTimeMs = now - startTime;
@@ -654,7 +640,7 @@
                   path: pathCoords,
                   current: [lon, lat],
                   distance: metersToMiles(totalDistanceMeters),
-                  pace: instPace,
+                  pace: computedInstPace,
                   avgPace: avgPace,
                   timestamp: now,
                   startTime: startTime,
@@ -663,7 +649,7 @@
 
               updateStatsDisplay(
                 metersToMiles(totalDistanceMeters),
-                instPace,
+                computedInstPace,
                 avgPace,
                 totalTimeMs,
                 elevationFt
@@ -686,29 +672,31 @@
               updateStatsDisplay(0, 0, 0, 0, elevationFt);
             }
 
+            // Build pointData after updating lastPointTime
+            let instForPoint = 0;
+            let avgForPoint = 0;
+            if (pathCoords.length > 0) {
+              const timeDeltaMin = (now - lastPointTime) / 60000;
+              const prev = pathCoords[pathCoords.length - 1];
+              const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
+              instForPoint = timeDeltaMin / metersToMiles(segmentDist);
+              const totalTimeMin = (now - startTime) / 60000;
+              avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
+            }
+
             lastPointTime = now;
 
+            const distanceMi = metersToMiles(totalDistanceMeters);
+            const timeString = new Date(now).toISOString();
             const pointData = {
               lat: lat,
               lon: lon,
               timestamp: now,
-              time: new Date(now).toISOString(),
-              elevation: elevMeters ?? null,
-              distance: metersToMiles(totalDistanceMeters),
-              instPace:
-                pathCoords.length > 0
-                  ? ((now - lastPointTime) / 60000) /
-                    metersToMiles(
-                      haversineDistance(
-                        [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat],
-                        [lon, lat]
-                      )
-                    )
-                  : 0,
-              avgPace:
-                pathCoords.length > 0
-                  ? ((now - startTime) / 60000) / metersToMiles(totalDistanceMeters)
-                  : 0,
+              time: timeString,
+              elevation: elevMeters != null ? elevMeters : null,
+              distance: distanceMi,
+              instPace: instForPoint,
+              avgPace: avgForPoint,
             };
             pathCoords.push(pointData);
 
@@ -798,7 +786,7 @@
     });
 
     /*────────────────────────────────────────────────────────────────
-      STEP L: VIEWER SIDE (Same as before: watch Firebase for a selected runner)
+      STEP L: VIEWER SIDE (Watch Firebase for a selected runner)
     ─────────────────────────────────────────────────────────────────*/
     searchInput.addEventListener("input", () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, "");

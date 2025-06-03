@@ -7,26 +7,21 @@
 
   <!--────────────────────────────────────────────────────────────────
     ─── PERMISSION & PLUGIN BOOTSTRAP ─────────────────────────────────
-    • If running in Capacitor on Android, import & expose the BackgroundGeolocation plugin.
-    • Then request both foreground + background location at launch via Capacitor Geolocation.
-    • In a normal browser, `window.Capacitor` is undefined → skip entirely,
-      so desktop/mobile‐browser users are unaffected.
+    • Import & expose the BackgroundGeolocation plugin for Capacitor.
+    • In a normal browser, `window.Capacitor` is undefined → skip entirely.
   ────────────────────────────────────────────────────────────────────-->
   <script type="module">
     import { Capacitor } from 'https://cdn.jsdelivr.net/npm/@capacitor/core/+esm';
     import { BackgroundGeolocation } from 'https://cdn.jsdelivr.net/npm/@capacitor-community/background-geolocation/+esm';
 
-    // Expose the plugin for startTracking/stopTracking to use:
     window.BackgroundGeolocation = BackgroundGeolocation;
 
     document.addEventListener('DOMContentLoaded', async () => {
       if (window.Capacitor && Capacitor.getPlatform() === 'android') {
         try {
-          // Dynamically import the Capacitor Geolocation plugin (for permission request)
           const { Geolocation } = await import('https://cdn.jsdelivr.net/npm/@capacitor/geolocation/+esm');
           window.CapGeolocation = Geolocation;
 
-          // Request BOTH foreground (location) and background (locationBackground)
           const permResult = await Geolocation.requestPermissions({
             permissions: ['location', 'locationBackground']
           });
@@ -48,7 +43,7 @@
   </script>
   <!--───────────────────────────────────────────────────────────────────-->
 
-  <!-- MapLibre & Firebase scripts -->
+  <!-- MapLibre & Firebase scripts (unchanged) -->
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <link
     href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css"
@@ -63,7 +58,6 @@
       margin: 0;
       padding: 0;
       height: 100%;
-      font-family: sans-serif;
     }
     #map {
       width: 100%;
@@ -220,26 +214,6 @@
 
   <script>
     /*────────────────────────────────────────────────────────────────
-      STEP A: Enable Cordova background‐mode (Android only)
-    ─────────────────────────────────────────────────────────────────*/
-    document.addEventListener('deviceready', () => {
-      if (
-        window.Capacitor &&
-        window.cordova &&
-        cordova.plugins &&
-        cordova.plugins.backgroundMode
-      ) {
-        cordova.plugins.backgroundMode.enable();
-        console.log('🟢 Cordova backgroundMode enabled.');
-
-        // As a sanity‐check, listen for actual activation:
-        cordova.plugins.backgroundMode.on('activate', () => {
-          console.log('🟡 Background mode actually activated.');
-        });
-      }
-    });
-
-    /*────────────────────────────────────────────────────────────────
       STEP B: Firebase initialization (unchanged)
     ─────────────────────────────────────────────────────────────────*/
     const firebaseConfig = {
@@ -255,7 +229,7 @@
     const db = firebase.database();
 
     /*────────────────────────────────────────────────────────────────
-      STEP C: MapLibre map + controls
+      STEP C: MapLibre map + controls (with public demo tiles)
     ─────────────────────────────────────────────────────────────────*/
     const STYLES = {
       satellite: "https://demotiles.maplibre.org/style.json",
@@ -464,11 +438,8 @@
 
     /*────────────────────────────────────────────────────────────────
       STEP I: START TRACKING
-      • We branch depending on “Am I in Capacitor/Android with BG plugin?”
-      • If Android → use @capacitor-community/background-geolocation plugin
-      • If NOT (e.g. web browser) → use navigator.geolocation.watchPosition
-      • We store either browserWatchId or bgLocationSubscription so that
-        stopTracking() can clear the right one.
+      • Branch on Capacitor plugin vs. browser.
+      • Fix instantaneous‐pace by computing before updating lastPointTime.
     ─────────────────────────────────────────────────────────────────*/
     async function startTracking() {
       pathCoords = [];
@@ -485,22 +456,16 @@
         typeof window.BackgroundGeolocation.configure === "function";
 
       if (isAndroidBG) {
-        // ─── ANDROID: USE @capacitor-community/background-geolocation ─────────────────
         usingBackgroundPlugin = true;
 
-        // Configure the background‐geolocation service for 1 Hz updates
         await BackgroundGeolocation.configure({
           desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
-          distanceFilter: 0,       // Report every meter change
-          interval: 1000,          // Request ~1 second interval
+          distanceFilter: 0,
+          interval: 1000,
           notificationTitle: 'LiveStride tracking',
           notificationText: 'Recording your run…',
-          // iOS-specific (if you also build for iOS later):
-          // pausesLocationUpdatesAutomatically: false,
-          // allowsBackgroundLocationUpdates: true,
         });
 
-        // Subscribe to location updates
         bgLocationSubscription = BackgroundGeolocation.addListener(
           'location',
           async (location) => {
@@ -512,39 +477,33 @@
               map.setCenter([lon, lat]);
             }
 
-            // Fetch elevation (m → ft)
-            let elevationFt = null;
+            // Fetch elevation
             const elevMeters = await fetchElevation(lat, lon);
-            if (elevMeters != null) elevationFt = elevMeters * 3.28084;
+            const elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
 
             if (pathCoords.length > 0) {
-              const prevPoint = pathCoords[pathCoords.length - 1];
-              const prevCoord = [prevPoint.lon, prevPoint.lat];
+              const prev = pathCoords[pathCoords.length - 1];
+              const prevCoord = [prev.lon, prev.lat];
 
-              // ─── Compute time delta & segment distance:
               const timeDeltaMin = (now - lastPointTime) / 60000;
               const segmentDist = haversineDistance(prevCoord, [lon, lat]);
               totalDistanceMeters += segmentDist;
 
-              // ─── Compute instantaneous pace (min/mile):
               const computedInstPace = timeDeltaMin / metersToMiles(segmentDist);
-
-              // ─── Compute average pace (min/mile):
               const totalTimeMin = (now - startTime) / 60000;
               const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-
-              const totalTimeMs = now - startTime;
+              const elapsedMs = now - startTime;
 
               if (broadcasting && broadcastRef) {
                 broadcastRef.set({
                   name: runnerName,
-                  path: pathCoords,
                   current: [lon, lat],
                   distance: metersToMiles(totalDistanceMeters),
                   pace: computedInstPace,
                   avgPace: avgPace,
                   timestamp: now,
                   startTime: startTime,
+                  path: pathCoords,
                 });
               }
 
@@ -552,7 +511,7 @@
                 metersToMiles(totalDistanceMeters),
                 computedInstPace,
                 avgPace,
-                totalTimeMs,
+                elapsedMs,
                 elevationFt
               );
             } else {
@@ -561,28 +520,26 @@
               if (broadcasting && broadcastRef) {
                 broadcastRef.set({
                   name: runnerName,
-                  path: pathCoords,
                   current: [lon, lat],
                   distance: 0,
                   pace: 0,
                   avgPace: 0,
                   timestamp: now,
                   startTime: startTime,
+                  path: pathCoords,
                 });
               }
               updateStatsDisplay(0, 0, 0, 0, elevationFt);
             }
 
-            // ─── Now update lastPointTime and build pointData:
+            // Build pointData after computing pace but before updating lastPointTime
             let instForPoint = 0;
             let avgForPoint = 0;
-            const elevMeters = await fetchElevation(lat, lon);
             const distanceMi = metersToMiles(totalDistanceMeters);
             if (pathCoords.length > 0) {
-              // Reuse the same computedInstPace for this segment:
-              const timeDeltaMin = (now - lastPointTime) / 60000;
               const prev = pathCoords[pathCoords.length - 1];
               const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
+              const timeDeltaMin = (now - lastPointTime) / 60000;
               instForPoint = timeDeltaMin / metersToMiles(segmentDist);
               const totalTimeMin = (now - startTime) / 60000;
               avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
@@ -606,10 +563,8 @@
           }
         );
 
-        // Start the background service
         await BackgroundGeolocation.start();
       } else {
-        // ─── BROWSER: FALL BACK TO navigator.geolocation.watchPosition ─────────────────
         usingBackgroundPlugin = false;
 
         if (!("geolocation" in navigator)) {
@@ -633,13 +588,12 @@
               map.setCenter([lon, lat]);
             }
 
-            let elevationFt = null;
             const elevMeters = await fetchElevation(lat, lon);
-            if (elevMeters != null) elevationFt = elevMeters * 3.28084;
+            const elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
 
             if (pathCoords.length > 0) {
-              const prevPoint = pathCoords[pathCoords.length - 1];
-              const prevCoord = [prevPoint.lon, prevPoint.lat];
+              const prev = pathCoords[pathCoords.length - 1];
+              const prevCoord = [prev.lon, prev.lat];
 
               const timeDeltaMin = (now - lastPointTime) / 60000;
               const segmentDist = haversineDistance(prevCoord, [lon, lat]);
@@ -648,18 +602,18 @@
               const computedInstPace = timeDeltaMin / metersToMiles(segmentDist);
               const totalTimeMin = (now - startTime) / 60000;
               const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-              const totalTimeMs = now - startTime;
+              const elapsedMs = now - startTime;
 
               if (broadcasting && broadcastRef) {
                 broadcastRef.set({
                   name: runnerName,
-                  path: pathCoords,
                   current: [lon, lat],
                   distance: metersToMiles(totalDistanceMeters),
                   pace: computedInstPace,
                   avgPace: avgPace,
                   timestamp: now,
                   startTime: startTime,
+                  path: pathCoords,
                 });
               }
 
@@ -667,7 +621,7 @@
                 metersToMiles(totalDistanceMeters),
                 computedInstPace,
                 avgPace,
-                totalTimeMs,
+                elapsedMs,
                 elevationFt
               );
             } else {
@@ -676,25 +630,26 @@
               if (broadcasting && broadcastRef) {
                 broadcastRef.set({
                   name: runnerName,
-                  path: pathCoords,
                   current: [lon, lat],
                   distance: 0,
                   pace: 0,
                   avgPace: 0,
                   timestamp: now,
                   startTime: startTime,
+                  path: pathCoords,
                 });
               }
               updateStatsDisplay(0, 0, 0, 0, elevationFt);
             }
 
-            // Build pointData after updating lastPointTime
+            // Build pointData after computing pace but before updating lastPointTime
             let instForPoint = 0;
             let avgForPoint = 0;
+            const distanceMi = metersToMiles(totalDistanceMeters);
             if (pathCoords.length > 0) {
-              const timeDeltaMin = (now - lastPointTime) / 60000;
               const prev = pathCoords[pathCoords.length - 1];
               const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
+              const timeDeltaMin = (now - lastPointTime) / 60000;
               instForPoint = timeDeltaMin / metersToMiles(segmentDist);
               const totalTimeMin = (now - startTime) / 60000;
               avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
@@ -702,13 +657,11 @@
 
             lastPointTime = now;
 
-            const distanceMi = metersToMiles(totalDistanceMeters);
-            const timeString = new Date(now).toISOString();
             const pointData = {
               lat: lat,
               lon: lon,
               timestamp: now,
-              time: timeString,
+              time: new Date(now).toISOString(),
               elevation: elevMeters != null ? elevMeters : null,
               distance: distanceMi,
               instPace: instForPoint,
@@ -728,14 +681,10 @@
 
     /*────────────────────────────────────────────────────────────────
       STEP J: STOP TRACKING
-      • Clear whichever watcher was used:
-        – browserWatchId (Navigator) or
-        – bgLocationSubscription + stop BackgroundGeolocation
-      • Reveal “Convert to GPX” / “Upload to Strava” buttons.
+      • Clear whichever watcher was used, then reveal GPX/Strava buttons.
     ─────────────────────────────────────────────────────────────────*/
     async function stopTracking() {
       if (usingBackgroundPlugin) {
-        // Remove the location listener and stop the service
         if (bgLocationSubscription) {
           bgLocationSubscription.remove();
           bgLocationSubscription = null;
@@ -746,7 +695,6 @@
           console.error("Error stopping BackgroundGeolocation:", e);
         }
       } else {
-        // Clear browser watcher if it exists:
         if (browserWatchId !== null) {
           navigator.geolocation.clearWatch(browserWatchId);
           browserWatchId = null;
@@ -758,10 +706,8 @@
       if (broadcasting && broadcastRef) {
         broadcasting = false;
       }
-      // Show GPX/Strava buttons once run is finished
       exportGpxBtn.style.display = "inline-block";
       uploadStravaBtn.style.display = "inline-block";
-      // Leave stats bar visible until page refresh
     }
 
     startBtn.addEventListener("click", startTracking);
@@ -790,19 +736,19 @@
 
         broadcastRef.set({
           name: runnerName,
-          path: pathCoords,
           current: lastCoord,
           distance: metersToMiles(totalDistanceMeters),
           pace: 0,
           avgPace: 0,
           timestamp: Date.now(),
           startTime: startTime,
+          path: pathCoords,
         });
       }
     });
 
     /*────────────────────────────────────────────────────────────────
-      STEP L: VIEWER SIDE (Same as before: watch Firebase for a selected runner)
+      STEP L: VIEWER SIDE (watch Firebase for a selected runner)
     ─────────────────────────────────────────────────────────────────*/
     searchInput.addEventListener("input", () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -840,7 +786,6 @@
         const data = snap.val();
         if (!data || !data.current) return;
 
-        // Update or create red marker
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: "red" })
             .setLngLat(data.current)
@@ -849,7 +794,6 @@
           viewerMarker.setLngLat(data.current);
         }
 
-        // Build a GeoJSON LineString from data.path (array of objects)
         const coords = (data.path || []).map((pt) => [pt.lon, pt.lat]);
         if (!map.getSource("run-path")) {
           map.addSource("run-path", {
@@ -878,10 +822,9 @@
             ? data.timestamp - data.startTime
             : 0;
 
-        let elevationFt = null;
         const [lon, lat] = data.current;
         const elevMeters = await fetchElevation(lat, lon);
-        if (elevMeters != null) elevationFt = elevMeters * 3.28084;
+        const elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
 
         updateStatsDisplay(
           data.distance || 0,

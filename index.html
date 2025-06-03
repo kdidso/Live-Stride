@@ -210,8 +210,8 @@
   <div id="layerToggle">
     <label for="layerSelect">Map:</label>
     <select id="layerSelect">
-      <option value="default">Default</option>
-      <option value="satellite">Satellite</option>
+      <option value="satellite" selected>Satellite</option>
+      <option value="streets">Streets</option>
     </select>
   </div>
 
@@ -220,7 +220,27 @@
 
   <script>
     /*────────────────────────────────────────────────────────────────
-      STEP B: Firebase initialization
+      STEP A: Enable Cordova background‐mode (Android only)
+    ─────────────────────────────────────────────────────────────────*/
+    document.addEventListener('deviceready', () => {
+      if (
+        window.Capacitor &&
+        window.cordova &&
+        cordova.plugins &&
+        cordova.plugins.backgroundMode
+      ) {
+        cordova.plugins.backgroundMode.enable();
+        console.log('🟢 Cordova backgroundMode enabled.');
+
+        // As a sanity‐check, listen for actual activation:
+        cordova.plugins.backgroundMode.on('activate', () => {
+          console.log('🟡 Background mode actually activated.');
+        });
+      }
+    });
+
+    /*────────────────────────────────────────────────────────────────
+      STEP B: Firebase initialization (unchanged)
     ─────────────────────────────────────────────────────────────────*/
     const firebaseConfig = {
       apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
@@ -236,16 +256,15 @@
 
     /*────────────────────────────────────────────────────────────────
       STEP C: MapLibre map + controls
-      (Use public MapLibre demo tiles so it always loads)
     ─────────────────────────────────────────────────────────────────*/
     const STYLES = {
-      default: "https://demotiles.maplibre.org/style.json",
-      satellite: "https://demotiles.maplibre.org/style.json"
+      satellite: "https://demotiles.maplibre.org/style.json",
+      streets:   "https://demotiles.maplibre.org/style.json"
     };
 
     let map = new maplibregl.Map({
       container: "map",
-      style: STYLES.default,
+      style: STYLES.satellite,
       center: [-113.6, 37.1],
       zoom: 13,
     });
@@ -269,9 +288,10 @@
     map.on("style.load", addControls);
 
     layerSelect.addEventListener("change", () => {
-      const chosen = layerSelect.value; // "default" or "satellite"
-      const newStyle = STYLES[chosen] || STYLES.default;
+      const chosen = layerSelect.value; // "satellite" or "streets"
+      const newStyle = STYLES[chosen] || STYLES.satellite;
       map.setStyle(newStyle);
+      // Controls will be re‐added on 'style.load'
     });
 
     /*────────────────────────────────────────────────────────────────
@@ -559,8 +579,7 @@
             const elevMeters = await fetchElevation(lat, lon);
             const distanceMi = metersToMiles(totalDistanceMeters);
             if (pathCoords.length > 0) {
-              // We already computed computedInstPace above for the stats and Firebase
-              // Use that same value here as instForPoint
+              // Reuse the same computedInstPace for this segment:
               const timeDeltaMin = (now - lastPointTime) / 60000;
               const prev = pathCoords[pathCoords.length - 1];
               const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
@@ -783,7 +802,7 @@
     });
 
     /*────────────────────────────────────────────────────────────────
-      STEP L: VIEWER SIDE (Watch Firebase for a selected runner)
+      STEP L: VIEWER SIDE (Same as before: watch Firebase for a selected runner)
     ─────────────────────────────────────────────────────────────────*/
     searchInput.addEventListener("input", () => {
       const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, "");

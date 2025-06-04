@@ -472,16 +472,19 @@ async function startTracking() {
     usingBackgroundPlugin = true;
 
     // Configure the background‐geolocation service for 1 Hz updates
+    console.log("🔄 Configuring BackgroundGeolocation plugin...");
+
     await BackgroundGeolocation.configure({
       desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
-      distanceFilter: 0,       // Report every meter of movement
-      interval: 1000,          // Request ~1 second interval
+      distanceFilter: 0,
+      interval: 1000,
       notificationTitle: 'LiveStride tracking',
       notificationText: 'Recording your run…',
-      // iOS-specific (if building for iOS later):
-      // pausesLocationUpdatesAutomatically: false,
-      // allowsBackgroundLocationUpdates: true,
+      stopOnTerminate: false,   // 💡 Persist after user closes app
+      startOnBoot: true         // 💡 Resume after phone restarts
     });
+
+    console.log("✅ Configuration complete. Starting background service...");
 
     // Subscribe to location updates
     bgLocationSubscription = BackgroundGeolocation.addListener(

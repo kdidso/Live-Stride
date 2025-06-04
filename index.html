@@ -468,116 +468,121 @@ async function startTracking() {
     typeof window.BackgroundGeolocation.configure === "function";
 
   if (isAndroidBG) {
+    // ─── ANDROID: USE @capacitor-community/background-geolocation ─────────────────
     usingBackgroundPlugin = true;
 
-    console.log("🔄 Configuring BackgroundGeolocation plugin...");
-
+    // Configure the background‐geolocation service for 1 Hz updates
     await BackgroundGeolocation.configure({
       desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
-      distanceFilter: 0,
-      interval: 1000,
+      distanceFilter: 0,       // Report every meter of movement
+      interval: 1000,          // Request ~1 second interval
       notificationTitle: 'LiveStride tracking',
       notificationText: 'Recording your run…',
-      stopOnTerminate: false,   // 💡 Persist after user closes app
-      startOnBoot: true         // 💡 Resume after phone restarts
+      // iOS-specific (if building for iOS later):
+      // pausesLocationUpdatesAutomatically: false,
+      // allowsBackgroundLocationUpdates: true,
     });
 
-    console.log("✅ Configuration complete. Starting background service...");
+    // Subscribe to location updates
+    bgLocationSubscription = BackgroundGeolocation.addListener(
+      'location',
+      async (location) => {
+        const lon = location.coords.longitude;
+        const lat = location.coords.latitude;
+        const now = Date.now();
 
-    bgLocationSubscription = BackgroundGeolocation.addListener('location', async (location) => {
-      const lon = location.coords.longitude;
-      const lat = location.coords.latitude;
-      const now = Date.now();
-
-      if (isFollowing) {
-        map.setCenter([lon, lat]);
-      }
-
-      let elevationFt = null;
-      const elevMeters = await fetchElevation(lat, lon);
-      if (elevMeters != null) elevationFt = elevMeters * 3.28084;
-
-      let instPace = 0;
-      let avgPace = 0;
-      let totalTimeMs = 0;
-
-      if (pathCoords.length > 0) {
-        const prevPoint = pathCoords[pathCoords.length - 1];
-        const prevCoord = [prevPoint.lon, prevPoint.lat];
-
-        const timeDeltaMin = (now - lastPointTime) / 60000;
-        const segmentDist = haversineDistance(prevCoord, [lon, lat]);
-        totalDistanceMeters += segmentDist;
-
-        instPace = timeDeltaMin / metersToMiles(segmentDist);
-        const totalTimeMin = (now - startTime) / 60000;
-        avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-        totalTimeMs = now - startTime;
-
-        if (broadcasting && broadcastRef) {
-          broadcastRef.set({
-            name: runnerName,
-            path: pathCoords,
-            current: [lon, lat],
-            distance: metersToMiles(totalDistanceMeters),
-            pace: instPace,
-            avgPace: avgPace,
-            timestamp: now,
-            startTime: startTime,
-          });
+        if (isFollowing) {
+          map.setCenter([lon, lat]);
         }
 
-        updateStatsDisplay(
-          metersToMiles(totalDistanceMeters),
-          instPace,
-          avgPace,
-          totalTimeMs,
-          elevationFt
-        );
-      } else {
-        startTime = now;
-        if (broadcasting && broadcastRef) {
-          broadcastRef.set({
-            name: runnerName,
-            path: pathCoords,
-            current: [lon, lat],
-            distance: 0,
-            pace: 0,
-            avgPace: 0,
-            timestamp: now,
-            startTime: startTime,
-          });
+        // Fetch elevation (m → ft)
+        let elevationFt = null;
+        const elevMeters = await fetchElevation(lat, lon);
+        if (elevMeters != null) elevationFt = elevMeters * 3.28084;
+
+        let instPace = 0;
+        let avgPace = 0;
+        let totalTimeMs = 0;
+
+        if (pathCoords.length > 0) {
+          const prevPoint = pathCoords[pathCoords.length - 1];
+          const prevCoord = [prevPoint.lon, prevPoint.lat];
+
+          // ── Compute time delta & segment distance using the *old* lastPointTime
+          const timeDeltaMin = (now - lastPointTime) / 60000;
+          const segmentDist = haversineDistance(prevCoord, [lon, lat]);
+          totalDistanceMeters += segmentDist;
+
+          // ── Compute instant & average pace before updating lastPointTime
+          instPace    = timeDeltaMin / metersToMiles(segmentDist);
+          const totalTimeMin = (now - startTime) / 60000;
+          avgPace     = totalTimeMin / metersToMiles(totalDistanceMeters);
+          totalTimeMs = now - startTime;
+
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: [lon, lat],
+              distance: metersToMiles(totalDistanceMeters),
+              pace: instPace,
+              avgPace: avgPace,
+              timestamp: now,
+              startTime: startTime,
+            });
+          }
+
+          updateStatsDisplay(
+            metersToMiles(totalDistanceMeters),
+            instPace,
+            avgPace,
+            totalTimeMs,
+            elevationFt
+          );
+        } else {
+          // ── First point: initialize startTime and stats to zero
+          startTime = now;
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: [lon, lat],
+              distance: 0,
+              pace: 0,
+              avgPace: 0,
+              timestamp: now,
+              startTime: startTime,
+            });
+          }
+          updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
-        updateStatsDisplay(0, 0, 0, 0, elevationFt);
+
+        // ── NOW update lastPointTime (so the next call has the correct “old” timestamp)
+        lastPointTime = now;
+
+        // ── Build pointData using the instPace & avgPace we just computed
+        const distanceMi = metersToMiles(totalDistanceMeters);
+        const pointData = {
+          lat: lat,
+          lon: lon,
+          timestamp: now,
+          time: new Date(now).toISOString(),
+          elevation: elevMeters != null ? elevMeters : null,
+          distance: distanceMi,
+          instPace: instPace,
+          avgPace:  avgPace,
+        };
+        pathCoords.push(pointData);
+
+        addOrUpdatePath();
       }
+    );
 
-      lastPointTime = now;
-
-      const distanceMi = metersToMiles(totalDistanceMeters);
-      const pointData = {
-        lat: lat,
-        lon: lon,
-        timestamp: now,
-        time: new Date(now).toISOString(),
-        elevation: elevMeters != null ? elevMeters : null,
-        distance: distanceMi,
-        instPace: instPace,
-        avgPace: avgPace,
-      };
-      pathCoords.push(pointData);
-
-      addOrUpdatePath();
-    });
-
-    try {
-      await BackgroundGeolocation.start();
-      console.log("✅ BackgroundGeolocation service started successfully");
-    } catch (e) {
-      console.error("❌ Failed to start BackgroundGeolocation:", e);
-    }
+    // Start the background service
+    await BackgroundGeolocation.start();
 
   } else {
-    // ─── Web or non-Android fallback ───
+    // ─── BROWSER: FALL BACK TO navigator.geolocation.watchPosition ─────────────────
     usingBackgroundPlugin = false;
 
     if (!("geolocation" in navigator)) {
@@ -613,13 +618,15 @@ async function startTracking() {
           const prevPoint = pathCoords[pathCoords.length - 1];
           const prevCoord = [prevPoint.lon, prevPoint.lat];
 
+          // ── Compute time delta & segment distance using the *old* lastPointTime
           const timeDeltaMin = (now - lastPointTime) / 60000;
           const segmentDist = haversineDistance(prevCoord, [lon, lat]);
           totalDistanceMeters += segmentDist;
 
-          instPace = timeDeltaMin / metersToMiles(segmentDist);
+          // ── Compute instant & average pace before updating lastPointTime
+          instPace    = timeDeltaMin / metersToMiles(segmentDist);
           const totalTimeMin = (now - startTime) / 60000;
-          avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+          avgPace     = totalTimeMin / metersToMiles(totalDistanceMeters);
           totalTimeMs = now - startTime;
 
           if (broadcasting && broadcastRef) {
@@ -643,6 +650,7 @@ async function startTracking() {
             elevationFt
           );
         } else {
+          // ── First point: initialize startTime and stats to zero
           startTime = now;
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
@@ -659,8 +667,10 @@ async function startTracking() {
           updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
 
+        // ── NOW update lastPointTime (so the next call has the correct “old” timestamp)
         lastPointTime = now;
 
+        // ── Build pointData using the instPace & avgPace we just computed
         const distanceMi = metersToMiles(totalDistanceMeters);
         const pointData = {
           lat: lat,
@@ -670,14 +680,14 @@ async function startTracking() {
           elevation: elevMeters != null ? elevMeters : null,
           distance: distanceMi,
           instPace: instPace,
-          avgPace: avgPace,
+          avgPace:  avgPace,
         };
         pathCoords.push(pointData);
 
         addOrUpdatePath();
       },
       (err) => {
-        console.error("navigator.geolocation.watchPosition error:", err);
+        console.error("Navigator.geolocation.watchPosition error:", err);
       },
       browserOptions
     );

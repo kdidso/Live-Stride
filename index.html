@@ -13,39 +13,34 @@
       so desktop/mobile‐browser users are unaffected.
   ────────────────────────────────────────────────────────────────────-->
   <script type="module">
-    import { Capacitor } from 'https://cdn.jsdelivr.net/npm/@capacitor/core/+esm';
-    import { BackgroundGeolocation } from 'https://cdn.jsdelivr.net/npm/@capacitor-community/background-geolocation/+esm';
+  document.addEventListener('DOMContentLoaded', async () => {
+    if (window.Capacitor && Capacitor.getPlatform() === 'android') {
+      try {
+        // Use the native plugin (registered via MainActivity.java)
+        const { BackgroundGeolocation } = Capacitor.Plugins;
+        window.BackgroundGeolocation = BackgroundGeolocation;
 
-    // Expose the plugin for startTracking/stopTracking to use:
-    window.BackgroundGeolocation = BackgroundGeolocation;
+        const { Geolocation } = Capacitor.Plugins;
+        window.CapGeolocation = Geolocation;
 
-    document.addEventListener('DOMContentLoaded', async () => {
-      if (window.Capacitor && Capacitor.getPlatform() === 'android') {
-        try {
-          // Dynamically import the Capacitor Geolocation plugin (for permission request)
-          const { Geolocation } = await import('https://cdn.jsdelivr.net/npm/@capacitor/geolocation/+esm');
-          window.CapGeolocation = Geolocation;
+        // Request BOTH foreground and background location permissions
+        const permResult = await window.CapGeolocation.requestPermissions({
+          permissions: ['location', 'locationBackground']
+        });
 
-          // Request BOTH foreground (location) and background (locationBackground)
-          const permResult = await Geolocation.requestPermissions({
-            permissions: ['location', 'locationBackground']
-          });
-
-          console.log('Permission result:', permResult);
-          if (permResult.location !== 'granted') {
-            alert('⚠️ Foreground location permission is required for LiveStride to function.');
-          }
-          if (permResult.locationBackground !== 'granted') {
-            console.warn(
-              '⚠️ Background location permission was denied. App will work in foreground only.'
-            );
-          }
-        } catch (e) {
-          console.error('Error requesting Capacitor geolocation permissions:', e);
+        console.log('Permission result:', permResult);
+        if (permResult.location !== 'granted') {
+          alert('⚠️ Foreground location permission is required.');
         }
+        if (permResult.locationBackground !== 'granted') {
+          console.warn('⚠️ Background location permission was denied.');
+        }
+      } catch (e) {
+        console.error('Error setting up geolocation plugins:', e);
       }
-    });
-  </script>
+    }
+  });
+</script>
   <!--───────────────────────────────────────────────────────────────────-->
 
   <!-- MapLibre & Firebase scripts (unchanged) -->

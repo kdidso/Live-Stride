@@ -542,6 +542,10 @@ async function startTracking() {
             totalTimeMs,
             elevationFt
           );
+          await BackgroundGeolocation.updateNotification({
+  title: 'LiveStride – Running',
+  text: `${formatTime(totalTimeMs)} – ${metersToMiles(totalDistanceMeters).toFixed(2)} mi`
+});
         } else {
           // ── First point: initialize startTime and stats to zero
           startTime = now;

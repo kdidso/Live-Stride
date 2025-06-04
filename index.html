@@ -218,28 +218,6 @@
   <button id="recenterBtn">Recenter</button>
 
   <script>
-    /*────────────────────────────────────────────────────────────────
-      STEP A: Enable Cordova background‐mode (Android only)
-      ----------------------------------------------------
-      Wait for 'deviceready' so that cordova.plugins.backgroundMode is available.
-      Once enabled, the WebView will keep running even if the screen locks.
-    ─────────────────────────────────────────────────────────────────*/
-    document.addEventListener('deviceready', () => {
-      if (
-        window.Capacitor &&
-        window.cordova &&
-        cordova.plugins &&
-        cordova.plugins.backgroundMode
-      ) {
-        cordova.plugins.backgroundMode.enable();
-        console.log('🟢 Cordova backgroundMode enabled.');
-
-        // As a sanity‐check, listen for actual activation:
-        cordova.plugins.backgroundMode.on('activate', () => {
-          console.log('🟡 Background mode actually activated.');
-        });
-      }
-    });
 
     /*────────────────────────────────────────────────────────────────
       STEP B: Firebase initialization (unchanged)
@@ -468,260 +446,268 @@
     }
 
     /*────────────────────────────────────────────────────────────────
-      STEP I: START TRACKING
-      • We branch depending on “Am I in Capacitor/Android with BG plugin?”
-      • If Android → use @capacitor-community/background-geolocation plugin
-      • If NOT (e.g. web browser) → use navigator.geolocation.watchPosition
-      • We store either browserWatchId or bgLocationSubscription so that
-        stopTracking() can clear the right one.
-    ─────────────────────────────────────────────────────────────────*/
-    async function startTracking() {
-      pathCoords = [];
-      totalDistanceMeters = 0;
-      startTime = null;
-      lastPointTime = null;
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      statsBar.style.display = "block";
+  STEP I: START TRACKING
+  • We branch depending on “Am I in Capacitor/Android with BG plugin?”
+  • If Android → use @capacitor-community/background-geolocation plugin
+  • If NOT (e.g. web browser) → use navigator.geolocation.watchPosition
+  • We store either browserWatchId or bgLocationSubscription so that
+    stopTracking() can clear the right one.
+─────────────────────────────────────────────────────────────────*/
+async function startTracking() {
+  pathCoords = [];
+  totalDistanceMeters = 0;
+  startTime = null;
+  lastPointTime = null;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  statsBar.style.display = "block";
 
-      const isAndroidBG =
-        window.Capacitor &&
-        window.BackgroundGeolocation &&
-        typeof window.BackgroundGeolocation.configure === "function";
+  const isAndroidBG =
+    window.Capacitor &&
+    window.BackgroundGeolocation &&
+    typeof window.BackgroundGeolocation.configure === "function";
 
-      if (isAndroidBG) {
-        // ─── ANDROID: USE @capacitor-community/background-geolocation ─────────────────
-        usingBackgroundPlugin = true;
+  if (isAndroidBG) {
+    // ─── ANDROID: USE @capacitor-community/background-geolocation ─────────────────
+    usingBackgroundPlugin = true;
 
-        // Configure the background‐geolocation service for 1 Hz updates
-        await BackgroundGeolocation.configure({
-          desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
-          distanceFilter: 0,       // Report every meter change
-          interval: 1000,          // Request ~1 second interval
-          notificationTitle: 'LiveStride tracking',
-          notificationText: 'Recording your run…',
-          // iOS-specific (if you also build for iOS later):
-          // pausesLocationUpdatesAutomatically: false,
-          // allowsBackgroundLocationUpdates: true,
-        });
+    // Configure the background‐geolocation service for 1 Hz updates
+    await BackgroundGeolocation.configure({
+      desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
+      distanceFilter: 0,       // Report every meter change
+      interval: 1000,          // Request ~1 second interval
+      notificationTitle: 'LiveStride tracking',
+      notificationText: 'Recording your run…',
+      // iOS-specific (if you also build for iOS later):
+      // pausesLocationUpdatesAutomatically: false,
+      // allowsBackgroundLocationUpdates: true,
+    });
 
-        // Subscribe to location updates
-        bgLocationSubscription = BackgroundGeolocation.addListener(
-          'location',
-          async (location) => {
-            const lon = location.coords.longitude;
-            const lat = location.coords.latitude;
-            const now = Date.now();
+    // Subscribe to location updates
+    bgLocationSubscription = BackgroundGeolocation.addListener(
+      'location',
+      async (location) => {
+        const lon = location.coords.longitude;
+        const lat = location.coords.latitude;
+        const now = Date.now();
 
-            if (isFollowing) {
-              map.setCenter([lon, lat]);
-            }
-
-            // Fetch elevation (m → ft)
-            let elevationFt = null;
-            const elevMeters = await fetchElevation(lat, lon);
-            if (elevMeters != null) elevationFt = elevMeters * 3.28084;
-
-            if (pathCoords.length > 0) {
-              const prevPoint = pathCoords[pathCoords.length - 1];
-              const prevCoord = [prevPoint.lon, prevPoint.lat];
-
-              const timeDeltaMin = (now - lastPointTime) / 60000;
-              const segmentDist = haversineDistance(prevCoord, [lon, lat]);
-              totalDistanceMeters += segmentDist;
-
-              const instPace = timeDeltaMin / metersToMiles(segmentDist);
-              const totalTimeMin = (now - startTime) / 60000;
-              const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-              const totalTimeMs = now - startTime;
-
-              if (broadcasting && broadcastRef) {
-                broadcastRef.set({
-                  name: runnerName,
-                  path: pathCoords,
-                  current: [lon, lat],
-                  distance: metersToMiles(totalDistanceMeters),
-                  pace: instPace,
-                  avgPace: avgPace,
-                  timestamp: now,
-                  startTime: startTime,
-                });
-              }
-
-              updateStatsDisplay(
-                metersToMiles(totalDistanceMeters),
-                instPace,
-                avgPace,
-                totalTimeMs,
-                elevationFt
-              );
-            } else {
-              // First point
-              startTime = now;
-              if (broadcasting && broadcastRef) {
-                broadcastRef.set({
-                  name: runnerName,
-                  path: pathCoords,
-                  current: [lon, lat],
-                  distance: 0,
-                  pace: 0,
-                  avgPace: 0,
-                  timestamp: now,
-                  startTime: startTime,
-                });
-              }
-              updateStatsDisplay(0, 0, 0, 0, elevationFt);
-            }
-
-            lastPointTime = now;
-
-            // Build point object for GPX later
-            const pointData = {
-              lat: lat,
-              lon: lon,
-              timestamp: now,
-              time: new Date(now).toISOString(),
-              elevation: elevMeters ?? null,
-              distance: metersToMiles(totalDistanceMeters),
-              instPace:
-                pathCoords.length > 0
-                  ? ((now - lastPointTime) / 60000) /
-                    metersToMiles(
-                      haversineDistance(
-                        [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat],
-                        [lon, lat]
-                      )
-                    )
-                  : 0,
-              avgPace:
-                pathCoords.length > 0
-                  ? ((now - startTime) / 60000) / metersToMiles(totalDistanceMeters)
-                  : 0,
-            };
-            pathCoords.push(pointData);
-
-            addOrUpdatePath();
-          }
-        );
-
-        // Start the background service
-        await BackgroundGeolocation.start();
-      } else {
-        // ─── BROWSER: FALL BACK TO navigator.geolocation.watchPosition ─────────────────
-        usingBackgroundPlugin = false;
-
-        if (!("geolocation" in navigator)) {
-          console.error("Navigator.geolocation not available!");
-          return;
+        if (isFollowing) {
+          map.setCenter([lon, lat]);
         }
 
-        const browserOptions = {
-          enableHighAccuracy: true,
-          maximumAge: 1000,
-          timeout: 10000,
-        };
+        // Fetch elevation (m → ft)
+        let elevationFt = null;
+        const elevMeters = await fetchElevation(lat, lon);
+        if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
-        browserWatchId = navigator.geolocation.watchPosition(
-          async (pos) => {
-            const lon = pos.coords.longitude;
-            const lat = pos.coords.latitude;
-            const now = Date.now();
+        if (pathCoords.length > 0) {
+          const prevPoint = pathCoords[pathCoords.length - 1];
+          const prevCoord = [prevPoint.lon, prevPoint.lat];
 
-            if (isFollowing) {
-              map.setCenter([lon, lat]);
-            }
+          // Compute time delta & segment distance
+          const timeDeltaMin = (now - lastPointTime) / 60000;
+          const segmentDist = haversineDistance(prevCoord, [lon, lat]);
+          totalDistanceMeters += segmentDist;
 
-            let elevationFt = null;
-            const elevMeters = await fetchElevation(lat, lon);
-            if (elevMeters != null) elevationFt = elevMeters * 3.28084;
+          // Compute instant & average pace before updating lastPointTime
+          const instPace = timeDeltaMin / metersToMiles(segmentDist);
+          const totalTimeMin = (now - startTime) / 60000;
+          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+          const totalTimeMs = now - startTime;
 
-            if (pathCoords.length > 0) {
-              const prevPoint = pathCoords[pathCoords.length - 1];
-              const prevCoord = [prevPoint.lon, prevPoint.lat];
-
-              const timeDeltaMin = (now - lastPointTime) / 60000;
-              const segmentDist = haversineDistance(prevCoord, [lon, lat]);
-              totalDistanceMeters += segmentDist;
-
-              const instPace = timeDeltaMin / metersToMiles(segmentDist);
-              const totalTimeMin = (now - startTime) / 60000;
-              const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-              const totalTimeMs = now - startTime;
-
-              if (broadcasting && broadcastRef) {
-                broadcastRef.set({
-                  name: runnerName,
-                  path: pathCoords,
-                  current: [lon, lat],
-                  distance: metersToMiles(totalDistanceMeters),
-                  pace: instPace,
-                  avgPace: avgPace,
-                  timestamp: now,
-                  startTime: startTime,
-                });
-              }
-
-              updateStatsDisplay(
-                metersToMiles(totalDistanceMeters),
-                instPace,
-                avgPace,
-                totalTimeMs,
-                elevationFt
-              );
-            } else {
-              // First point
-              startTime = now;
-              if (broadcasting && broadcastRef) {
-                broadcastRef.set({
-                  name: runnerName,
-                  path: pathCoords,
-                  current: [lon, lat],
-                  distance: 0,
-                  pace: 0,
-                  avgPace: 0,
-                  timestamp: now,
-                  startTime: startTime,
-                });
-              }
-              updateStatsDisplay(0, 0, 0, 0, elevationFt);
-            }
-
-            lastPointTime = now;
-
-            const pointData = {
-              lat: lat,
-              lon: lon,
-              timestamp: now,
-              time: new Date(now).toISOString(),
-              elevation: elevMeters ?? null,
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: [lon, lat],
               distance: metersToMiles(totalDistanceMeters),
-              instPace:
-                pathCoords.length > 0
-                  ? ((now - lastPointTime) / 60000) /
-                    metersToMiles(
-                      haversineDistance(
-                        [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat],
-                        [lon, lat]
-                      )
-                    )
-                  : 0,
-              avgPace:
-                pathCoords.length > 0
-                  ? ((now - startTime) / 60000) / metersToMiles(totalDistanceMeters)
-                  : 0,
-            };
-            pathCoords.push(pointData);
+              pace: instPace,
+              avgPace: avgPace,
+              timestamp: now,
+              startTime: startTime,
+            });
+          }
 
-            addOrUpdatePath();
-          },
-          (err) => {
-            console.error("Navigator.geolocation.watchPosition error:", err);
-          },
-          browserOptions
-        );
+          updateStatsDisplay(
+            metersToMiles(totalDistanceMeters),
+            instPace,
+            avgPace,
+            totalTimeMs,
+            elevationFt
+          );
+        } else {
+          // First point
+          startTime = now;
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: [lon, lat],
+              distance: 0,
+              pace: 0,
+              avgPace: 0,
+              timestamp: now,
+              startTime: startTime,
+            });
+          }
+          updateStatsDisplay(0, 0, 0, 0, elevationFt);
+        }
+
+        // Now update lastPointTime
+        lastPointTime = now;
+
+        // Build pointData using instPace & avgPace computed above
+        const distanceMi = metersToMiles(totalDistanceMeters);
+        let instForPoint = 0;
+        let avgForPoint = 0;
+        if (pathCoords.length > 0) {
+          // Recompute to ensure consistency
+          const prev = pathCoords[pathCoords.length - 1];
+          const timeDeltaMin = (now - lastPointTime) / 60000;
+          const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
+          instForPoint = timeDeltaMin / metersToMiles(segmentDist);
+          const totalTimeMin = (now - startTime) / 60000;
+          avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
+        }
+
+        const pointData = {
+          lat: lat,
+          lon: lon,
+          timestamp: now,
+          time: new Date(now).toISOString(),
+          elevation: elevMeters != null ? elevMeters : null,
+          distance: distanceMi,
+          instPace: pathCoords.length > 0 ? instForPoint : 0,
+          avgPace:  pathCoords.length > 0 ? avgForPoint  : 0,
+        };
+        pathCoords.push(pointData);
+
+        addOrUpdatePath();
       }
+    );
+
+    // Start the background service
+    await BackgroundGeolocation.start();
+
+  } else {
+    // ─── BROWSER: FALL BACK TO navigator.geolocation.watchPosition ─────────────────
+    usingBackgroundPlugin = false;
+
+    if (!("geolocation" in navigator)) {
+      console.error("Navigator.geolocation not available!");
+      return;
     }
 
+    const browserOptions = {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 10000,
+    };
+
+    browserWatchId = navigator.geolocation.watchPosition(
+      async (pos) => {
+        const lon = pos.coords.longitude;
+        const lat = pos.coords.latitude;
+        const now = Date.now();
+
+        if (isFollowing) {
+          map.setCenter([lon, lat]);
+        }
+
+        let elevationFt = null;
+        const elevMeters = await fetchElevation(lat, lon);
+        if (elevMeters != null) elevationFt = elevMeters * 3.28084;
+
+        if (pathCoords.length > 0) {
+          const prevPoint = pathCoords[pathCoords.length - 1];
+          const prevCoord = [prevPoint.lon, prevPoint.lat];
+
+          // Compute time delta & segment distance
+          const timeDeltaMin = (now - lastPointTime) / 60000;
+          const segmentDist = haversineDistance(prevCoord, [lon, lat]);
+          totalDistanceMeters += segmentDist;
+
+          // Compute instant & average pace before updating lastPointTime
+          const instPace = timeDeltaMin / metersToMiles(segmentDist);
+          const totalTimeMin = (now - startTime) / 60000;
+          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
+          const totalTimeMs = now - startTime;
+
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: [lon, lat],
+              distance: metersToMiles(totalDistanceMeters),
+              pace: instPace,
+              avgPace: avgPace,
+              timestamp: now,
+              startTime: startTime,
+            });
+          }
+
+          updateStatsDisplay(
+            metersToMiles(totalDistanceMeters),
+            instPace,
+            avgPace,
+            totalTimeMs,
+            elevationFt
+          );
+        } else {
+          // First point
+          startTime = now;
+          if (broadcasting && broadcastRef) {
+            broadcastRef.set({
+              name: runnerName,
+              path: pathCoords,
+              current: [lon, lat],
+              distance: 0,
+              pace: 0,
+              avgPace: 0,
+              timestamp: now,
+              startTime: startTime,
+            });
+          }
+          updateStatsDisplay(0, 0, 0, 0, elevationFt);
+        }
+
+        // Now update lastPointTime
+        lastPointTime = now;
+
+        // Build pointData using instPace & avgPace computed above
+        const distanceMi = metersToMiles(totalDistanceMeters);
+        let instForPoint = 0;
+        let avgForPoint = 0;
+        if (pathCoords.length > 0) {
+          const prev = pathCoords[pathCoords.length - 1];
+          const timeDeltaMin = (now - lastPointTime) / 60000;
+          const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
+          instForPoint = timeDeltaMin / metersToMiles(segmentDist);
+          const totalTimeMin = (now - startTime) / 60000;
+          avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
+        }
+
+        const pointData = {
+          lat: lat,
+          lon: lon,
+          timestamp: now,
+          time: new Date(now).toISOString(),
+          elevation: elevMeters != null ? elevMeters : null,
+          distance: distanceMi,
+          instPace: pathCoords.length > 0 ? instForPoint : 0,
+          avgPace:  pathCoords.length > 0 ? avgForPoint  : 0,
+        };
+        pathCoords.push(pointData);
+
+        addOrUpdatePath();
+      },
+      (err) => {
+        console.error("Navigator.geolocation.watchPosition error:", err);
+      },
+      browserOptions
+    );
+  }
+}
     /*────────────────────────────────────────────────────────────────
       STEP J: STOP TRACKING
       • Clear whichever watcher was used:

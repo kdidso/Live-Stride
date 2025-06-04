@@ -445,7 +445,7 @@
       }
     }
 
-    /*────────────────────────────────────────────────────────────────
+   /*────────────────────────────────────────────────────────────────
   STEP I: START TRACKING
   • We branch depending on “Am I in Capacitor/Android with BG plugin?”
   • If Android → use @capacitor-community/background-geolocation plugin
@@ -474,11 +474,11 @@ async function startTracking() {
     // Configure the background‐geolocation service for 1 Hz updates
     await BackgroundGeolocation.configure({
       desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
-      distanceFilter: 0,       // Report every meter change
+      distanceFilter: 0,       // Report every meter of movement
       interval: 1000,          // Request ~1 second interval
       notificationTitle: 'LiveStride tracking',
       notificationText: 'Recording your run…',
-      // iOS-specific (if you also build for iOS later):
+      // iOS-specific (if building for iOS later):
       // pausesLocationUpdatesAutomatically: false,
       // allowsBackgroundLocationUpdates: true,
     });
@@ -500,20 +500,24 @@ async function startTracking() {
         const elevMeters = await fetchElevation(lat, lon);
         if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
+        let instPace = 0;
+        let avgPace = 0;
+        let totalTimeMs = 0;
+
         if (pathCoords.length > 0) {
           const prevPoint = pathCoords[pathCoords.length - 1];
           const prevCoord = [prevPoint.lon, prevPoint.lat];
 
-          // Compute time delta & segment distance
+          // ── Compute time delta & segment distance using the *old* lastPointTime
           const timeDeltaMin = (now - lastPointTime) / 60000;
           const segmentDist = haversineDistance(prevCoord, [lon, lat]);
           totalDistanceMeters += segmentDist;
 
-          // Compute instant & average pace before updating lastPointTime
-          const instPace = timeDeltaMin / metersToMiles(segmentDist);
+          // ── Compute instant & average pace before updating lastPointTime
+          instPace    = timeDeltaMin / metersToMiles(segmentDist);
           const totalTimeMin = (now - startTime) / 60000;
-          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-          const totalTimeMs = now - startTime;
+          avgPace     = totalTimeMin / metersToMiles(totalDistanceMeters);
+          totalTimeMs = now - startTime;
 
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
@@ -536,7 +540,7 @@ async function startTracking() {
             elevationFt
           );
         } else {
-          // First point
+          // ── First point: initialize startTime and stats to zero
           startTime = now;
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
@@ -553,23 +557,11 @@ async function startTracking() {
           updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
 
-        // Now update lastPointTime
+        // ── NOW update lastPointTime (so the next call has the correct “old” timestamp)
         lastPointTime = now;
 
-        // Build pointData using instPace & avgPace computed above
+        // ── Build pointData using the instPace & avgPace we just computed
         const distanceMi = metersToMiles(totalDistanceMeters);
-        let instForPoint = 0;
-        let avgForPoint = 0;
-        if (pathCoords.length > 0) {
-          // Recompute to ensure consistency
-          const prev = pathCoords[pathCoords.length - 1];
-          const timeDeltaMin = (now - lastPointTime) / 60000;
-          const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
-          instForPoint = timeDeltaMin / metersToMiles(segmentDist);
-          const totalTimeMin = (now - startTime) / 60000;
-          avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
-        }
-
         const pointData = {
           lat: lat,
           lon: lon,
@@ -577,8 +569,8 @@ async function startTracking() {
           time: new Date(now).toISOString(),
           elevation: elevMeters != null ? elevMeters : null,
           distance: distanceMi,
-          instPace: pathCoords.length > 0 ? instForPoint : 0,
-          avgPace:  pathCoords.length > 0 ? avgForPoint  : 0,
+          instPace: instPace,
+          avgPace:  avgPace,
         };
         pathCoords.push(pointData);
 
@@ -618,20 +610,24 @@ async function startTracking() {
         const elevMeters = await fetchElevation(lat, lon);
         if (elevMeters != null) elevationFt = elevMeters * 3.28084;
 
+        let instPace = 0;
+        let avgPace = 0;
+        let totalTimeMs = 0;
+
         if (pathCoords.length > 0) {
           const prevPoint = pathCoords[pathCoords.length - 1];
           const prevCoord = [prevPoint.lon, prevPoint.lat];
 
-          // Compute time delta & segment distance
+          // ── Compute time delta & segment distance using the *old* lastPointTime
           const timeDeltaMin = (now - lastPointTime) / 60000;
           const segmentDist = haversineDistance(prevCoord, [lon, lat]);
           totalDistanceMeters += segmentDist;
 
-          // Compute instant & average pace before updating lastPointTime
-          const instPace = timeDeltaMin / metersToMiles(segmentDist);
+          // ── Compute instant & average pace before updating lastPointTime
+          instPace    = timeDeltaMin / metersToMiles(segmentDist);
           const totalTimeMin = (now - startTime) / 60000;
-          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-          const totalTimeMs = now - startTime;
+          avgPace     = totalTimeMin / metersToMiles(totalDistanceMeters);
+          totalTimeMs = now - startTime;
 
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
@@ -654,7 +650,7 @@ async function startTracking() {
             elevationFt
           );
         } else {
-          // First point
+          // ── First point: initialize startTime and stats to zero
           startTime = now;
           if (broadcasting && broadcastRef) {
             broadcastRef.set({
@@ -671,22 +667,11 @@ async function startTracking() {
           updateStatsDisplay(0, 0, 0, 0, elevationFt);
         }
 
-        // Now update lastPointTime
+        // ── NOW update lastPointTime (so the next call has the correct “old” timestamp)
         lastPointTime = now;
 
-        // Build pointData using instPace & avgPace computed above
+        // ── Build pointData using the instPace & avgPace we just computed
         const distanceMi = metersToMiles(totalDistanceMeters);
-        let instForPoint = 0;
-        let avgForPoint = 0;
-        if (pathCoords.length > 0) {
-          const prev = pathCoords[pathCoords.length - 1];
-          const timeDeltaMin = (now - lastPointTime) / 60000;
-          const segmentDist = haversineDistance([prev.lon, prev.lat], [lon, lat]);
-          instForPoint = timeDeltaMin / metersToMiles(segmentDist);
-          const totalTimeMin = (now - startTime) / 60000;
-          avgForPoint = totalTimeMin / metersToMiles(totalDistanceMeters);
-        }
-
         const pointData = {
           lat: lat,
           lon: lon,
@@ -694,8 +679,8 @@ async function startTracking() {
           time: new Date(now).toISOString(),
           elevation: elevMeters != null ? elevMeters : null,
           distance: distanceMi,
-          instPace: pathCoords.length > 0 ? instForPoint : 0,
-          avgPace:  pathCoords.length > 0 ? avgForPoint  : 0,
+          instPace: instPace,
+          avgPace:  avgPace,
         };
         pathCoords.push(pointData);
 

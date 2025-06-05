@@ -476,7 +476,9 @@ async function startTracking() {
       notificationTitle: 'LiveStride tracking',
       notificationText: 'Recording your run…',
       stopOnTerminate: false,   // 💡 Persist after user closes app
-      startOnBoot: true         // 💡 Resume after phone restarts
+      startOnBoot: true,        // 💡 Resume after phone restarts
+      enableHeadless: true,
+      preventSuspend: true   
     });
 
     console.log("✅ Configuration complete. Starting background service...");

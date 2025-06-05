@@ -469,7 +469,7 @@ async function startTracking() {
     // Configure the background‐geolocation service for 1 Hz updates
     console.log("🔄 Configuring BackgroundGeolocation plugin...");
 
-    await BackgroundGeolocation.configure({
+    await BackgroundGeolocation.ready({
       desiredAccuracy: BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
       distanceFilter: 0,
       interval: 1000,

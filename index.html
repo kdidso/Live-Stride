@@ -497,17 +497,12 @@ function stopTracking() {
   if (broadcasting && broadcastRef) {
     broadcasting = false;
 
-    // ✅ Add this block to record the final elapsed time
-    if (startTime !== null) {
-      const finalTimeMs = Date.now() - startTime;
-      broadcastRef.update({ finalTimeMs });
-    }
-  }
       // Reveal the “Convert to GPX” and “Upload to Strava” buttons
       exportGpxBtn.style.display    = 'inline-block';
       uploadStravaBtn.style.display = 'inline-block';
       // Stats bar remains until page refresh
     }
+}
 
     startBtn.onclick = startTracking;
     stopBtn.onclick  = stopTracking;
@@ -619,7 +614,7 @@ ref.on('value', snap => {
     avgPace:      data.avgPace      || 0,
     startTime:    data.startTime    || null,
     current:      data.current      || null,
-    finalTimeMs:  data.finalTimeMs ?? null
+    timestamp:    data.timestamp    || null 
   };
 
   // Compute starting value for viewer's timer
@@ -631,24 +626,19 @@ ref.on('value', snap => {
     map.flyTo({ center: data.current, zoom: 16 });
   }
 });
-
 // ✅ Moved outside the Firebase listener — tick stats display every second
 if (viewerTimerId === null) {
   viewerTimerId = setInterval(async () => {
     if (!lastViewerData || lastViewerData.startTime == null) return;
 
-    // ✅ Stop exactly at finalTimeMs (if defined)
-    if (lastViewerData.finalTimeMs != null && lastViewerElapsed >= lastViewerData.finalTimeMs) {
-      clearInterval(viewerTimerId);
-      viewerTimerId = null;
-      lastViewerElapsed = lastViewerData.finalTimeMs;
-    } else {
-      if (lastViewerData.finalTimeMs != null) {
-        lastViewerElapsed = lastViewerData.finalTimeMs;
-      } else {
-        lastViewerElapsed += 1000;
-      }
-    }
+    // ✅ Stop exactly at timestamp
+if (lastViewerElapsed >= (lastViewerData.timestamp - lastViewerData.startTime)) {
+  clearInterval(viewerTimerId);
+  viewerTimerId = null;
+  lastViewerElapsed = lastViewerData.timestamp - lastViewerData.startTime; // Lock the display
+} else {
+  lastViewerElapsed += 1000;
+}
 
     let elevationFt = null;
     if (lastViewerData.current) {
@@ -670,6 +660,8 @@ if (viewerTimerId === null) {
 }
 
 
+
+
     // → Map layer toggle: change style URL and re-add controls
     layerSelect.addEventListener('change', () => {
       const chosen = layerSelect.value; // "satellite" or "streets"
@@ -677,7 +669,7 @@ if (viewerTimerId === null) {
       map.setStyle(newStyle);
       // Controls will be re-added in 'style.load' handler
     });
-
+   
     // → GPX Export: build a .gpx string from pathCoords and trigger download
     function convertToGPX() {
       if (!pathCoords.length) {
@@ -739,6 +731,7 @@ if (viewerTimerId === null) {
 
     // → On map load, default to Runner mode
     map.on('load', () => setMode('runner'));
-  </script>
+  }
+</script>
 </body>
 </html>

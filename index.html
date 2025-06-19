@@ -225,6 +225,10 @@
     let viewerFollowing = true;
     let selectedRunner = null;
 
+    let viewerTimerId = null;
+    let lastViewerData = null;
+    let lastViewerElapsed = 0;
+
     // → DOM references
     const startBtn         = document.getElementById('startBtn');
     const stopBtn          = document.getElementById('stopBtn');
@@ -556,69 +560,93 @@
     });
 
     // → Viewer: follow a specific runner via Firebase, with elevation lookup
-    function trackRunner(key) {
-      if (activeListener) activeListener.off();
-      const ref = db.ref(`runners/${key}`);
-      activeListener = ref;
-      ref.on('value', async snap => {
-        const data = snap.val();
-        if (!data || !data.current) return;
+function trackRunner(key) {
+  if (activeListener) activeListener.off();
+  if (viewerTimerId !== null) {
+    clearInterval(viewerTimerId);
+    viewerTimerId = null;
+  }
 
-        // Update or create the red marker for the runner’s “current” location
-        if (!viewerMarker) {
-          viewerMarker = new maplibregl.Marker({ color: 'red' })
-            .setLngLat(data.current)
-            .addTo(map);
-        } else {
-          viewerMarker.setLngLat(data.current);
-        }
+  const ref = db.ref(`runners/${key}`);
+  activeListener = ref;
 
-        // Build a GeoJSON LineString from data.path (array of objects)
-        const coords = (data.path || []).map(pt => [pt.lon, pt.lat]);
+  ref.on('value', snap => {
+    const data = snap.val();
+    if (!data || !data.current) return;
 
-        if (!map.getSource('run-path')) {
-          map.addSource('run-path', {
-            type: 'geojson',
-            data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
-          });
-          map.addLayer({
-            id: 'run-line',
-            type: 'line',
-            source: 'run-path',
-            layout: { 'line-join': 'round', 'line-cap': 'round' },
-            paint: { 'line-color': '#00FFFF', 'line-width': 4 }
-          });
-        } else {
-          map.getSource('run-path').setData({
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: coords }
-          });
-        }
+    // Update or create the red marker
+    if (!viewerMarker) {
+      viewerMarker = new maplibregl.Marker({ color: 'red' })
+        .setLngLat(data.current)
+        .addTo(map);
+    } else {
+      viewerMarker.setLngLat(data.current);
+    }
 
-        // Compute elapsed time for stats display
-        const elapsed = (data.startTime != null && data.timestamp != null)
-          ? (data.timestamp - data.startTime)
-          : 0;
-
-        // Get elevation for the “current” location (optional)
-        let elevationFt = null;
-        const [lon, lat] = data.current;
-        const elevMeters = await fetchElevation(lat, lon);
-        if (elevMeters != null) elevationFt = elevMeters * 3.28084;
-
-        updateStatsDisplay(
-          data.distance || 0,
-          data.pace || 0,
-          data.avgPace || 0,
-          elapsed,
-          elevationFt
-        );
-
-        if (viewerFollowing) {
-          map.flyTo({ center: data.current, zoom: 16 });
-        }
+    // Update path display
+    const coords = (data.path || []).map(pt => [pt.lon, pt.lat]);
+    if (!map.getSource('run-path')) {
+      map.addSource('run-path', {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
+      });
+      map.addLayer({
+        id: 'run-line',
+        type: 'line',
+        source: 'run-path',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#00FFFF', 'line-width': 4 }
+      });
+    } else {
+      map.getSource('run-path').setData({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: coords }
       });
     }
+
+    // ✅ Save the current Firebase data
+    lastViewerData = {
+      distance:   data.distance   || 0,
+      pace:       data.pace       || 0,
+      avgPace:    data.avgPace    || 0,
+      startTime:  data.startTime  || null,
+      current:    data.current    || null
+    };
+    lastViewerElapsed = (data.timestamp && data.startTime)
+      ? (data.timestamp - data.startTime)
+      : 0;
+
+    if (viewerFollowing) {
+      map.flyTo({ center: data.current, zoom: 16 });
+    }
+  });
+
+  // ✅ Moved outside the Firebase listener — tick stats display every second
+  if (viewerTimerId === null) {
+    viewerTimerId = setInterval(async () => {
+      if (!lastViewerData || lastViewerData.startTime == null) return;
+
+      lastViewerElapsed += 1000;
+
+      let elevationFt = null;
+      if (lastViewerData.current) {
+        const elevMeters = await fetchElevation(
+          lastViewerData.current[1],
+          lastViewerData.current[0]
+        );
+        elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
+      }
+
+      updateStatsDisplay(
+        lastViewerData.distance,
+        lastViewerData.pace,
+        lastViewerData.avgPace,
+        lastViewerElapsed,
+        elevationFt
+      );
+    }, 1000);
+  }
+}
 
     // → Map layer toggle: change style URL and re-add controls
     layerSelect.addEventListener('change', () => {

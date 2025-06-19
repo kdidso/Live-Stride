@@ -214,6 +214,7 @@
     let startTime = null;
     let lastPointTime = null;
     let totalDistanceMeters = 0;
+    
     let viewerTimerId = null;
     let lastViewerData = null;
     let lastViewerElapsed = 0;
@@ -559,7 +560,7 @@
     });
 
     // → Viewer: follow a specific runner via Firebase, with elevation lookup
-    function trackRunner(key) {
+function trackRunner(key) {
   if (activeListener) activeListener.off();
   if (viewerTimerId !== null) {
     clearInterval(viewerTimerId);

@@ -426,10 +426,11 @@ broadcastBtn.onclick = () => {
     });
 
 function trackRunner(key) {
-  // Remove any prior listener
-  if (activeListener) activeListener.off();
-
-  // Also clear any existing per-second ticker
+  // 1) Remove any prior Firebase listener
+  if (activeListener) {
+    activeListener.off();
+  }
+  // 2) Clear any existing per-second ticker
   if (viewerTimerId !== null) {
     clearInterval(viewerTimerId);
     viewerTimerId = null;
@@ -438,20 +439,12 @@ function trackRunner(key) {
   const ref = db.ref(`runners/${key}`);
   activeListener = ref;
 
+  // 3) Listen for live updates (or final snapshot)
   ref.on('value', snap => {
     const data = snap.val();
     if (!data || !data.current) return;
 
-    // ←– STEP 3 INSERTION: if they’ve finished, clear timer and stop
-    if (data.finished) {
-      if (viewerTimerId !== null) {
-        clearInterval(viewerTimerId);
-        viewerTimerId = null;
-      }
-      return;
-    }
-
-    // --- existing marker & path update logic ---
+    // → Always draw/update the runner marker
     if (!viewerMarker) {
       viewerMarker = new maplibregl.Marker({ color: 'red' })
         .setLngLat(data.current)
@@ -460,11 +453,15 @@ function trackRunner(key) {
       viewerMarker.setLngLat(data.current);
     }
 
+    // → Always draw/update the path
     const coords = (data.path || []).map(pt => [pt.lon, pt.lat]);
     if (!map.getSource('run-path')) {
       map.addSource('run-path', {
         type: 'geojson',
-        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
+        data: {
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: coords }
+        }
       });
       map.addLayer({
         id: 'run-line',
@@ -480,28 +477,33 @@ function trackRunner(key) {
       });
     }
 
-    // Save latest stats for the interval ticker
+    // → Save stats data for the ticker
     lastViewerData = {
       distance:  data.distance  || 0,
       pace:      data.pace      || 0,
       avgPace:   data.avgPace   || 0,
       startTime: data.startTime || null,
-      current:   data.current   || null
+      current:   data.current
     };
     lastViewerElapsed = (data.timestamp && data.startTime)
       ? (data.timestamp - data.startTime)
-      : 0;
+      : lastViewerElapsed;
 
-    // Fly to runner if following
+    // → If finished, clear the viewer’s interval (but don’t return)
+    if (data.finished && viewerTimerId !== null) {
+      clearInterval(viewerTimerId);
+      viewerTimerId = null;
+    }
+
+    // → Always auto-fly to the runner’s last position (running or finished)
     if (viewerFollowing) {
       map.flyTo({ center: data.current, zoom: 16 });
     }
   });
 
-  // Start (or restart) the per-second ticker
+  // 4) Restart the per-second ticker if it isn’t running
   if (viewerTimerId === null) {
     viewerTimerId = setInterval(async () => {
-      // Double-check finished flag mid-interval
       const nowData = (await ref.once('value')).val();
       if (nowData.finished) {
         clearInterval(viewerTimerId);
@@ -513,11 +515,11 @@ function trackRunner(key) {
 
       let elevationFt = null;
       if (lastViewerData.current) {
-        const elevM = await fetchElevation(
+        const m = await fetchElevation(
           lastViewerData.current[1],
           lastViewerData.current[0]
         );
-        elevationFt = elevM != null ? elevM * 3.28084 : null;
+        elevationFt = m != null ? m * 3.28084 : null;
       }
 
       updateStatsDisplay(

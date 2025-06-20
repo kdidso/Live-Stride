@@ -625,6 +625,57 @@ ref.on('value', snap => {
   if (viewerFollowing) {
     map.flyTo({ center: data.current, zoom: 16 });
   }
+
+  // If the timer hasn’t started yet, start ticking
+  if (viewerTimerId === null) {
+    viewerTimerId = setInterval(async () => {
+      if (!lastViewerData || lastViewerData.startTime == null) return;
+
+      // ✅ Stop exactly at timestamp
+      const maxElapsed = lastViewerData.timestamp - lastViewerData.startTime;
+      if (lastViewerElapsed >= maxElapsed) {
+        clearInterval(viewerTimerId);
+        viewerTimerId = null;
+        lastViewerElapsed = maxElapsed;
+      } else {
+        lastViewerElapsed += 1000;
+      }
+
+      let elevationFt = null;
+      if (lastViewerData.current) {
+        const elevMeters = await fetchElevation(
+          lastViewerData.current[1],
+          lastViewerData.current[0]
+        );
+        elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
+      }
+
+      updateStatsDisplay(
+        lastViewerData.distance,
+        lastViewerData.pace,
+        lastViewerData.avgPace,
+        lastViewerElapsed,
+        elevationFt
+      );
+    }, 1000);
+  }
+  lastViewerData = {
+    distance:     data.distance     || 0,
+    pace:         data.pace         || 0,
+    avgPace:      data.avgPace      || 0,
+    startTime:    data.startTime    || null,
+    current:      data.current      || null,
+    timestamp:    data.timestamp    || null 
+  };
+
+  // Compute starting value for viewer's timer
+  lastViewerElapsed = (data.timestamp && data.startTime)
+    ? (data.timestamp - data.startTime)
+    : 0;
+
+  if (viewerFollowing) {
+    map.flyTo({ center: data.current, zoom: 16 });
+  }
 });
 // ✅ Moved outside the Firebase listener — tick stats display every second
 if (viewerTimerId === null) {
@@ -668,7 +719,6 @@ if (lastViewerElapsed >= (lastViewerData.timestamp - lastViewerData.startTime)) 
       const newStyle = STYLES[chosen] || STYLES.satellite;
       map.setStyle(newStyle);
       // Controls will be re-added in 'style.load' handler
-    });
    
     // → GPX Export: build a .gpx string from pathCoords and trigger download
     function convertToGPX() {

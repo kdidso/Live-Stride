@@ -135,11 +135,8 @@
       <button id="stopBtn" disabled>Stop</button>
     </div>
     <button id="broadcastBtn" style="display: none;">Broadcast</button>
-
-    <!-- ↓↓↓ New Buttons for GPX & Strava ↓↓↓ -->
     <button id="exportGpxBtn" style="display: none;">Convert to GPX</button>
     <button id="uploadStravaBtn" style="display: none;">Upload to Strava</button>
-    <!-- ↑↑↑ End new buttons ↑↑↑ -->
   </div>
 
   <div id="searchBar">
@@ -147,7 +144,6 @@
     <ul id="suggestionsList"></ul>
   </div>
 
-  <!-- Map layer toggle dropdown -->
   <div id="layerToggle">
     <label for="layerSelect">Map:</label>
     <select id="layerSelect">
@@ -173,13 +169,13 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    // → Style URLs for toggle
+    // → Style URLs
     const STYLES = {
       satellite: "https://api.maptiler.com/maps/satellite/style.json?key=Ii8JoWt1QkDL9pFlSQXC",
       streets:   "https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC"
     };
 
-    // → Create map with default "satellite"
+    // → Initialize map
     let map = new maplibregl.Map({
       container: 'map',
       style: STYLES.satellite,
@@ -187,14 +183,10 @@
       zoom: 13
     });
 
-    // → Will hold references to controls so we can remove before re-adding
     let navControl, geoControl;
-
-    // → Function to add (or re-add) controls after each style load
     function addControls() {
       if (navControl) map.removeControl(navControl);
       if (geoControl) map.removeControl(geoControl);
-
       navControl = new maplibregl.NavigationControl();
       geoControl = new maplibregl.GeolocateControl({
         positionOptions: { enableHighAccuracy: true },
@@ -202,53 +194,36 @@
         showAccuracyCircle: false,
         showUserLocation: true
       });
-
       map.addControl(navControl, 'top-right');
       map.addControl(geoControl, 'bottom-right');
     }
     map.on('style.load', addControls);
 
-    // → State variables for tracking
-    let pathCoords = [];            // Now holds objects with full point data
-    let watchId = null;
-    let startTime = null;
-    let lastPointTime = null;
-    let totalDistanceMeters = 0;
+    // → State
+    let pathCoords = [], watchId = null, startTime = null, lastPointTime = null, totalDistanceMeters = 0;
+    let runnerName = null, broadcastRef = null, broadcasting = false;
+    let viewerMarker = null, activeListener = null;
+    let isFollowing = true, viewerFollowing = true;
+    let viewerTimerId = null, lastViewerData = null, lastViewerElapsed = 0;
 
-    let runnerName = null;
-    let broadcastRef = null;
-    let broadcasting = false;
-    let viewerMarker = null;
-    let activeListener = null;
+    // → DOM
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn  = document.getElementById('stopBtn');
+    const broadcastBtn = document.getElementById('broadcastBtn');
+    const exportGpxBtn = document.getElementById('exportGpxBtn');
+    const uploadStravaBtn = document.getElementById('uploadStravaBtn');
+    const statsBar = document.getElementById('statsBar');
+    const searchInput = document.getElementById('searchInput');
+    const suggestionsList = document.getElementById('suggestionsList');
+    const runnerModeBtn = document.getElementById('runnerModeBtn');
+    const viewerModeBtn = document.getElementById('viewerModeBtn');
+    const recenterBtn = document.getElementById('recenterBtn');
+    const layerSelect = document.getElementById('layerSelect');
 
-    let isFollowing = true;
-    let viewerFollowing = true;
-    let selectedRunner = null;
-
-    let viewerTimerId = null;
-    let lastViewerData = null;
-    let lastViewerElapsed = 0;
-
-    // → DOM references
-    const startBtn         = document.getElementById('startBtn');
-    const stopBtn          = document.getElementById('stopBtn');
-    const broadcastBtn     = document.getElementById('broadcastBtn');
-    const exportGpxBtn     = document.getElementById('exportGpxBtn');
-    const uploadStravaBtn  = document.getElementById('uploadStravaBtn');
-    const statsBar         = document.getElementById('statsBar');
-    const searchInput      = document.getElementById('searchInput');
-    const suggestionsList  = document.getElementById('suggestionsList');
-    const runnerModeBtn    = document.getElementById('runnerModeBtn');
-    const viewerModeBtn    = document.getElementById('viewerModeBtn');
-    const recenterBtn      = document.getElementById('recenterBtn');
-    const layerSelect      = document.getElementById('layerSelect');
-
-    // → Switch between Runner / Viewer modes
     function setMode(mode) {
       document.getElementById('controls').style.display = (mode === 'runner') ? 'flex' : 'none';
       broadcastBtn.style.display = (mode === 'runner') ? 'block' : 'none';
-      exportGpxBtn.style.display = 'none';
-      uploadStravaBtn.style.display = 'none';
+      exportGpxBtn.style.display = uploadStravaBtn.style.display = 'none';
       document.getElementById('searchBar').style.display = (mode === 'viewer') ? 'block' : 'none';
       statsBar.style.display = (mode === 'viewer') ? 'block' : 'none';
       recenterBtn.style.display = (mode === 'viewer') ? 'block' : 'none';
@@ -258,11 +233,8 @@
     runnerModeBtn.onclick = () => setMode('runner');
     viewerModeBtn.onclick = () => setMode('viewer');
 
-    // → Stop following if user interacts with map
-    map.on('dragstart',  () => { isFollowing    = false; viewerFollowing = false; });
-    map.on('zoomstart',  () => { isFollowing    = false; viewerFollowing = false; });
-
-    // → Recenter button for viewer
+    map.on('dragstart', () => { isFollowing = viewerFollowing = false; });
+    map.on('zoomstart', () => { isFollowing = viewerFollowing = false; });
     recenterBtn.onclick = () => {
       if (viewerMarker) {
         viewerFollowing = true;
@@ -270,289 +242,180 @@
       }
     };
 
-    // → Utility: meters ↔ miles
     function metersToMiles(m) { return m / 1609.34; }
     function haversineDistance(a, b) {
       const toRad = x => x * Math.PI / 180;
       const R = 6371000;
       const lat1 = toRad(a[1]), lat2 = toRad(b[1]);
       const dLat = toRad(b[1] - a[1]), dLng = toRad(b[0] - a[0]);
-      const h = Math.sin(dLat / 2) ** 2 +
-                Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-      return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1-h));
     }
-
-    // → Format elapsed milliseconds as HH:MM:SS
     function formatTime(ms) {
-      const totalSec = Math.floor(ms / 1000);
-      const h = String(Math.floor(totalSec / 3600)).padStart(2, '0');
-      const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
-      const s = String(totalSec % 60).padStart(2, '0');
+      const totalSec = Math.floor(ms/1000);
+      const h = String(Math.floor(totalSec/3600)).padStart(2,'0');
+      const m = String(Math.floor((totalSec%3600)/60)).padStart(2,'0');
+      const s = String(totalSec%60).padStart(2,'0');
       return `${h}:${m}:${s}`;
     }
-
-    // → Format pace as MM:SS /mi
     function formatPace(minsPerMile) {
-      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+      if (!isFinite(minsPerMile)|| minsPerMile<=0) return "—";
       const m = Math.floor(minsPerMile);
-      const s = Math.round((minsPerMile - m) * 60);
-      return `${m}:${s.toString().padStart(2, '0')} /mi`;
+      const s = Math.round((minsPerMile-m)*60);
+      return `${m}:${s.toString().padStart(2,'0')} /mi`;
     }
-
-    // → Fetch elevation (meters) from Open-Elevation API
-    async function fetchElevation(lat, lon) {
+    async function fetchElevation(lat,lon) {
       try {
-        const response = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${lat},${lon}`);
-        const data = await response.json();
-        if (data && data.results && data.results.length > 0) {
-          return data.results[0].elevation;  // in meters
-        }
-      } catch (e) {
-        console.error("Elevation fetch error:", e);
-      }
-      return null;
+        const res = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${lat},${lon}`);
+        const data = await res.json();
+        return data.results?.[0]?.elevation ?? null;
+      } catch { return null; }
     }
 
-    /*
-      → Update stats bar:
-         - 1st line: Time: HH:MM:SS  |  Elev: XXX ft
-         - 2nd line: Distance: X.XX mi  |  Pace: MM:SS /mi  |  Avg Pace: MM:SS /mi
-    */
-    function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationFt) {
-      const timeHtml = `Time: ${formatTime(elapsedMs)}`;
-      const elevHtml = (elevationFt != null) ? `Elev: ${Math.round(elevationFt)} ft` : "Elev: —";
-
-      const distHtml = `Distance: ${distanceMi.toFixed(2)} mi`;
-      const paceHtml = `Pace: ${formatPace(instPace)}`;
-      const avgHtml = `Avg Pace: ${formatPace(avgPace)}`;
-
+    function updateStatsDisplay(dist, ip, ap, elMs, elev) {
+      const timeHtml = `Time: ${formatTime(elMs)}`;
+      const elevHtml = elev!=null ? `Elev: ${Math.round(elev)} ft` : "Elev: —";
+      const distHtml = `Distance: ${dist.toFixed(2)} mi`;
+      const paceHtml = `Pace: ${formatPace(ip)}`;
+      const avgHtml  = `Avg Pace: ${formatPace(ap)}`;
       statsBar.innerHTML = `
-        <div>
-          ${timeHtml}
-          <span style="margin: 0 6px; color: white;">|</span>
-          ${elevHtml}
-        </div>
-        <div style="margin-top:4px;">
-          ${distHtml}
-          <span style="margin: 0 6px; color: white;">|</span>
-          ${paceHtml}
-          <span style="margin: 0 6px; color: white;">|</span>
-          ${avgHtml}
-        </div>`;
+        <div>${timeHtml}<span style="margin:0 6px;color:white">|</span>${elevHtml}</div>
+        <div style="margin-top:4px;">${distHtml}<span style="margin:0 6px;color:white">|</span>${paceHtml}<span style="margin:0 6px;color:white">|</span>${avgHtml}</div>`;
     }
 
-    // → Draw or update the runner’s path on the map
     function addOrUpdatePath() {
-      // Build an array of [lon, lat] pairs from pathCoords objects
-      const coordArray = pathCoords.map(pt => [pt.lon, pt.lat]);
-
+      const coords = pathCoords.map(pt => [pt.lon,pt.lat]);
       if (!map.getSource('run-path')) {
-        map.addSource('run-path', {
-          type: 'geojson',
-          data: {
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: coordArray }
-          }
-        });
-        map.addLayer({
-          id: 'run-line',
-          type: 'line',
-          source: 'run-path',
-          layout: { 'line-join': 'round', 'line-cap': 'round' },
-          paint: { 'line-color': '#00FFFF', 'line-width': 4 }
-        });
+        map.addSource('run-path',{ type:'geojson', data:{ type:'Feature', geometry:{ type:'LineString', coordinates:coords } } });
+        map.addLayer({ id:'run-line', type:'line', source:'run-path', layout:{'line-join':'round','line-cap':'round'}, paint:{'line-color':'#00FFFF','line-width':4}});
       } else {
-        map.getSource('run-path').setData({
-          type: 'Feature',
-          geometry: { type: 'LineString', coordinates: coordArray }
-        });
+        map.getSource('run-path').setData({ type:'Feature', geometry:{ type:'LineString', coordinates:coords } });
       }
     }
 
-    // → Start tracking the runner’s position
     function startTracking() {
-      pathCoords = [];
-      totalDistanceMeters = 0;
-      startTime = null;
-      lastPointTime = null;
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      statsBar.style.display = 'block';
-
+      pathCoords=[]; totalDistanceMeters=0; startTime=lastPointTime=null;
+      startBtn.disabled=true; stopBtn.disabled=false; statsBar.style.display='block';
       watchId = navigator.geolocation.watchPosition(async pos => {
-        const coord = [pos.coords.longitude, pos.coords.latitude];
-        const now = Date.now();
+        const coord=[pos.coords.longitude,pos.coords.latitude], now=Date.now();
         if (isFollowing) map.setCenter(coord);
+        const elevM = await fetchElevation(coord[1],coord[0]);
+        const elevFt = elevM!=null? elevM*3.28084 : null;
 
-        // Fetch elevation (meters) and convert to feet for on-screen
-        let elevationFt = null;
-        const [lon, lat] = coord;
-        const elevMeters = await fetchElevation(lat, lon);
-        if (elevMeters != null) elevationFt = elevMeters * 3.28084;
-
-        if (pathCoords.length > 0) {
-          // Previous point object
-          const prevPoint = pathCoords[pathCoords.length - 1];
-          const prevCoord = [prevPoint.lon, prevPoint.lat];
-
-          // Time delta in minutes
-          const timeDeltaMin = (now - lastPointTime) / 60000;
-          // Distance from previous coordinate
-          const segmentDist = haversineDistance(prevCoord, coord);
-          totalDistanceMeters += segmentDist;
-
-          // Instantaneous pace (min/mi) at this segment
-          const instPace = timeDeltaMin / metersToMiles(segmentDist);
-
-          // Total elapsed time in minutes from start
-          const totalTimeMin = (now - startTime) / 60000;
-          // Average pace for entire run so far
-          const avgPace = totalTimeMin / metersToMiles(totalDistanceMeters);
-
-          // Elapsed in ms
-          const totalTimeMs = now - startTime;
-
-          // If broadcasting, push full structured path and stats to Firebase
+        if (pathCoords.length>0) {
+          const prev = pathCoords[pathCoords.length-1];
+          const segment = haversineDistance([prev.lon,prev.lat],coord);
+          totalDistanceMeters += segment;
+          const deltaMin = (now - lastPointTime)/60000;
+          const instPace = deltaMin / metersToMiles(segment);
+          const totalMin = (now - startTime)/60000;
+          const avgPace = totalMin / metersToMiles(totalDistanceMeters);
+          const elapsedMs = now - startTime;
           if (broadcasting && broadcastRef) {
-            broadcastRef.set({
-              name: runnerName,
-              path: pathCoords,            // now array of objects
-              current: coord,              // current as [lon, lat]
-              distance: metersToMiles(totalDistanceMeters),
-              pace: instPace,
-              avgPace: avgPace,
-              timestamp: now,
-              startTime: startTime
-            });
+            broadcastRef.set({ name:runnerName, path:pathCoords, current:coord, distance:metersToMiles(totalDistanceMeters), pace:instPace, avgPace, timestamp:now, startTime });
           }
-
-          // Update on-screen stats
-          updateStatsDisplay(
-            metersToMiles(totalDistanceMeters),
-            instPace,
-            avgPace,
-            totalTimeMs,
-            elevationFt
-          );
-
+          updateStatsDisplay(metersToMiles(totalDistanceMeters),instPace,avgPace,elapsedMs,elevFt);
         } else {
-          // First point of the run
           startTime = now;
           if (broadcasting && broadcastRef) {
-            broadcastRef.set({
-              name: runnerName,
-              path: pathCoords,
-              current: coord,
-              distance: 0,
-              pace: 0,
-              avgPace: 0,
-              timestamp: now,
-              startTime: startTime
-            });
+            broadcastRef.set({ name:runnerName, path:pathCoords, current:coord, distance:0, pace:0, avgPace:0, timestamp:now, startTime });
           }
-          updateStatsDisplay(0, 0, 0, 0, elevationFt);
+          updateStatsDisplay(0,0,0,0,elevFt);
         }
 
-        // Update lastPointTime to now (for next iteration)
         lastPointTime = now;
+        pathCoords.push({
+          lat:coord[1], lon:coord[0], timestamp:now,
+          time:new Date(now).toISOString(), elevation:elevM, distance:metersToMiles(totalDistanceMeters),
+          instPace: pathCoords.length>0 ? ((now-lastPointTime)/60000)/metersToMiles(haversineDistance([pathCoords[pathCoords.length-1].lon,pathCoords[pathCoords.length-1].lat],coord)) : 0,
+          avgPace: pathCoords.length>0 ? ((now-startTime)/60000)/metersToMiles(totalDistanceMeters) : 0
+        });
 
-        // Build the full point object and push into pathCoords
-        const pointData = {
-          lat: coord[1],
-          lon: coord[0],
-          timestamp: now,
-          time: new Date(now).toISOString(), // ISO‐8601, for GPX export
-          elevation: elevMeters ?? null,      // meters
-          distance: metersToMiles(totalDistanceMeters),
-          instPace: (pathCoords.length > 0)
-            ? ((now - lastPointTime) / 60000) / metersToMiles(haversineDistance(
-                [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat],
-                coord
-              ))
-            : 0,
-          avgPace: (pathCoords.length > 0)
-            ? ((now - startTime) / 60000) / metersToMiles(totalDistanceMeters)
-            : 0
-        };
-        pathCoords.push(pointData);
-
-        // Redraw or update the polyline on the map
         addOrUpdatePath();
-      },
-      err => console.error("Geolocation error:", err),
-      { enableHighAccuracy: true, maximumAge: 1000 });
+      }, err=>console.error("Geolocation error:",err), { enableHighAccuracy:true, maximumAge:1000 });
     }
 
-    // → Stop tracking: keep last stats visible for runner,
-    //   and reveal the GPX/Strava buttons
 function stopTracking() {
+  // 1) Stop the GPS watch
   if (watchId !== null) {
     navigator.geolocation.clearWatch(watchId);
     watchId = null;
   }
 
+  // 2) Toggle the Start/Stop buttons
   startBtn.disabled = false;
-  stopBtn.disabled = true;
+  stopBtn.disabled  = true;
 
+  // 3) Stop the viewer’s timer (if running)
+  if (viewerTimerId !== null) {
+    clearInterval(viewerTimerId);
+    viewerTimerId = null;
+  }
+
+  // 4) Mark the run finished in Firebase
   if (broadcasting && broadcastRef) {
+    broadcastRef.update({ finished: true });
     broadcasting = false;
+  }
 
-      // Reveal the “Convert to GPX” and “Upload to Strava” buttons
-      exportGpxBtn.style.display    = 'inline-block';
-      uploadStravaBtn.style.display = 'inline-block';
-      // Stats bar remains until page refresh
-    }
+  // 5) Reveal the GPX & Strava export buttons
+  exportGpxBtn.style.display    = 'inline-block';
+  uploadStravaBtn.style.display = 'inline-block';
 }
 
     startBtn.onclick = startTracking;
     stopBtn.onclick  = stopTracking;
 
-    // → Broadcast runner’s data into Firebase
-    broadcastBtn.onclick = () => {
-      let first = prompt("Enter your **first name**:")?.trim();
-      if (!first || first.length < 2) return alert("First name is required.");
-      let last = prompt("Enter your **last name**:")?.trim();
-      if (!last || last.length < 2) return alert("Last name is required.");
+broadcastBtn.onclick = () => {
+  // prompt for runner’s name
+  let first = prompt("Enter your **first name**:")?.trim();
+  if (!first || first.length < 2) return alert("First name is required.");
+  let last = prompt("Enter your **last name**:")?.trim();
+  if (!last || last.length < 2) return alert("Last name is required.");
 
-      runnerName = `${first} ${last}`;
-      const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, '-');
-      broadcastRef = db.ref(`runners/${safeName}`);
-      broadcasting = true;
-      broadcastBtn.style.display = 'none';
+  // build the Firebase reference
+  runnerName = `${first} ${last}`;
+  const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  broadcastRef = db.ref(`runners/${safeName}`);
 
-      if (startTime !== null) {
-        broadcastRef.set({
-          name: runnerName,
-          path: pathCoords,
-          current: pathCoords.length > 0
-            ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
-            : null,
-          distance: metersToMiles(totalDistanceMeters),
-          pace: 0,
-          avgPace: 0,
-          timestamp: Date.now(),
-          startTime: startTime
-        });
-      }
-    };
+  // ←– INSERTED: clear any stale finished flag
+  broadcastRef.update({ finished: false });
 
-    // → Search/filter runners (viewer side)
+  // start broadcasting
+  broadcasting = true;
+  broadcastBtn.style.display = 'none';
+
+  // if the run is already started, push initial data
+  if (startTime !== null) {
+    broadcastRef.set({
+      name: runnerName,
+      path: pathCoords,
+      current: pathCoords.length > 0
+        ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
+        : null,
+      distance: metersToMiles(totalDistanceMeters),
+      pace: 0,
+      avgPace: 0,
+      timestamp: Date.now(),
+      startTime: startTime
+    });
+  }
+};
+
     searchInput.addEventListener('input', () => {
-      const query = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const q = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g,'');
       suggestionsList.innerHTML = '';
-      if (!query) return;
-      db.ref('runners').once('value', snapshot => {
-        const all = snapshot.val();
-        if (!all) return;
+      if (!q) return;
+      db.ref('runners').once('value', snap => {
+        const all = snap.val(); if (!all) return;
         for (let key in all) {
-          const displayName = all[key].name || key;
-          if (displayName.toLowerCase().includes(query)) {
+          const name = all[key].name || key;
+          if (name.toLowerCase().includes(q)) {
             const li = document.createElement('li');
-            li.textContent = displayName;
+            li.textContent = name;
             li.onclick = () => {
-              searchInput.value = displayName;
+              searchInput.value = name;
               viewerFollowing = true;
-              selectedRunner = key;
               trackRunner(key);
               suggestionsList.innerHTML = '';
             };
@@ -562,9 +425,11 @@ function stopTracking() {
       });
     });
 
-    // → Viewer: follow a specific runner via Firebase, with elevation lookup
 function trackRunner(key) {
+  // Remove any prior listener
   if (activeListener) activeListener.off();
+
+  // Also clear any existing per-second ticker
   if (viewerTimerId !== null) {
     clearInterval(viewerTimerId);
     viewerTimerId = null;
@@ -573,81 +438,86 @@ function trackRunner(key) {
   const ref = db.ref(`runners/${key}`);
   activeListener = ref;
 
-ref.on('value', snap => {
-  const data = snap.val();
-  if (!data || !data.current) return;
+  ref.on('value', snap => {
+    const data = snap.val();
+    if (!data || !data.current) return;
 
-  // Update or create the red marker
-  if (!viewerMarker) {
-    viewerMarker = new maplibregl.Marker({ color: 'red' })
-      .setLngLat(data.current)
-      .addTo(map);
-  } else {
-    viewerMarker.setLngLat(data.current);
-  }
-
-  // Update path display
-  const coords = (data.path || []).map(pt => [pt.lon, pt.lat]);
-  if (!map.getSource('run-path')) {
-    map.addSource('run-path', {
-      type: 'geojson',
-      data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
-    });
-    map.addLayer({
-      id: 'run-line',
-      type: 'line',
-      source: 'run-path',
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': '#00FFFF', 'line-width': 4 }
-    });
-  } else {
-    map.getSource('run-path').setData({
-      type: 'Feature',
-      geometry: { type: 'LineString', coordinates: coords }
-    });
-  }
-
-  // ✅ Save current Firebase data
-  lastViewerData = {
-    distance:     data.distance     || 0,
-    pace:         data.pace         || 0,
-    avgPace:      data.avgPace      || 0,
-    startTime:    data.startTime    || null,
-    current:      data.current      || null,
-    timestamp:    data.timestamp    || null 
-  };
-
-  // Compute starting value for viewer's timer
-  lastViewerElapsed = (data.timestamp && data.startTime)
-    ? (data.timestamp - data.startTime)
-    : 0;
-
-  if (viewerFollowing) {
-    map.flyTo({ center: data.current, zoom: 16 });
-  }
-
-  // If the timer hasn’t started yet, start ticking
-  if (viewerTimerId === null) {
-    viewerTimerId = setInterval(async () => {
-      if (!lastViewerData || lastViewerData.startTime == null) return;
-
-      // ✅ Stop exactly at timestamp
-      const maxElapsed = lastViewerData.timestamp - lastViewerData.startTime;
-      if (lastViewerElapsed >= maxElapsed) {
+    // ←– STEP 3 INSERTION: if they’ve finished, clear timer and stop
+    if (data.finished) {
+      if (viewerTimerId !== null) {
         clearInterval(viewerTimerId);
         viewerTimerId = null;
-        lastViewerElapsed = maxElapsed;
-      } else {
-        lastViewerElapsed += 1000;
       }
+      return;
+    }
+
+    // --- existing marker & path update logic ---
+    if (!viewerMarker) {
+      viewerMarker = new maplibregl.Marker({ color: 'red' })
+        .setLngLat(data.current)
+        .addTo(map);
+    } else {
+      viewerMarker.setLngLat(data.current);
+    }
+
+    const coords = (data.path || []).map(pt => [pt.lon, pt.lat]);
+    if (!map.getSource('run-path')) {
+      map.addSource('run-path', {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
+      });
+      map.addLayer({
+        id: 'run-line',
+        type: 'line',
+        source: 'run-path',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#00FFFF', 'line-width': 4 }
+      });
+    } else {
+      map.getSource('run-path').setData({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: coords }
+      });
+    }
+
+    // Save latest stats for the interval ticker
+    lastViewerData = {
+      distance:  data.distance  || 0,
+      pace:      data.pace      || 0,
+      avgPace:   data.avgPace   || 0,
+      startTime: data.startTime || null,
+      current:   data.current   || null
+    };
+    lastViewerElapsed = (data.timestamp && data.startTime)
+      ? (data.timestamp - data.startTime)
+      : 0;
+
+    // Fly to runner if following
+    if (viewerFollowing) {
+      map.flyTo({ center: data.current, zoom: 16 });
+    }
+  });
+
+  // Start (or restart) the per-second ticker
+  if (viewerTimerId === null) {
+    viewerTimerId = setInterval(async () => {
+      // Double-check finished flag mid-interval
+      const nowData = (await ref.once('value')).val();
+      if (nowData.finished) {
+        clearInterval(viewerTimerId);
+        viewerTimerId = null;
+        return;
+      }
+
+      lastViewerElapsed += 1000;
 
       let elevationFt = null;
       if (lastViewerData.current) {
-        const elevMeters = await fetchElevation(
+        const elevM = await fetchElevation(
           lastViewerData.current[1],
           lastViewerData.current[0]
         );
-        elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
+        elevationFt = elevM != null ? elevM * 3.28084 : null;
       }
 
       updateStatsDisplay(
@@ -659,74 +529,16 @@ ref.on('value', snap => {
       );
     }, 1000);
   }
-  lastViewerData = {
-    distance:     data.distance     || 0,
-    pace:         data.pace         || 0,
-    avgPace:      data.avgPace      || 0,
-    startTime:    data.startTime    || null,
-    current:      data.current      || null,
-    timestamp:    data.timestamp    || null 
-  };
-
-  // Compute starting value for viewer's timer
-  lastViewerElapsed = (data.timestamp && data.startTime)
-    ? (data.timestamp - data.startTime)
-    : 0;
-
-  if (viewerFollowing) {
-    map.flyTo({ center: data.current, zoom: 16 });
-  }
-});
-// ✅ Moved outside the Firebase listener — tick stats display every second
-if (viewerTimerId === null) {
-  viewerTimerId = setInterval(async () => {
-    if (!lastViewerData || lastViewerData.startTime == null) return;
-
-    // ✅ Stop exactly at timestamp
-if (lastViewerElapsed >= (lastViewerData.timestamp - lastViewerData.startTime)) {
-  clearInterval(viewerTimerId);
-  viewerTimerId = null;
-  lastViewerElapsed = lastViewerData.timestamp - lastViewerData.startTime; // Lock the display
-} else {
-  lastViewerElapsed += 1000;
 }
 
-    let elevationFt = null;
-    if (lastViewerData.current) {
-      const elevMeters = await fetchElevation(
-        lastViewerData.current[1],
-        lastViewerData.current[0]
-      );
-      elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
-    }
-
-    updateStatsDisplay(
-      lastViewerData.distance,
-      lastViewerData.pace,
-      lastViewerData.avgPace,
-      lastViewerElapsed,
-      elevationFt
-    );
-  }, 1000);
-}
-
-
-
-
-    // → Map layer toggle: change style URL and re-add controls
     layerSelect.addEventListener('change', () => {
-      const chosen = layerSelect.value; // "satellite" or "streets"
-      const newStyle = STYLES[chosen] || STYLES.satellite;
-      map.setStyle(newStyle);
-      // Controls will be re-added in 'style.load' handler
-   
-    // → GPX Export: build a .gpx string from pathCoords and trigger download
+      map.setStyle(STYLES[layerSelect.value] || STYLES.satellite);
+    });
+
     function convertToGPX() {
       if (!pathCoords.length) {
         return alert("No run data available to export.");
       }
-
-      // Build GPX header
       const trackName = runnerName
         ? `${runnerName} – ${new Date(startTime).toISOString().slice(0,10)}`
         : `LiveStride Run ${new Date(startTime).toISOString().slice(0,10)}`;
@@ -739,39 +551,26 @@ if (lastViewerElapsed >= (lastViewerData.timestamp - lastViewerData.startTime)) 
     <name>${trackName}</name>
     <trkseg>
 `;
-
-      // Add each point as <trkpt>
       pathCoords.forEach(pt => {
-        // Ensure pt.elevation is not null (GPX requires a number). If null, default to 0.
-        const eleMeters = (pt.elevation != null) ? pt.elevation : 0;
-        const timeString = pt.time; // Already an ISO‐8601 string
-
+        const ele = pt.elevation!=null ? pt.elevation : 0;
         gpx += `      <trkpt lat="${pt.lat}" lon="${pt.lon}">
-        <ele>${eleMeters}</ele>
-        <time>${timeString}</time>
+        <ele>${ele}</ele>
+        <time>${pt.time}</time>
       </trkpt>
 `;
       });
-
-      // Close GPX tags
       gpx += `    </trkseg>
   </trk>
 </gpx>`;
-
-      // Trigger download of the GPX file
       const blob = new Blob([gpx], { type: "application/gpx+xml" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-
-      // Filename: e.g. LiveStride_2025-05-31.gpx
-      const dateStr = new Date(startTime).toISOString().slice(0,10);
-      link.download = `LiveStride_${dateStr}.gpx`;
+      link.download = `LiveStride_${new Date(startTime).toISOString().slice(0,10)}.gpx`;
       link.click();
       URL.revokeObjectURL(url);
     }
 
-    // → Opens Strava upload page in a new tab
     function uploadToStrava() {
       window.open("https://www.strava.com/upload/select", "_blank");
     }
@@ -779,9 +578,7 @@ if (lastViewerElapsed >= (lastViewerData.timestamp - lastViewerData.startTime)) 
     exportGpxBtn.onclick    = convertToGPX;
     uploadStravaBtn.onclick = uploadToStrava;
 
-    // → On map load, default to Runner mode
     map.on('load', () => setMode('runner'));
-  }
-</script>
+  </script>
 </body>
 </html>

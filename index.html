@@ -149,6 +149,8 @@
     <select id="layerSelect">
       <option value="satellite" selected>Satellite</option>
       <option value="streets">Streets</option>
+      <option value="topo">Topographic</option>
+      <option value="outdoor">Outdoor</option>
     </select>
   </div>
 
@@ -171,9 +173,11 @@
 
     // → Style URLs
     const STYLES = {
-      satellite: "https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC",
-      streets:   "https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC"
-    };
+  satellite: `https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,  
+  streets:   `https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
+  topo:      `https://api.maptiler.com/maps/topo/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
+  outdoor:   `https://api.maptiler.com/maps/outdoor/style.json?key=Ii8JoWt1QkDL9pFlSQXC`
+};
 
     // → Initialize map
     let map = new maplibregl.Map({

@@ -8,6 +8,7 @@
   <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     html, body { margin: 0; padding: 0; height: 100%; }
     #map { width: 100%; height: 100%; }
@@ -209,7 +210,8 @@
     let viewerMarker = null, activeListener = null;
     let isFollowing = true, viewerFollowing = true;
     let viewerTimerId = null, lastViewerData = null, lastViewerElapsed = 0;
-
+    let activeRunId = null;
+    let pointSequence = 0;
     // → DOM
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
@@ -223,6 +225,12 @@
     const viewerModeBtn = document.getElementById('viewerModeBtn');
     const recenterBtn = document.getElementById('recenterBtn');
     const layerSelect = document.getElementById('layerSelect');
+    const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
+    const supabase = window.supabase.createClient(
+      SUPABASE_URL,
+      SUPABASE_ANON_KEY
+    );
 
     function setMode(mode) {
       document.getElementById('controls').style.display = (mode === 'runner') ? 'flex' : 'none';
@@ -302,8 +310,20 @@
       startBtn.disabled=true; stopBtn.disabled=false; statsBar.style.display='block';
       watchId = navigator.geolocation.watchPosition(async pos => {
         const coord=[pos.coords.longitude,pos.coords.latitude], now=Date.now();
+
         if (isFollowing) map.setCenter(coord);
         const elevM = await fetchElevation(coord[1],coord[0]);
+        if (activeRunId) {
+          await supabase.from("run_points").insert({
+            run_id: activeRunId,
+            sequence_num: pointSequence++,
+            lat: coord[1],
+            lon: coord[0],
+            accuracy: pos.coords.accuracy ?? null,
+            elevation_m: elevM ?? null,
+            recorded_at: new Date(now).toISOString()
+          });
+        }   
         const elevFt = elevM!=null? elevM*3.28084 : null;
 
         if (pathCoords.length>0) {
@@ -370,7 +390,7 @@ function stopTracking() {
     startBtn.onclick = startTracking;
     stopBtn.onclick  = stopTracking;
 
-broadcastBtn.onclick = () => {
+broadcastBtn.onclick = async () => {
   // prompt for runner’s name
   let first = prompt("Enter your **first name**:")?.trim();
   if (!first || first.length < 2) return alert("First name is required.");
@@ -379,6 +399,25 @@ broadcastBtn.onclick = () => {
 
   // build the Firebase reference
   runnerName = `${first} ${last}`;
+const { data: newRun, error } = await supabase
+  .from("runs")
+  .insert({
+    runner_name: runnerName,
+    is_live: true
+  })
+  .select()
+  .single();
+
+if (error) {
+  console.error("Supabase run error:", error);
+  alert("Supabase run failed");
+  return;
+}
+
+activeRunId = newRun.id;
+pointSequence = 0;
+
+console.log("Supabase run created:", activeRunId);
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, '-');
   broadcastRef = db.ref(`runners/${safeName}`);
 

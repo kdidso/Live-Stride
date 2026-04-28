@@ -227,10 +227,10 @@
     const layerSelect = document.getElementById('layerSelect');
     const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
-    const supabase = window.supabase.createClient(
-      SUPABASE_URL,
-      SUPABASE_ANON_KEY
-    );
+    const supabaseClient = window.supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY
+);
 
     function setMode(mode) {
       document.getElementById('controls').style.display = (mode === 'runner') ? 'flex' : 'none';
@@ -314,7 +314,7 @@
         if (isFollowing) map.setCenter(coord);
         const elevM = await fetchElevation(coord[1],coord[0]);
         if (activeRunId) {
-          await supabase.from("run_points").insert({
+          await supabaseClient.from("run_points").insert({
             run_id: activeRunId,
             sequence_num: pointSequence++,
             lat: coord[1],
@@ -399,7 +399,7 @@ broadcastBtn.onclick = async () => {
 
   // build the Firebase reference
   runnerName = `${first} ${last}`;
-const { data: newRun, error } = await supabase
+const { data: newRun, error } = await supabaseClient
   .from("runs")
   .insert({
     runner_name: runnerName,

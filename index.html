@@ -212,6 +212,11 @@
     let viewerTimerId = null, lastViewerData = null, lastViewerElapsed = 0;
     let activeRunId = null;
     let pointSequence = 0;
+    let runnerTimerId = null;
+    let latestRunnerDistance = 0;
+    let latestRunnerPace = 0;
+    let latestRunnerAvgPace = 0;
+    let latestRunnerElevFt = null;
     // → DOM
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
@@ -308,6 +313,23 @@
     function startTracking() {
       pathCoords=[]; totalDistanceMeters=0; startTime=lastPointTime=null;
       startBtn.disabled=true; stopBtn.disabled=false; statsBar.style.display='block';
+if (runnerTimerId !== null) {
+  clearInterval(runnerTimerId);
+}
+
+runnerTimerId = setInterval(() => {
+  if (!startTime) return;
+
+  const elapsedMs = Date.now() - startTime;
+
+  updateStatsDisplay(
+    latestRunnerDistance,
+    latestRunnerPace,
+    latestRunnerAvgPace,
+    elapsedMs,
+    latestRunnerElevFt
+  );
+}, 1000);
       watchId = navigator.geolocation.watchPosition(async pos => {
         const coord=[pos.coords.longitude,pos.coords.latitude], now=Date.now();
 
@@ -335,16 +357,18 @@
           const totalMin = (now - startTime)/60000;
           const avgPace = totalMin / metersToMiles(totalDistanceMeters);
           const elapsedMs = now - startTime;
+          latestRunnerDistance = metersToMiles(totalDistanceMeters);
+          latestRunnerPace = instPace;
+          latestRunnerAvgPace = avgPace;
+          latestRunnerElevFt = elevFt;
           if (broadcasting && broadcastRef) {
             broadcastRef.set({ name:runnerName, path:pathCoords, current:coord, distance:metersToMiles(totalDistanceMeters), pace:instPace, avgPace, timestamp:now, startTime });
           }
-          updateStatsDisplay(metersToMiles(totalDistanceMeters),instPace,avgPace,elapsedMs,elevFt);
         } else {
           startTime = now;
           if (broadcasting && broadcastRef) {
             broadcastRef.set({ name:runnerName, path:pathCoords, current:coord, distance:0, pace:0, avgPace:0, timestamp:now, startTime });
           }
-          updateStatsDisplay(0,0,0,0,elevFt);
         }
 
         lastPointTime = now;
@@ -365,6 +389,10 @@ function stopTracking() {
     navigator.geolocation.clearWatch(watchId);
     watchId = null;
   }
+if (runnerTimerId !== null) {
+  clearInterval(runnerTimerId);
+  runnerTimerId = null;
+}
 
   // 2) Toggle the Start/Stop buttons
   startBtn.disabled = false;

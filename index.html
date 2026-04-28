@@ -497,6 +497,67 @@ console.log("Supabase run created:", activeRunId);
       });
     });
 
+function trackRunnerSupabase(runId) {
+  pathCoords = [];
+
+  // 1. Load existing points
+  supabaseClient
+    .from("run_points")
+    .select("*")
+    .eq("run_id", runId)
+    .order("sequence_num", { ascending: true })
+    .then(({ data, error }) => {
+      if (error) {
+        console.error("Initial load error:", error);
+        return;
+      }
+
+      pathCoords = data.map(pt => ({
+        lat: pt.lat,
+        lon: pt.lon
+      }));
+
+      addOrUpdatePath();
+    });
+
+  // 2. Subscribe to new points
+  supabaseClient
+    .channel(`run-${runId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "run_points",
+        filter: `run_id=eq.${runId}`
+      },
+      payload => {
+        const pt = payload.new;
+
+        pathCoords.push({
+          lat: pt.lat,
+          lon: pt.lon
+        });
+
+        addOrUpdatePath();
+
+        // update marker
+        if (!viewerMarker) {
+          viewerMarker = new maplibregl.Marker({ color: 'red' })
+            .setLngLat([pt.lon, pt.lat])
+            .addTo(map);
+        } else {
+          viewerMarker.setLngLat([pt.lon, pt.lat]);
+        }
+
+        if (viewerFollowing) {
+          map.flyTo({ center: [pt.lon, pt.lat], zoom: 16 });
+        }
+      }
+    )
+    .subscribe();
+}
+    
 function trackRunner(key) {
   // 1) Remove any prior Firebase listener
   if (activeListener) {

@@ -474,28 +474,44 @@ console.log("Supabase run created:", activeRunId);
   }
 };
 
-    searchInput.addEventListener('input', () => {
-      const q = searchInput.value.toLowerCase().replace(/[^a-z0-9]/g,'');
+searchInput.addEventListener('input', async () => {
+  const q = searchInput.value.trim();
+
+  suggestionsList.innerHTML = '';
+  if (!q) return;
+
+  const { data, error } = await supabaseClient
+    .from("runs")
+    .select("id, runner_name, started_at, is_live")
+    .ilike("runner_name", `%${q}%`)
+    .order("started_at", { ascending: false })
+    .limit(10);
+
+  if (error) {
+    console.error("Supabase runner search error:", error);
+    return;
+  }
+
+  data.forEach(run => {
+    const li = document.createElement('li');
+
+    const status = run.is_live ? "LIVE" : "Finished";
+    const started = run.started_at
+      ? new Date(run.started_at).toLocaleTimeString()
+      : "";
+
+    li.textContent = `${run.runner_name} — ${status} — ${started}`;
+
+    li.onclick = () => {
+      searchInput.value = run.runner_name;
+      viewerFollowing = true;
+      trackRunnerSupabase(run.id);
       suggestionsList.innerHTML = '';
-      if (!q) return;
-      db.ref('runners').once('value', snap => {
-        const all = snap.val(); if (!all) return;
-        for (let key in all) {
-          const name = all[key].name || key;
-          if (name.toLowerCase().includes(q)) {
-            const li = document.createElement('li');
-            li.textContent = name;
-            li.onclick = () => {
-              searchInput.value = name;
-              viewerFollowing = true;
-              trackRunner(key);
-              suggestionsList.innerHTML = '';
-            };
-            suggestionsList.appendChild(li);
-          }
-        }
-      });
-    });
+    };
+
+    suggestionsList.appendChild(li);
+  });
+});
 
 function trackRunnerSupabase(runId) {
   pathCoords = [];

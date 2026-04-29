@@ -522,7 +522,7 @@ function trackRunnerSupabase(runId) {
 
   // 2. Subscribe to new points
   supabaseClient
-    .channel(`run-${runId}`)
+    .channel(`run_${runId.replace(/-/g, "_")}`)
     .on(
       "postgres_changes",
       {

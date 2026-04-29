@@ -1,9 +1,9 @@
-name: Daily Firebase Runner Cleanup
+name: Daily LiveStride Cleanup
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # 6:00 AM UTC = 12:00 AM CST
-  workflow_dispatch:     # Allows manual triggering from the Actions tab
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 jobs:
   cleanup:
@@ -11,17 +11,19 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install firebase-admin
+        run: pip install firebase-admin requests
 
       - name: Run cleanup script
         env:
           FIREBASE_KEY_JSON: ${{ secrets.FIREBASE_KEY_JSON }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python cleanup_runners.py

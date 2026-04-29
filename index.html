@@ -534,6 +534,22 @@ function trackRunnerSupabase(runId) {
       }));
 
       addOrUpdatePath();
+if (pathCoords.length > 0) {
+  const last = pathCoords[pathCoords.length - 1];
+
+  if (!viewerMarker) {
+    viewerMarker = new maplibregl.Marker({ color: 'red' })
+      .setLngLat([last.lon, last.lat])
+      .addTo(map);
+  } else {
+    viewerMarker.setLngLat([last.lon, last.lat]);
+  }
+
+  map.flyTo({
+    center: [last.lon, last.lat],
+    zoom: 16
+  });
+}
     });
 
   // 2. Subscribe to new points

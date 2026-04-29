@@ -1,0 +1,1002 @@
+// → Capacitor plugins
+const { BackgroundGeolocation, Filesystem, Share } = Capacitor.Plugins;
+const Directory = Filesystem.Directory;
+const Encoding  = Filesystem.Encoding;
+
+// → Firebase initialization
+// Assumes firebase is loaded globally via <script> before this module.
+const firebaseConfig = {
+  apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
+  authDomain: "livestride.firebaseapp.com",
+  databaseURL: "https://livestride-default-rtdb.firebaseio.com",
+  projectId: "livestride",
+  storageBucket: "livestride.firebasestorage.app",
+  messagingSenderId: "758438288478",
+  appId: "1:758438288478:web:def85c1fd5e08b6c2ee8cf"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+// → Supabase initialization
+// Assumes @supabase/supabase-js is loaded globally via <script> before this module.
+const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
+const supabaseClient = window.supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY
+);
+
+// → Style URLs for map toggle
+const STYLES = {
+  satellite: `https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
+  streets: `https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
+  topo: `https://api.maptiler.com/maps/topo/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
+  outdoor: `https://api.maptiler.com/maps/outdoor/style.json?key=Ii8JoWt1QkDL9pFlSQXC`
+};
+
+// → Create map with default satellite style
+let map = new maplibregl.Map({
+  container: "map",
+  style: STYLES.satellite,
+  center: [-113.6, 37.1],
+  zoom: 13
+});
+
+// → Re-add geolocation control after style changes
+let geoControl;
+function addControls() {
+  if (geoControl) {
+    try {
+      map.removeControl(geoControl);
+    } catch (err) {
+      console.warn("Unable to remove old geolocation control:", err);
+    }
+  }
+
+  geoControl = new maplibregl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true },
+    trackUserLocation: true,
+    showAccuracyCircle: false,
+    showUserLocation: true
+  });
+
+  map.addControl(geoControl, "bottom-right");
+}
+map.on("style.load", addControls);
+
+// → Tracking state
+let pathCoords = [];
+let bgWatchId = null;
+let startTime = null;
+let lastPointTime = null;
+let totalDistanceMeters = 0;
+let lastComputeTime = 0;
+
+let runnerTimerId = null;
+let latestRunnerDistance = 0;
+let latestRunnerPace = 0;
+let latestRunnerAvgPace = 0;
+let latestRunnerElevFt = null;
+
+let runnerName = null;
+let broadcastRef = null;
+let broadcasting = false;
+let activeRunId = null;
+let pointSequence = 0;
+
+let viewerMarker = null;
+let activeListener = null;
+let activeSupabaseChannel = null;
+let viewerTimerId = null;
+let lastViewerData = null;
+let lastViewerElapsed = 0;
+let selectedRunner = null;
+
+let isFollowing = true;
+let viewerFollowing = true;
+let isPrivateMode = false;
+let localRunFilename = "";
+let privateSaveIntervalId = null;
+
+// → DOM references
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const broadcastBtn = document.getElementById("broadcastBtn");
+const exportUploadBtn = document.getElementById("exportUploadBtn");
+const statsBar = document.getElementById("statsBar");
+const searchInput = document.getElementById("searchInput");
+const suggestionsList = document.getElementById("suggestionsList");
+const runnerModeBtn = document.getElementById("runnerModeBtn");
+const viewerModeBtn = document.getElementById("viewerModeBtn");
+const recenterBtn = document.getElementById("recenterBtn");
+const layerSelect = document.getElementById("layerSelect");
+const viewerGpxBtn = document.getElementById("viewerGpxBtn");
+const broadcastCheckbox = document.getElementById("broadcastCheckbox");
+const exportGpxBtn = document.getElementById("exportGpxBtn");
+const uploadStravaBtn = document.getElementById("uploadStravaBtn");
+
+// → Mode switching
+function setMode(mode) {
+  const controls = document.getElementById("controls");
+  const broadcastLabel = document.getElementById("broadcastLabel");
+  const searchBar = document.getElementById("searchBar");
+  const buttonWrapper = document.getElementById("buttonWrapper");
+
+  controls.style.display = mode === "runner" ? "flex" : "none";
+  broadcastLabel.style.display = mode === "runner" ? "flex" : "none";
+  broadcastBtn.style.display = mode === "runner" && !isPrivateMode ? "block" : "none";
+
+  searchBar.style.display = mode === "viewer" ? "block" : "none";
+  statsBar.style.display = mode === "viewer" ? "block" : statsBar.style.display;
+  recenterBtn.style.display = mode === "viewer" ? "block" : "none";
+  viewerGpxBtn.style.display = mode === "viewer" ? "inline-block" : "none";
+
+  viewerModeBtn.style.display = mode === "viewer" ? "none" : "inline-block";
+
+  if (mode === "runner") {
+    buttonWrapper.classList.add("top-shift");
+    runnerModeBtn.classList.remove("viewer-position");
+  } else {
+    buttonWrapper.classList.remove("top-shift");
+    runnerModeBtn.classList.add("viewer-position");
+  }
+
+  isFollowing = true;
+  viewerFollowing = true;
+  map.resize();
+}
+
+runnerModeBtn.onclick = () => {
+  setMode("runner");
+  broadcastCheckbox.checked = true;
+  isPrivateMode = false;
+  broadcastBtn.style.display = "block";
+  exportUploadBtn.style.display = "none";
+  exportGpxBtn.style.display = "none";
+  uploadStravaBtn.style.display = "none";
+};
+
+viewerModeBtn.onclick = () => {
+  setMode("viewer");
+};
+
+// → Stop following if user manually moves map
+map.on("dragstart", () => {
+  isFollowing = false;
+  viewerFollowing = false;
+});
+
+map.on("zoomstart", () => {
+  isFollowing = false;
+  viewerFollowing = false;
+});
+
+// → Recenter button for viewer mode
+recenterBtn.onclick = () => {
+  if (viewerMarker) {
+    viewerFollowing = true;
+    map.flyTo({ center: viewerMarker.getLngLat(), zoom: 16 });
+  }
+};
+
+// → Utility functions
+function metersToMiles(meters) {
+  return meters / 1609.34;
+}
+
+function haversineDistance(a, b) {
+  const toRad = value => value * Math.PI / 180;
+  const R = 6371000;
+  const lat1 = toRad(a[1]);
+  const lat2 = toRad(b[1]);
+  const dLat = toRad(b[1] - a[1]);
+  const dLng = toRad(b[0] - a[0]);
+  const h = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function formatTime(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const h = String(Math.floor(totalSec / 3600)).padStart(2, "0");
+  const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, "0");
+  const s = String(totalSec % 60).padStart(2, "0");
+  return `${h}:${m}:${s}`;
+}
+
+function formatPace(minsPerMile) {
+  if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+  const minutes = Math.floor(minsPerMile);
+  const seconds = Math.round((minsPerMile - minutes) * 60);
+  return `${minutes}:${seconds.toString().padStart(2, "0")} /mi`;
+}
+
+async function fetchElevation(lat, lon) {
+  try {
+    const response = await fetch(
+      `https://api.open-elevation.com/api/v1/lookup?locations=${lat},${lon}`
+    );
+    const data = await response.json();
+    return data.results?.[0]?.elevation ?? null;
+  } catch (err) {
+    console.error("Elevation fetch error:", err);
+    return null;
+  }
+}
+
+function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationFt) {
+  const timeHtml = `Time: ${formatTime(elapsedMs)}`;
+  const elevHtml = elevationFt != null ? `Elev: ${Math.round(elevationFt)} ft` : "Elev: —";
+  const distHtml = `Distance: ${distanceMi.toFixed(2)} mi`;
+  const paceHtml = `Pace: ${formatPace(instPace)}`;
+  const avgHtml = `Avg Pace: ${formatPace(avgPace)}`;
+
+  statsBar.innerHTML = `
+    <div>${timeHtml}<span style="margin:0 6px;color:white">|</span>${elevHtml}</div>
+    <div style="margin-top:4px;">${distHtml}<span style="margin:0 6px;color:white">|</span>${paceHtml}<span style="margin:0 6px;color:white">|</span>${avgHtml}</div>
+  `;
+}
+
+function addOrUpdatePath() {
+  const coords = pathCoords.map(pt => [pt.lon, pt.lat]);
+  const data = {
+    type: "Feature",
+    geometry: {
+      type: "LineString",
+      coordinates: coords
+    }
+  };
+
+  if (!map.getSource("run-path")) {
+    map.addSource("run-path", {
+      type: "geojson",
+      data
+    });
+
+    map.addLayer({
+      id: "run-line",
+      type: "line",
+      source: "run-path",
+      layout: {
+        "line-join": "round",
+        "line-cap": "round"
+      },
+      paint: {
+        "line-color": "#00FFFF",
+        "line-width": 4
+      }
+    });
+  } else {
+    map.getSource("run-path").setData(data);
+  }
+}
+
+function clearRunPathLayer() {
+  if (map.getLayer("run-line")) {
+    map.removeLayer("run-line");
+  }
+  if (map.getSource("run-path")) {
+    map.removeSource("run-path");
+  }
+}
+
+function updateSupabaseViewerStats() {
+  if (!pathCoords.length) return;
+
+  let distMeters = 0;
+  for (let i = 1; i < pathCoords.length; i++) {
+    distMeters += haversineDistance(
+      [pathCoords[i - 1].lon, pathCoords[i - 1].lat],
+      [pathCoords[i].lon, pathCoords[i].lat]
+    );
+  }
+
+  const firstTime = pathCoords[0].timestamp || Date.now();
+  const lastTime = pathCoords[pathCoords.length - 1].timestamp || Date.now();
+  const elapsedMs = Math.max(0, lastTime - firstTime);
+  const distMiles = metersToMiles(distMeters);
+  const avgPace = distMiles > 0 ? (elapsedMs / 60000) / distMiles : 0;
+  const lastPoint = pathCoords[pathCoords.length - 1];
+
+  lastViewerData = {
+    distance: distMiles,
+    pace: 0,
+    avgPace,
+    startTime: firstTime,
+    current: [lastPoint.lon, lastPoint.lat],
+    elevationFt: lastPoint.elevationFt ?? null
+  };
+  lastViewerElapsed = elapsedMs;
+
+  updateStatsDisplay(
+    distMiles,
+    0,
+    avgPace,
+    elapsedMs,
+    lastPoint.elevationFt ?? null
+  );
+}
+
+async function savePrivateRunToFile() {
+  if (!isPrivateMode || !pathCoords.length || !localRunFilename) return;
+
+  const runData = {
+    startTime,
+    pathCoords,
+    totalDistanceMiles: metersToMiles(totalDistanceMeters),
+    lastUpdated: Date.now()
+  };
+
+  try {
+    await Filesystem.writeFile({
+      path: localRunFilename,
+      data: JSON.stringify(runData),
+      directory: "DATA",
+      encoding: "utf8"
+    });
+    console.log("Private run saved to:", localRunFilename);
+  } catch (err) {
+    console.error("Error saving private run:", err);
+    alert(`Error saving private run:\n${err.message}`);
+  }
+}
+
+function convertToGpx(runData) {
+  const runDate = runData.startTime
+    ? new Date(runData.startTime).toISOString().slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
+
+  let gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx creator="LiveStride" version="1.1" xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:schemaLocation="http://www.topografix.com/GPX/1/1
+     http://www.topografix.com/GPX/1/1/gpx.xsd">
+  <trk>
+    <name>LiveStride Run ${runDate}</name>
+    <trkseg>
+`;
+
+  runData.pathCoords.forEach(pt => {
+    const ele = pt.elevation != null ? pt.elevation : 0;
+    const time = pt.time || new Date(pt.timestamp).toISOString();
+    gpx += `      <trkpt lat="${pt.lat}" lon="${pt.lon}">
+        <ele>${ele}</ele>
+        <time>${time}</time>
+      </trkpt>
+`;
+  });
+
+  gpx += `    </trkseg>
+  </trk>
+</gpx>`;
+
+  return gpx;
+}
+
+async function handleLocationUpdate(coord, accuracy = null) {
+  const now = Date.now();
+
+  if (isFollowing) {
+    map.setCenter(coord);
+  }
+
+  const elevMeters = await fetchElevation(coord[1], coord[0]);
+  const elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
+
+  let instPace = 0;
+  let avgPace = 0;
+
+  if (pathCoords.length > 0) {
+    const prev = pathCoords[pathCoords.length - 1];
+    const segmentMeters = haversineDistance([prev.lon, prev.lat], coord);
+    totalDistanceMeters += segmentMeters;
+
+    const segmentMiles = metersToMiles(segmentMeters);
+    const elapsedMin = lastPointTime ? (now - lastPointTime) / 60000 : 0;
+    instPace = segmentMiles > 0 ? elapsedMin / segmentMiles : 0;
+
+    const totalMin = startTime ? (now - startTime) / 60000 : 0;
+    const totalMiles = metersToMiles(totalDistanceMeters);
+    avgPace = totalMiles > 0 ? totalMin / totalMiles : 0;
+  } else {
+    startTime = now;
+  }
+
+  lastPointTime = now;
+
+  const newPoint = {
+    lat: coord[1],
+    lon: coord[0],
+    timestamp: now,
+    time: new Date(now).toISOString(),
+    elevation: elevMeters,
+    elevationFt,
+    distance: metersToMiles(totalDistanceMeters),
+    instPace,
+    avgPace
+  };
+
+  pathCoords.push(newPoint);
+
+  latestRunnerDistance = metersToMiles(totalDistanceMeters);
+  latestRunnerPace = instPace;
+  latestRunnerAvgPace = avgPace;
+  latestRunnerElevFt = elevationFt;
+
+  if (activeRunId) {
+    const { error } = await supabaseClient.from("run_points").insert({
+      run_id: activeRunId,
+      sequence_num: pointSequence++,
+      lat: coord[1],
+      lon: coord[0],
+      accuracy: accuracy ?? null,
+      elevation_m: elevMeters ?? null,
+      recorded_at: new Date(now).toISOString()
+    });
+
+    if (error) {
+      console.error("Supabase run point insert error:", error);
+    }
+  }
+
+  if (now - lastComputeTime >= 1000) {
+    lastComputeTime = now;
+
+    if (broadcasting && broadcastRef) {
+      broadcastRef.set({
+        name: runnerName,
+        path: pathCoords,
+        current: coord,
+        distance: latestRunnerDistance,
+        pace: latestRunnerPace,
+        avgPace: latestRunnerAvgPace,
+        elevation: latestRunnerElevFt,
+        timestamp: now,
+        startTime
+      });
+    }
+  }
+
+  addOrUpdatePath();
+
+  if (isPrivateMode) {
+    savePrivateRunToFile();
+  }
+}
+
+async function startTracking() {
+  pathCoords = [];
+  totalDistanceMeters = 0;
+  startTime = null;
+  lastPointTime = null;
+  lastComputeTime = 0;
+  latestRunnerDistance = 0;
+  latestRunnerPace = 0;
+  latestRunnerAvgPace = 0;
+  latestRunnerElevFt = null;
+  pointSequence = 0;
+
+  clearRunPathLayer();
+
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  statsBar.style.display = "block";
+  exportUploadBtn.style.display = "none";
+  exportGpxBtn.style.display = "none";
+  uploadStravaBtn.style.display = "none";
+
+  if (runnerTimerId !== null) {
+    clearInterval(runnerTimerId);
+  }
+
+  runnerTimerId = setInterval(() => {
+    if (!startTime) return;
+
+    const elapsedMs = Date.now() - startTime;
+    updateStatsDisplay(
+      latestRunnerDistance,
+      latestRunnerPace,
+      latestRunnerAvgPace,
+      elapsedMs,
+      latestRunnerElevFt
+    );
+  }, 1000);
+
+  if (isPrivateMode) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    localRunFilename = `run_${timestamp}.json`;
+
+    if (privateSaveIntervalId !== null) {
+      clearInterval(privateSaveIntervalId);
+    }
+
+    privateSaveIntervalId = setInterval(() => {
+      savePrivateRunToFile();
+    }, 10000);
+  }
+
+  bgWatchId = await BackgroundGeolocation.addWatcher({
+    requestPermissions: true,
+    backgroundTitle: "LiveStride Active",
+    backgroundMessage: "Tracking your run",
+    distanceFilter: 1
+  }, async (location, error) => {
+    if (error) {
+      console.error("Background geolocation error:", error);
+      return;
+    }
+
+    if (!location) return;
+
+    await handleLocationUpdate(
+      [location.longitude, location.latitude],
+      location.accuracy ?? null
+    );
+  });
+}
+
+function stopTracking() {
+  if (runnerTimerId !== null) {
+    clearInterval(runnerTimerId);
+    runnerTimerId = null;
+  }
+
+  if (privateSaveIntervalId !== null) {
+    clearInterval(privateSaveIntervalId);
+    privateSaveIntervalId = null;
+  }
+
+  if (bgWatchId != null) {
+    BackgroundGeolocation
+      .removeWatcher({ id: bgWatchId })
+      .catch(err => console.warn("Failed to remove background watcher:", err));
+    bgWatchId = null;
+  }
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+
+  if (viewerTimerId !== null) {
+    clearInterval(viewerTimerId);
+    viewerTimerId = null;
+  }
+
+  if (broadcasting && broadcastRef) {
+    broadcastRef.update({ finished: true });
+    broadcasting = false;
+  }
+
+  if (activeRunId) {
+    supabaseClient
+      .from("runs")
+      .update({ is_live: false, ended_at: new Date().toISOString() })
+      .eq("id", activeRunId)
+      .then(({ error }) => {
+        if (error) console.error("Supabase run finish error:", error);
+      });
+  }
+
+  if (isPrivateMode) {
+    savePrivateRunToFile();
+    exportGpxBtn.style.display = "inline-block";
+    uploadStravaBtn.style.display = "inline-block";
+    exportUploadBtn.style.display = "none";
+  } else {
+    exportUploadBtn.style.display = "inline-block";
+    exportGpxBtn.style.display = "none";
+    uploadStravaBtn.style.display = "none";
+  }
+}
+
+startBtn.onclick = startTracking;
+stopBtn.onclick = stopTracking;
+
+broadcastCheckbox.onchange = () => {
+  isPrivateMode = !broadcastCheckbox.checked;
+  broadcastBtn.style.display = isPrivateMode ? "none" : "block";
+  exportUploadBtn.style.display = "none";
+  exportGpxBtn.style.display = "none";
+  uploadStravaBtn.style.display = "none";
+};
+
+broadcastBtn.onclick = async () => {
+  const first = prompt("Enter your first name:")?.trim();
+  if (!first || first.length < 2) return alert("First name is required.");
+
+  const last = prompt("Enter your last name:")?.trim();
+  if (!last || last.length < 2) return alert("Last name is required.");
+
+  runnerName = `${first} ${last}`;
+
+  const { data: newRun, error } = await supabaseClient
+    .from("runs")
+    .insert({
+      runner_name: runnerName,
+      is_live: true
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error("Supabase run error:", JSON.stringify(error, null, 2));
+    alert("Supabase run failed: " + (error.message || JSON.stringify(error)));
+    return;
+  }
+
+  activeRunId = newRun.id;
+  pointSequence = 0;
+
+  const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
+  broadcastRef = db.ref(`runners/${safeName}`);
+
+  await broadcastRef.update({ finished: false });
+
+  broadcasting = true;
+  broadcastBtn.style.display = "none";
+
+  if (startTime !== null) {
+    broadcastRef.set({
+      name: runnerName,
+      path: pathCoords,
+      current: pathCoords.length > 0
+        ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
+        : null,
+      distance: metersToMiles(totalDistanceMeters),
+      pace: latestRunnerPace,
+      avgPace: latestRunnerAvgPace,
+      elevation: latestRunnerElevFt,
+      timestamp: Date.now(),
+      startTime
+    });
+  }
+};
+
+exportUploadBtn.onclick = () => {
+  window.open("https://kdidso.github.io/livestride-export/", "_blank");
+};
+
+exportGpxBtn.onclick = async () => {
+  if (!localRunFilename) {
+    alert("No run to export.");
+    return;
+  }
+
+  try {
+    const readResult = await Filesystem.readFile({
+      path: localRunFilename,
+      directory: "DATA",
+      encoding: "utf8"
+    });
+
+    const runData = JSON.parse(readResult.data);
+    const gpx = convertToGpx(runData);
+    const gpxFilename = localRunFilename.replace(".json", ".gpx");
+
+    await Filesystem.writeFile({
+      path: gpxFilename,
+      data: gpx,
+      directory: "CACHE",
+      encoding: "utf8"
+    });
+
+    const { uri } = await Filesystem.getUri({
+      directory: "CACHE",
+      path: gpxFilename
+    });
+
+    try {
+      await Share.share({
+        title: "LiveStride GPX Export",
+        text: "Here’s my run in GPX format.",
+        url: uri,
+        dialogTitle: "Save or share your run GPX"
+      });
+    } catch (err) {
+      console.warn("Share cancelled or failed:", err);
+    }
+  } catch (err) {
+    console.error("Unexpected export error:", err);
+    alert(`Export failed:\n${err.message}`);
+  }
+};
+
+uploadStravaBtn.onclick = async () => {
+  if (!localRunFilename) {
+    alert("No run to upload.");
+    return;
+  }
+
+  try {
+    const gpxFilename = localRunFilename.replace(".json", ".gpx");
+
+    await Filesystem.deleteFile({
+      directory: "CACHE",
+      path: gpxFilename
+    });
+
+    await Filesystem.deleteFile({
+      directory: "DATA",
+      path: localRunFilename
+    });
+  } catch (err) {
+    console.warn("Cleanup skipped or failed:", err);
+  }
+
+  window.open("https://www.strava.com/upload/select", "_blank");
+};
+
+viewerGpxBtn.onclick = () => {
+  window.open("https://kdidso.github.io/livestride-export/", "_blank");
+};
+
+searchInput.addEventListener("input", async () => {
+  const q = searchInput.value.trim();
+
+  suggestionsList.innerHTML = "";
+  suggestionsList.style.display = "block";
+  if (!q) return;
+
+  const { data, error } = await supabaseClient
+    .from("runs")
+    .select("id, runner_name, started_at, is_live")
+    .ilike("runner_name", `%${q}%`)
+    .order("started_at", { ascending: false })
+    .limit(10);
+
+  if (error) {
+    console.error("Supabase runner search error:", error);
+    return;
+  }
+
+  data.forEach(run => {
+    const li = document.createElement("li");
+    const status = run.is_live ? "LIVE" : "Finished";
+    const started = run.started_at
+      ? new Date(run.started_at).toLocaleTimeString()
+      : "";
+
+    li.textContent = `${run.runner_name} — ${status} — ${started}`;
+
+    li.onclick = () => {
+      searchInput.value = run.runner_name;
+      viewerFollowing = true;
+      selectedRunner = run.id;
+      trackRunnerSupabase(run.id);
+      suggestionsList.innerHTML = "";
+      suggestionsList.style.display = "none";
+      searchInput.blur();
+    };
+
+    suggestionsList.appendChild(li);
+  });
+});
+
+async function trackRunnerSupabase(runId) {
+  if (activeListener) {
+    activeListener.off();
+    activeListener = null;
+  }
+
+  if (activeSupabaseChannel) {
+    supabaseClient.removeChannel(activeSupabaseChannel);
+    activeSupabaseChannel = null;
+  }
+
+  if (viewerTimerId !== null) {
+    clearInterval(viewerTimerId);
+    viewerTimerId = null;
+  }
+
+  pathCoords = [];
+  clearRunPathLayer();
+
+  const { data, error } = await supabaseClient
+    .from("run_points")
+    .select("*")
+    .eq("run_id", runId)
+    .order("sequence_num", { ascending: true });
+
+  if (error) {
+    console.error("Initial Supabase run point load error:", error);
+    return;
+  }
+
+  pathCoords = data.map(pt => ({
+    lat: pt.lat,
+    lon: pt.lon,
+    timestamp: new Date(pt.recorded_at).getTime(),
+    time: pt.recorded_at,
+    elevation: pt.elevation_m,
+    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null
+  }));
+
+  addOrUpdatePath();
+  updateSupabaseViewerStats();
+
+  if (pathCoords.length > 0) {
+    const last = pathCoords[pathCoords.length - 1];
+
+    if (!viewerMarker) {
+      viewerMarker = new maplibregl.Marker({ color: "red" })
+        .setLngLat([last.lon, last.lat])
+        .addTo(map);
+    } else {
+      viewerMarker.setLngLat([last.lon, last.lat]);
+    }
+
+    map.flyTo({
+      center: [last.lon, last.lat],
+      zoom: 16
+    });
+  }
+
+  activeSupabaseChannel = supabaseClient
+    .channel(`run_${runId.replace(/-/g, "_")}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "run_points",
+        filter: `run_id=eq.${runId}`
+      },
+      payload => {
+        const pt = payload.new;
+
+        pathCoords.push({
+          lat: pt.lat,
+          lon: pt.lon,
+          timestamp: new Date(pt.recorded_at).getTime(),
+          time: pt.recorded_at,
+          elevation: pt.elevation_m,
+          elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null
+        });
+
+        addOrUpdatePath();
+        updateSupabaseViewerStats();
+
+        if (!viewerMarker) {
+          viewerMarker = new maplibregl.Marker({ color: "red" })
+            .setLngLat([pt.lon, pt.lat])
+            .addTo(map);
+        } else {
+          viewerMarker.setLngLat([pt.lon, pt.lat]);
+        }
+
+        if (viewerFollowing) {
+          map.flyTo({ center: [pt.lon, pt.lat], zoom: 16 });
+        }
+      }
+    )
+    .subscribe();
+
+  if (viewerTimerId === null) {
+    viewerTimerId = setInterval(() => {
+      if (!lastViewerData) return;
+
+      lastViewerElapsed += 1000;
+
+      updateStatsDisplay(
+        lastViewerData.distance,
+        lastViewerData.pace,
+        lastViewerData.avgPace,
+        lastViewerElapsed,
+        lastViewerData.elevationFt ?? null
+      );
+    }, 1000);
+  }
+}
+
+// → Firebase legacy fallback viewer function kept for older Firebase-only runs
+function trackRunner(key) {
+  if (activeSupabaseChannel) {
+    supabaseClient.removeChannel(activeSupabaseChannel);
+    activeSupabaseChannel = null;
+  }
+
+  if (activeListener) {
+    activeListener.off();
+  }
+
+  if (viewerTimerId !== null) {
+    clearInterval(viewerTimerId);
+    viewerTimerId = null;
+  }
+
+  const ref = db.ref(`runners/${key}`);
+  activeListener = ref;
+
+  ref.on("value", async snap => {
+    const data = snap.val();
+    if (!data || !data.current) return;
+
+    if (!viewerMarker) {
+      viewerMarker = new maplibregl.Marker({ color: "red" })
+        .setLngLat(data.current)
+        .addTo(map);
+    } else {
+      viewerMarker.setLngLat(data.current);
+    }
+
+    pathCoords = (data.path || []).map(pt => ({
+      lat: pt.lat,
+      lon: pt.lon,
+      timestamp: pt.timestamp,
+      time: pt.time,
+      elevation: pt.elevation,
+      elevationFt: pt.elevationFt ?? null
+    }));
+
+    addOrUpdatePath();
+
+    lastViewerData = {
+      distance: data.distance || 0,
+      pace: data.pace || 0,
+      avgPace: data.avgPace || 0,
+      startTime: data.startTime || null,
+      current: data.current,
+      elevationFt: data.elevation ?? null
+    };
+
+    lastViewerElapsed = data.timestamp && data.startTime
+      ? data.timestamp - data.startTime
+      : lastViewerElapsed;
+
+    let elevationFt = data.elevation ?? null;
+    if (elevationFt == null && lastViewerData.current) {
+      const elevM = await fetchElevation(
+        lastViewerData.current[1],
+        lastViewerData.current[0]
+      );
+      elevationFt = elevM != null ? elevM * 3.28084 : null;
+      lastViewerData.elevationFt = elevationFt;
+    }
+
+    updateStatsDisplay(
+      lastViewerData.distance,
+      lastViewerData.pace,
+      lastViewerData.avgPace,
+      lastViewerElapsed,
+      elevationFt
+    );
+
+    if (data.finished && viewerTimerId !== null) {
+      clearInterval(viewerTimerId);
+      viewerTimerId = null;
+    }
+
+    if (viewerFollowing) {
+      map.flyTo({ center: data.current, zoom: 16 });
+    }
+  });
+
+  if (viewerTimerId === null) {
+    viewerTimerId = setInterval(async () => {
+      const nowData = (await ref.once("value")).val();
+      if (nowData && nowData.finished) {
+        clearInterval(viewerTimerId);
+        viewerTimerId = null;
+        return;
+      }
+
+      if (!lastViewerData) return;
+
+      lastViewerElapsed += 1000;
+      updateStatsDisplay(
+        lastViewerData.distance,
+        lastViewerData.pace,
+        lastViewerData.avgPace,
+        lastViewerElapsed,
+        lastViewerData.elevationFt ?? null
+      );
+    }, 1000);
+  }
+}
+
+layerSelect.addEventListener("change", () => {
+  const newStyle = STYLES[layerSelect.value] || STYLES.satellite;
+  map.setStyle(newStyle);
+});
+
+map.on("load", () => setMode("runner"));

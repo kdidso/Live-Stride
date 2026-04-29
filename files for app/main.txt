@@ -98,6 +98,7 @@ let viewerFollowing = true;
 let isPrivateMode = false;
 let localRunFilename = "";
 let privateSaveIntervalId = null;
+let searchRequestId = 0;
 
 // → DOM references
 const startBtn = document.getElementById("startBtn");
@@ -439,6 +440,20 @@ async function handleLocationUpdate(coord, accuracy = null) {
       console.error("Supabase run point insert error:", error);
     }
   }
+  const { error: updateError } = await supabaseClient
+    .from("runs")
+    .update({
+      total_distance_m: totalDistanceMeters,
+      latest_lat: coord[1],
+      latest_lon: coord[0],
+      latest_timestamp: new Date(now).toISOString()
+    })
+    .eq("id", activeRunId);
+
+  if (updateError) {
+    console.error("Supabase run latest stats update error:", updateError);
+  }
+}
 
   if (now - lastComputeTime >= 1000) {
     lastComputeTime = now;
@@ -567,15 +582,26 @@ function stopTracking() {
     broadcasting = false;
   }
 
-  if (activeRunId) {
-    supabaseClient
-      .from("runs")
-      .update({ is_live: false, ended_at: new Date().toISOString() })
-      .eq("id", activeRunId)
-      .then(({ error }) => {
-        if (error) console.error("Supabase run finish error:", error);
-      });
-  }
+if (activeRunId) {
+  const lastPoint = pathCoords.length > 0
+    ? pathCoords[pathCoords.length - 1]
+    : null;
+
+  supabaseClient
+    .from("runs")
+    .update({
+      is_live: false,
+      finished_at: new Date().toISOString(),
+      total_distance_m: totalDistanceMeters,
+      latest_lat: lastPoint ? lastPoint.lat : null,
+      latest_lon: lastPoint ? lastPoint.lon : null,
+      latest_timestamp: lastPoint ? lastPoint.time : null
+    })
+    .eq("id", activeRunId)
+    .then(({ error }) => {
+      if (error) console.error("Supabase run finish error:", error);
+    });
+}
 
   if (isPrivateMode) {
     savePrivateRunToFile();
@@ -730,11 +756,15 @@ viewerGpxBtn.onclick = () => {
   window.open("https://kdidso.github.io/livestride-export/", "_blank");
 };
 
-searchInput.addEventListener("input", async () => {
+let searchRequestId = 0;
+
+searchInput.oninput = async () => {
+  const requestId = ++searchRequestId;
   const q = searchInput.value.trim();
 
   suggestionsList.innerHTML = "";
-  suggestionsList.style.display = "block";
+  suggestionsList.style.display = "none";
+
   if (!q) return;
 
   const { data, error } = await supabaseClient
@@ -744,13 +774,26 @@ searchInput.addEventListener("input", async () => {
     .order("started_at", { ascending: false })
     .limit(10);
 
+  // Ignore results from an older search that finished late
+  if (requestId !== searchRequestId) return;
+
+  suggestionsList.innerHTML = "";
+  suggestionsList.style.display = "block";
+
   if (error) {
     console.error("Supabase runner search error:", error);
     return;
   }
 
+  const seen = new Set();
+
   data.forEach(run => {
+    const uniqueKey = run.id;
+    if (seen.has(uniqueKey)) return;
+    seen.add(uniqueKey);
+
     const li = document.createElement("li");
+
     const status = run.is_live ? "LIVE" : "Finished";
     const started = run.started_at
       ? new Date(run.started_at).toLocaleTimeString()
@@ -763,6 +806,7 @@ searchInput.addEventListener("input", async () => {
       viewerFollowing = true;
       selectedRunner = run.id;
       trackRunnerSupabase(run.id);
+
       suggestionsList.innerHTML = "";
       suggestionsList.style.display = "none";
       searchInput.blur();
@@ -770,7 +814,7 @@ searchInput.addEventListener("input", async () => {
 
     suggestionsList.appendChild(li);
   });
-});
+};
 
 async function trackRunnerSupabase(runId) {
   if (activeListener) {

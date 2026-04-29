@@ -336,17 +336,26 @@ runnerTimerId = setInterval(() => {
 
         if (isFollowing) map.setCenter(coord);
         const elevM = await fetchElevation(coord[1],coord[0]);
-        if (activeRunId) {
-          await supabaseClient.from("run_points").insert({
-            run_id: activeRunId,
-            sequence_num: pointSequence++,
-            lat: coord[1],
-            lon: coord[0],
-            accuracy: pos.coords.accuracy ?? null,
-            elevation_m: elevM ?? null,
-            recorded_at: new Date(now).toISOString()
-          });
-        }   
+if (activeRunId) {
+  const lastPoint = pathCoords.length > 0
+    ? pathCoords[pathCoords.length - 1]
+    : null;
+
+  supabaseClient
+    .from("runs")
+    .update({
+      is_live: false,
+      finished_at: new Date().toISOString(),
+      total_distance_m: totalDistanceMeters,
+      latest_lat: lastPoint ? lastPoint.lat : null,
+      latest_lon: lastPoint ? lastPoint.lon : null,
+      latest_timestamp: lastPoint ? lastPoint.time : null
+    })
+    .eq("id", activeRunId)
+    .then(({ error }) => {
+      if (error) console.error("Supabase run finish error:", error);
+    });
+}   
         const elevFt = elevM!=null? elevM*3.28084 : null;
 
         if (pathCoords.length>0) {

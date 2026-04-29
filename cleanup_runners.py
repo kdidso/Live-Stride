@@ -70,10 +70,11 @@ def cleanup_old_supabase_runs():
 
     # 1. Find old runs
     runs_url = f"{SUPABASE_URL}/rest/v1/runs"
-    params = {
-        "select": "id,runner_name,started_at,is_live",
-        "started_at": f"lt.{cutoff_iso}"
-    }
+params = {
+    "select": "id,runner_name,started_at,finished_at,is_live",
+    "is_live": "eq.false",
+    "finished_at": f"lt.{cutoff_iso}"
+}
 
     response = requests.get(
         runs_url,

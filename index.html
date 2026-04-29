@@ -475,11 +475,11 @@ console.log("Supabase run created:", activeRunId);
   }
 };
 
-searchInput.addEventListener('input', async () => {
+searchInput.oninput = async () => {
   const q = searchInput.value.trim();
 
-  suggestionsList.innerHTML = '';
-  suggestionsList.style.display = 'block';
+  suggestionsList.innerHTML = "";
+  suggestionsList.style.display = "block";
   if (!q) return;
 
   const { data, error } = await supabaseClient
@@ -494,9 +494,15 @@ searchInput.addEventListener('input', async () => {
     return;
   }
 
-  data.forEach(run => {
-    const li = document.createElement('li');
+  const seen = new Set();
 
+  data.forEach(run => {
+    const uniqueKey = `${run.id}`;
+
+    if (seen.has(uniqueKey)) return;
+    seen.add(uniqueKey);
+
+    const li = document.createElement("li");
     const status = run.is_live ? "LIVE" : "Finished";
     const started = run.started_at
       ? new Date(run.started_at).toLocaleTimeString()
@@ -504,19 +510,20 @@ searchInput.addEventListener('input', async () => {
 
     li.textContent = `${run.runner_name} — ${status} — ${started}`;
 
-li.onclick = () => {
-  searchInput.value = run.runner_name;
-  viewerFollowing = true;
-  trackRunnerSupabase(run.id);
+    li.onclick = () => {
+      searchInput.value = run.runner_name;
+      viewerFollowing = true;
+      selectedRunner = run.id;
+      trackRunnerSupabase(run.id);
 
-  suggestionsList.innerHTML = '';
-  suggestionsList.style.display = 'none';
-  searchInput.blur();
-};
+      suggestionsList.innerHTML = "";
+      suggestionsList.style.display = "none";
+      searchInput.blur();
+    };
 
     suggestionsList.appendChild(li);
   });
-});
+};
 
 function updateSupabaseViewerStats() {
   if (!pathCoords.length) return;

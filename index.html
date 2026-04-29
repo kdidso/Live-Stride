@@ -217,6 +217,7 @@
     let latestRunnerPace = 0;
     let latestRunnerAvgPace = 0;
     let latestRunnerElevFt = null;
+    let searchRequestId = 0;
     // → DOM
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
@@ -476,10 +477,12 @@ console.log("Supabase run created:", activeRunId);
 };
 
 searchInput.oninput = async () => {
+  const requestId = ++searchRequestId;
   const q = searchInput.value.trim();
 
   suggestionsList.innerHTML = "";
-  suggestionsList.style.display = "block";
+  suggestionsList.style.display = "none";
+
   if (!q) return;
 
   const { data, error } = await supabaseClient
@@ -489,6 +492,12 @@ searchInput.oninput = async () => {
     .order("started_at", { ascending: false })
     .limit(10);
 
+  // Ignore results from an older search that finished late
+  if (requestId !== searchRequestId) return;
+
+  suggestionsList.innerHTML = "";
+  suggestionsList.style.display = "block";
+
   if (error) {
     console.error("Supabase runner search error:", error);
     return;
@@ -497,12 +506,12 @@ searchInput.oninput = async () => {
   const seen = new Set();
 
   data.forEach(run => {
-    const uniqueKey = `${run.id}`;
-
+    const uniqueKey = run.id;
     if (seen.has(uniqueKey)) return;
     seen.add(uniqueKey);
 
     const li = document.createElement("li");
+
     const status = run.is_live ? "LIVE" : "Finished";
     const started = run.started_at
       ? new Date(run.started_at).toLocaleTimeString()

@@ -337,25 +337,36 @@ runnerTimerId = setInterval(() => {
         if (isFollowing) map.setCenter(coord);
         const elevM = await fetchElevation(coord[1],coord[0]);
 if (activeRunId) {
-  const lastPoint = pathCoords.length > 0
-    ? pathCoords[pathCoords.length - 1]
-    : null;
+  const recordedAt = new Date(now).toISOString();
 
-  supabaseClient
+  const { error } = await supabaseClient.from("run_points").insert({
+    run_id: activeRunId,
+    sequence_num: pointSequence++,
+    lat: coord[1],
+    lon: coord[0],
+    accuracy: pos.coords.accuracy ?? null,
+    elevation_m: elevM ?? null,
+    recorded_at: recordedAt
+  });
+
+  if (error) {
+    console.error("Supabase run point insert error:", error);
+  }
+
+  const { error: updateError } = await supabaseClient
     .from("runs")
     .update({
-      is_live: false,
-      finished_at: new Date().toISOString(),
       total_distance_m: totalDistanceMeters,
-      latest_lat: lastPoint ? lastPoint.lat : null,
-      latest_lon: lastPoint ? lastPoint.lon : null,
-      latest_timestamp: lastPoint ? lastPoint.time : null
+      latest_lat: coord[1],
+      latest_lon: coord[0],
+      latest_timestamp: recordedAt
     })
-    .eq("id", activeRunId)
-    .then(({ error }) => {
-      if (error) console.error("Supabase run finish error:", error);
-    });
-}   
+    .eq("id", activeRunId);
+
+  if (updateError) {
+    console.error("Supabase run latest stats update error:", updateError);
+  }
+}  
         const elevFt = elevM!=null? elevM*3.28084 : null;
 
         if (pathCoords.length>0) {
@@ -419,6 +430,26 @@ if (runnerTimerId !== null) {
   if (broadcasting && broadcastRef) {
     broadcastRef.update({ finished: true });
     broadcasting = false;
+  }  
+  if (activeRunId) {
+    const lastPoint = pathCoords.length > 0
+      ? pathCoords[pathCoords.length - 1]
+      : null;
+
+    supabaseClient
+      .from("runs")
+      .update({
+        is_live: false,
+        finished_at: new Date().toISOString(),
+        total_distance_m: totalDistanceMeters,
+        latest_lat: lastPoint ? lastPoint.lat : null,
+        latest_lon: lastPoint ? lastPoint.lon : null,
+        latest_timestamp: lastPoint ? lastPoint.time : null
+      })
+      .eq("id", activeRunId)
+      .then(({ error }) => {
+        if (error) console.error("Supabase run finish error:", error);
+      });
   }
 
   // 5) Reveal the GPX & Strava export buttons

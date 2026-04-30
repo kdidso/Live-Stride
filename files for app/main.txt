@@ -674,7 +674,7 @@ addOrUpdatePath();
 if (isPrivateMode) {
   savePrivateRunToFile();
 }
-
+}
 async function startTracking() {
   pathCoords = [];
   totalDistanceMeters = 0;

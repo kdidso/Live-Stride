@@ -103,6 +103,10 @@ let pendingSupabasePoints = [];
 let pendingRunUpdate = null;
 let isFlushingSupabase = false;
 let connectionStatusEl = null;
+let lastPointReceivedTime = null;
+let viewerConnectionLost = false;
+let viewerStatusEl = null;
+let viewerConnectionWatchId = null;
 
 // → DOM references
 const startBtn = document.getElementById("startBtn");
@@ -241,6 +245,32 @@ function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationF
     <div>${timeHtml}<span style="margin:0 6px;color:white">|</span>${elevHtml}</div>
     <div style="margin-top:4px;">${distHtml}<span style="margin:0 6px;color:white">|</span>${paceHtml}<span style="margin:0 6px;color:white">|</span>${avgHtml}</div>
   `;
+}
+
+function showViewerStatus(message, type = "info") {
+  if (!viewerStatusEl) {
+    viewerStatusEl = document.createElement("div");
+    viewerStatusEl.style.position = "absolute";
+    viewerStatusEl.style.top = "10px";
+    viewerStatusEl.style.left = "10px";
+    viewerStatusEl.style.zIndex = "1000";
+    viewerStatusEl.style.padding = "8px 12px";
+    viewerStatusEl.style.borderRadius = "6px";
+    viewerStatusEl.style.fontSize = "13px";
+    viewerStatusEl.style.color = "white";
+    document.body.appendChild(viewerStatusEl);
+  }
+
+  viewerStatusEl.textContent = message;
+  viewerStatusEl.style.background =
+    type === "bad" ? "rgba(200,0,0,0.85)" : "rgba(0,120,0,0.85)";
+  viewerStatusEl.style.display = "block";
+}
+
+function hideViewerStatusSoon() {
+  setTimeout(() => {
+    if (viewerStatusEl) viewerStatusEl.style.display = "none";
+  }, 3000);
 }
 
 function addOrUpdatePath() {
@@ -994,6 +1024,10 @@ async function trackRunnerSupabase(runId, isLive = false) {
     clearInterval(viewerTimerId);
     viewerTimerId = null;
   }
+if (viewerConnectionWatchId !== null) {
+  clearInterval(viewerConnectionWatchId);
+  viewerConnectionWatchId = null;
+}
 
   pathCoords = [];
   clearRunPathLayer();
@@ -1051,8 +1085,16 @@ pathCoords = data.map(pt => ({
         table: "run_points",
         filter: `run_id=eq.${runId}`
       },
-      payload => {
-        const pt = payload.new;
+payload => {
+  const pt = payload.new;
+
+  lastPointReceivedTime = Date.now();
+
+  if (viewerConnectionLost) {
+    viewerConnectionLost = false;
+    showViewerStatus("Runner reconnected", "good");
+    hideViewerStatusSoon();
+  }
 
 pathCoords.push({
   lat: pt.lat,
@@ -1099,6 +1141,21 @@ if (isLive && viewerTimerId === null) {
     );
   }, 1000);
 }
+lastPointReceivedTime = Date.now();
+
+viewerConnectionWatchId = setInterval(() => {
+  if (!isLive) return;
+  if (!lastPointReceivedTime) return;
+
+  const now = Date.now();
+  const secondsSinceLastPoint = (now - lastPointReceivedTime) / 1000;
+
+  if (secondsSinceLastPoint > 15 && !viewerConnectionLost) {
+    viewerConnectionLost = true;
+    showViewerStatus("Signal lost — waiting for runner", "bad");
+  }
+}, 3000);
+
 }
 
 // → Firebase legacy fallback viewer function kept for older Firebase-only runs

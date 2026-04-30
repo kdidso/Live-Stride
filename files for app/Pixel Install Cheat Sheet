@@ -1,0 +1,114 @@
+LiveStride Android Build / Pixel Install Cheat Sheet
+=====================================================
+
+PROJECT ROOT
+------------
+Use this folder for terminal commands:
+
+C:\Users\kylei\Desktop\Live Stride\livestride-app
+
+Important:
+- This is the Desktop version of the project.
+- Do NOT accidentally use:
+  C:\Users\kylei\livestride-app
+
+
+1) OPEN COMMAND PROMPT AT PROJECT ROOT
+--------------------------------------
+Run:
+
+cd /d "C:\Users\kylei\Desktop\Live Stride\livestride-app"
+
+
+2) SYNC WEB FILES INTO ANDROID
+------------------------------
+Run this after changing index.html, main.js, or other web files:
+
+npx cap sync android
+
+
+3) PATCH PROGUARD FILE REFERENCES IF BUILD FAILS
+------------------------------------------------
+If Android Studio gives an error about:
+
+getDefaultProguardFile('proguard-android.txt')
+
+Run this from the project root:
+
+powershell -NoProfile -Command "Get-ChildItem -Recurse -Filter build.gradle | ForEach-Object { (Get-Content $_.FullName) -replace 'proguard-android\.txt', 'proguard-android-optimize.txt' | Set-Content $_.FullName }"
+
+Then go back to Android Studio and run:
+
+File > Sync Project with Gradle Files
+
+
+4) BUILD A NEW APK IN ANDROID STUDIO
+------------------------------------
+Open this Android project:
+
+C:\Users\kylei\Desktop\Live Stride\livestride-app\android
+
+Then in Android Studio:
+
+Build > Clean Project
+Build > Build Bundle(s) / APK(s) > Build APK(s)
+
+The APK should appear here:
+
+C:\Users\kylei\Desktop\Live Stride\livestride-app\android\app\build\outputs\apk\debug\app-debug.apk
+
+Check the Date Modified to make sure it updated.
+
+
+5) CHECK THAT THE PIXEL IS CONNECTED
+------------------------------------
+Run:
+
+"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe" devices
+
+On the Pixel, accept the "Allow USB debugging?" prompt if it appears.
+
+You should see a device listed.
+
+
+6) INSTALL THE APK ON THE PIXEL
+-------------------------------
+Run:
+
+"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe" install -r "C:\Users\kylei\Desktop\Live Stride\livestride-app\android\app\build\outputs\apk\debug\app-debug.apk"
+
+The -r means reinstall/update the app while keeping it installed.
+
+
+7) QUICK FULL WORKFLOW
+----------------------
+Use this sequence after changing app code:
+
+cd /d "C:\Users\kylei\Desktop\Live Stride\livestride-app"
+
+npx cap sync android
+
+Then in Android Studio:
+Build > Clean Project
+Build > Build Bundle(s) / APK(s) > Build APK(s)
+
+Then install to Pixel:
+
+"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe" devices
+
+"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe" install -r "C:\Users\kylei\Desktop\Live Stride\livestride-app\android\app\build\outputs\apk\debug\app-debug.apk"
+
+
+8) PIXEL DEVELOPER MODE REMINDER
+--------------------------------
+On Pixel 7:
+
+Settings > About phone > Build number
+Tap Build number 7 times.
+
+Then:
+
+Settings > System > Developer options > USB debugging = ON
+
+When plugging into the computer, accept:
+Allow USB debugging

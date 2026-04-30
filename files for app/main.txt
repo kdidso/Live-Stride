@@ -554,8 +554,8 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     map.setCenter(coord);
   }
 
-  const elevMeters = await fetchElevation(coord[1], coord[0]);
-  const elevationFt = elevMeters != null ? elevMeters * 3.28084 : null;
+  let elevMeters = null;
+  let elevationFt = latestRunnerElevFt;;
 
   let instPace = 0;
   let avgPace = 0;
@@ -580,7 +580,7 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   }
 
   // Ignore very slow drift that is probably GPS wobble, not running/walking
-  if (speedMph < 1) {
+  if (speedMph < 0.3) {
     console.warn("Ignoring low-speed GPS drift:", speedMph.toFixed(2), "mph");
     return;
   }
@@ -674,6 +674,21 @@ addOrUpdatePath();
 if (isPrivateMode) {
   savePrivateRunToFile();
 }
+fetchElevation(coord[1], coord[0]).then(elev => {
+  if (elev == null) return;
+
+  elevMeters = elev;
+  elevationFt = elev * 3.28084;
+
+  const lastPoint = pathCoords[pathCoords.length - 1];
+  if (lastPoint && lastPoint.timestamp === now) {
+    lastPoint.elevation = elevMeters;
+    lastPoint.elevationFt = elevationFt;
+    latestRunnerElevFt = elevationFt;
+  }
+}).catch(err => {
+  console.warn("Elevation update skipped:", err);
+});
 }
 async function startTracking() {
   pathCoords = [];

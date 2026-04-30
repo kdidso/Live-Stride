@@ -640,38 +640,39 @@ if (activeRunId) {
     distance_m: totalDistanceMeters
   };
 
-safeInsertRunPoint(pointPayload).then(() => flushSupabaseQueue());
+  safeInsertRunPoint(pointPayload).then(() => flushSupabaseQueue());
 
-safeUpdateRunSummary({
-  total_distance_m: totalDistanceMeters,
-  latest_lat: coord[1],
-  latest_lon: coord[0],
-  latest_timestamp: recordedAt
-}).then(() => flushSupabaseQueue());
+  safeUpdateRunSummary({
+    total_distance_m: totalDistanceMeters,
+    latest_lat: coord[1],
+    latest_lon: coord[0],
+    latest_timestamp: recordedAt
+  }).then(() => flushSupabaseQueue());
+}
 
-  if (now - lastComputeTime >= 1000) {
-    lastComputeTime = now;
+// ✅ ALWAYS run these regardless of Supabase
+if (now - lastComputeTime >= 1000) {
+  lastComputeTime = now;
 
-    if (broadcasting && broadcastRef) {
-      broadcastRef.set({
-        name: runnerName,
-        path: pathCoords,
-        current: coord,
-        distance: latestRunnerDistance,
-        pace: latestRunnerPace,
-        avgPace: latestRunnerAvgPace,
-        elevation: latestRunnerElevFt,
-        timestamp: now,
-        startTime
-      });
-    }
+  if (broadcasting && broadcastRef) {
+    broadcastRef.set({
+      name: runnerName,
+      path: pathCoords,
+      current: coord,
+      distance: latestRunnerDistance,
+      pace: latestRunnerPace,
+      avgPace: latestRunnerAvgPace,
+      elevation: latestRunnerElevFt,
+      timestamp: now,
+      startTime
+    });
   }
+}
 
-  addOrUpdatePath();
+addOrUpdatePath();
 
-  if (isPrivateMode) {
-    savePrivateRunToFile();
-  }
+if (isPrivateMode) {
+  savePrivateRunToFile();
 }
 
 async function startTracking() {

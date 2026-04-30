@@ -621,7 +621,9 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
 
   pathCoords.push(newPoint);
 
-  latestRunnerDistance = metersToMiles(totalDistanceMeters);
+addOrUpdatePath();
+
+latestRunnerDistance = metersToMiles(totalDistanceMeters);
   latestRunnerPace = instPace;
   latestRunnerAvgPace = avgPace;
   latestRunnerElevFt = elevationFt;
@@ -651,35 +653,44 @@ if (activeRunId) {
     latest_timestamp: recordedAt
   }).then(() => flushSupabaseQueue());
 
-  fetchElevation(coord[1], coord[0]).then(elev => {
-    if (elev == null) return;
+fetchElevation(coord[1], coord[0]).then(elev => {
+  if (elev == null) return;
 
-    elevMeters = elev;
-    elevationFt = elev * 3.28084;
+  elevMeters = elev;
+  elevationFt = elev * 3.28084;
 
-    const lastPoint = pathCoords[pathCoords.length - 1];
-    if (lastPoint && lastPoint.timestamp === now) {
-      lastPoint.elevation = elevMeters;
-      lastPoint.elevationFt = elevationFt;
-      latestRunnerElevFt = elevationFt;
+  const lastPoint = pathCoords[pathCoords.length - 1];
 
-      updateStatsDisplay(
-        latestRunnerDistance,
-        latestRunnerPace,
-        latestRunnerAvgPace,
-        Date.now() - startTime,
-        latestRunnerElevFt
-      );
+  if (lastPoint && lastPoint.timestamp === now) {
+    lastPoint.elevation = elevMeters;
+    lastPoint.elevationFt = elevationFt;
+    latestRunnerElevFt = elevationFt;
 
-      supabaseClient
-        .from("run_points")
-        .update({ elevation_m: elevMeters })
-        .eq("run_id", activeRunId)
-        .eq("sequence_num", thisSequenceNum);
+    updateStatsDisplay(
+      latestRunnerDistance,
+      latestRunnerPace,
+      latestRunnerAvgPace,
+      Date.now() - startTime,
+      latestRunnerElevFt
+    );
+
+    if (broadcasting && broadcastRef) {
+      broadcastRef.update({
+        path: pathCoords,
+        elevation: latestRunnerElevFt,
+        timestamp: Date.now()
+      });
     }
-  }).catch(err => {
-    console.warn("Elevation update skipped:", err);
-  });
+
+    supabaseClient
+      .from("run_points")
+      .update({ elevation_m: elevMeters })
+      .eq("run_id", activeRunId)
+      .eq("sequence_num", thisSequenceNum);
+  }
+}).catch(err => {
+  console.warn("Elevation update skipped:", err);
+});
 }
 
 }
@@ -1084,57 +1095,83 @@ pathCoords = data.map(pt => ({
       zoom: 16
     });
   }
+activeSupabaseChannel = supabaseClient
+  .channel(`run_${runId.replace(/-/g, "_")}`)
+  .on(
+    "postgres_changes",
+    {
+      event: "INSERT",
+      schema: "public",
+      table: "run_points",
+      filter: `run_id=eq.${runId}`
+    },
+    payload => {
+      const pt = payload.new;
 
-  activeSupabaseChannel = supabaseClient
-    .channel(`run_${runId.replace(/-/g, "_")}`)
-    .on(
-      "postgres_changes",
-      {
-        event: "INSERT",
-        schema: "public",
-        table: "run_points",
-        filter: `run_id=eq.${runId}`
-      },
-payload => {
-  const pt = payload.new;
+      lastPointReceivedTime = Date.now();
 
-  lastPointReceivedTime = Date.now();
-
-  if (viewerConnectionLost) {
-    viewerConnectionLost = false;
-    showViewerStatus("Runner reconnected", "good");
-    hideViewerStatusSoon();
-  }
-
-pathCoords.push({
-  lat: pt.lat,
-  lon: pt.lon,
-  timestamp: new Date(pt.recorded_at).getTime(),
-  time: pt.recorded_at,
-  elevation: pt.elevation_m,
-  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-  instPace: pt.inst_pace_min_per_mile ?? 0,
-  avgPace: pt.avg_pace_min_per_mile ?? 0,
-  distanceM: pt.distance_m ?? null
-});
-
-        addOrUpdatePath();
-        updateSupabaseViewerStats();
-
-        if (!viewerMarker) {
-          viewerMarker = new maplibregl.Marker({ color: "red" })
-            .setLngLat([pt.lon, pt.lat])
-            .addTo(map);
-        } else {
-          viewerMarker.setLngLat([pt.lon, pt.lat]);
-        }
-
-        if (viewerFollowing) {
-          map.flyTo({ center: [pt.lon, pt.lat], zoom: 16 });
-        }
+      if (viewerConnectionLost) {
+        viewerConnectionLost = false;
+        showViewerStatus("Runner reconnected", "good");
+        hideViewerStatusSoon();
       }
-    )
-    .subscribe();
+
+      pathCoords.push({
+        lat: pt.lat,
+        lon: pt.lon,
+        timestamp: new Date(pt.recorded_at).getTime(),
+        time: pt.recorded_at,
+        elevation: pt.elevation_m,
+        elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+        instPace: pt.inst_pace_min_per_mile ?? 0,
+        avgPace: pt.avg_pace_min_per_mile ?? 0,
+        distanceM: pt.distance_m ?? null
+      });
+
+      addOrUpdatePath();
+      updateSupabaseViewerStats();
+
+      if (!viewerMarker) {
+        viewerMarker = new maplibregl.Marker({ color: "red" })
+          .setLngLat([pt.lon, pt.lat])
+          .addTo(map);
+      } else {
+        viewerMarker.setLngLat([pt.lon, pt.lat]);
+      }
+
+      if (viewerFollowing) {
+        map.flyTo({ center: [pt.lon, pt.lat], zoom: 16 });
+      }
+    }
+  )
+  .on(
+    "postgres_changes",
+    {
+      event: "UPDATE",
+      schema: "public",
+      table: "run_points",
+      filter: `run_id=eq.${runId}`
+    },
+    payload => {
+      const pt = payload.new;
+      const ptTime = new Date(pt.recorded_at).getTime();
+
+      const existingPoint = pathCoords.find(p => p.timestamp === ptTime);
+      if (!existingPoint) return;
+
+      existingPoint.elevation = pt.elevation_m;
+      existingPoint.elevationFt = pt.elevation_m != null
+        ? pt.elevation_m * 3.28084
+        : null;
+
+      existingPoint.instPace = pt.inst_pace_min_per_mile ?? existingPoint.instPace;
+      existingPoint.avgPace = pt.avg_pace_min_per_mile ?? existingPoint.avgPace;
+      existingPoint.distanceM = pt.distance_m ?? existingPoint.distanceM;
+
+      updateSupabaseViewerStats();
+    }
+  )
+  .subscribe();
 
 if (isLive && viewerTimerId === null) {
   viewerTimerId = setInterval(() => {

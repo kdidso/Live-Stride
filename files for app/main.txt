@@ -107,6 +107,7 @@ let lastPointReceivedTime = null;
 let viewerConnectionLost = false;
 let viewerStatusEl = null;
 let viewerConnectionWatchId = null;
+let runnerSyncHadFailure = false;
 
 // → DOM references
 const startBtn = document.getElementById("startBtn");
@@ -349,6 +350,7 @@ async function safeInsertRunPoint(pointPayload) {
   if (error) {
     console.warn("Supabase point insert failed; queued for retry:", error);
     pendingSupabasePoints.push(pointPayload);
+    runnerSyncHadFailure = true;
     showConnectionStatus("Connection lost — saving run locally", "bad");
     return false;
   }
@@ -357,7 +359,7 @@ async function safeInsertRunPoint(pointPayload) {
 }
 
 async function safeUpdateRunSummary(updatePayload) {
-  if (!activeRunId) return;
+  if (!activeRunId) return false;
 
   const { error } = await supabaseClient
     .from("runs")
@@ -367,6 +369,7 @@ async function safeUpdateRunSummary(updatePayload) {
   if (error) {
     console.warn("Supabase run update failed; queued latest summary:", error);
     pendingRunUpdate = updatePayload;
+    runnerSyncHadFailure = true;
     showConnectionStatus("Connection lost — syncing when back online", "bad");
     return false;
   }
@@ -406,10 +409,11 @@ async function flushSupabaseQueue() {
       if (!error) pendingRunUpdate = null;
     }
 
-    if (pendingSupabasePoints.length === 0 && !pendingRunUpdate) {
-      showConnectionStatus("Connection restored — run synced", "good");
-      hideConnectionStatusSoon();
-    }
+if (pendingSupabasePoints.length === 0 && !pendingRunUpdate && runnerSyncHadFailure) {
+  runnerSyncHadFailure = false;
+  showConnectionStatus("Connection restored — run synced", "good");
+  hideConnectionStatusSoon();
+}
   } finally {
     isFlushingSupabase = false;
   }
@@ -636,17 +640,14 @@ if (activeRunId) {
     distance_m: totalDistanceMeters
   };
 
-  await safeInsertRunPoint(pointPayload);
+safeInsertRunPoint(pointPayload).then(() => flushSupabaseQueue());
 
-  await safeUpdateRunSummary({
-    total_distance_m: totalDistanceMeters,
-    latest_lat: coord[1],
-    latest_lon: coord[0],
-    latest_timestamp: recordedAt
-  });
-
-  flushSupabaseQueue();
-}
+safeUpdateRunSummary({
+  total_distance_m: totalDistanceMeters,
+  latest_lat: coord[1],
+  latest_lon: coord[0],
+  latest_timestamp: recordedAt
+}).then(() => flushSupabaseQueue());
 
   if (now - lastComputeTime >= 1000) {
     lastComputeTime = now;

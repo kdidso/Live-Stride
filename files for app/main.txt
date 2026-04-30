@@ -99,6 +99,10 @@ let isPrivateMode = false;
 let localRunFilename = "";
 let privateSaveIntervalId = null;
 let searchRequestId = 0;
+let pendingSupabasePoints = [];
+let pendingRunUpdate = null;
+let isFlushingSupabase = false;
+let connectionStatusEl = null;
 
 // → DOM references
 const startBtn = document.getElementById("startBtn");
@@ -281,6 +285,110 @@ function clearRunPathLayer() {
     map.removeSource("run-path");
   }
 }
+
+function showConnectionStatus(message, type = "info") {
+  if (!connectionStatusEl) {
+    connectionStatusEl = document.createElement("div");
+    connectionStatusEl.style.position = "absolute";
+    connectionStatusEl.style.top = "10px";
+    connectionStatusEl.style.right = "10px";
+    connectionStatusEl.style.zIndex = "1000";
+    connectionStatusEl.style.padding = "8px 12px";
+    connectionStatusEl.style.borderRadius = "6px";
+    connectionStatusEl.style.fontSize = "13px";
+    connectionStatusEl.style.color = "white";
+    document.body.appendChild(connectionStatusEl);
+  }
+
+  connectionStatusEl.textContent = message;
+  connectionStatusEl.style.background = type === "bad"
+    ? "rgba(200,0,0,0.85)"
+    : "rgba(0,120,0,0.85)";
+  connectionStatusEl.style.display = "block";
+}
+
+function hideConnectionStatusSoon() {
+  setTimeout(() => {
+    if (connectionStatusEl) connectionStatusEl.style.display = "none";
+  }, 3000);
+}
+
+async function safeInsertRunPoint(pointPayload) {
+  const { error } = await supabaseClient.from("run_points").insert(pointPayload);
+
+  if (error) {
+    console.warn("Supabase point insert failed; queued for retry:", error);
+    pendingSupabasePoints.push(pointPayload);
+    showConnectionStatus("Connection lost — saving run locally", "bad");
+    return false;
+  }
+
+  return true;
+}
+
+async function safeUpdateRunSummary(updatePayload) {
+  if (!activeRunId) return;
+
+  const { error } = await supabaseClient
+    .from("runs")
+    .update(updatePayload)
+    .eq("id", activeRunId);
+
+  if (error) {
+    console.warn("Supabase run update failed; queued latest summary:", error);
+    pendingRunUpdate = updatePayload;
+    showConnectionStatus("Connection lost — syncing when back online", "bad");
+    return false;
+  }
+
+  return true;
+}
+
+async function flushSupabaseQueue() {
+  if (isFlushingSupabase || !activeRunId) return;
+  if (!navigator.onLine) return;
+
+  isFlushingSupabase = true;
+
+  try {
+    while (pendingSupabasePoints.length > 0) {
+      const pointPayload = pendingSupabasePoints[0];
+
+      const { error } = await supabaseClient
+        .from("run_points")
+        .insert(pointPayload);
+
+      if (error) {
+        console.warn("Still unable to sync queued point:", error);
+        showConnectionStatus("Still offline — run is saved locally", "bad");
+        break;
+      }
+
+      pendingSupabasePoints.shift();
+    }
+
+    if (pendingRunUpdate) {
+      const { error } = await supabaseClient
+        .from("runs")
+        .update(pendingRunUpdate)
+        .eq("id", activeRunId);
+
+      if (!error) pendingRunUpdate = null;
+    }
+
+    if (pendingSupabasePoints.length === 0 && !pendingRunUpdate) {
+      showConnectionStatus("Connection restored — run synced", "good");
+      hideConnectionStatusSoon();
+    }
+  } finally {
+    isFlushingSupabase = false;
+  }
+}
+
+window.addEventListener("online", flushSupabaseQueue);
+window.addEventListener("offline", () => {
+  showConnectionStatus("Connection lost — saving run locally", "bad");
+});
 
 function resetRunDisplay() {
   pathCoords = [];
@@ -484,38 +592,31 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   latestRunnerAvgPace = avgPace;
   latestRunnerElevFt = elevationFt;
 
-  if (activeRunId) {
-const { error } = await supabaseClient.from("run_points").insert({
-  run_id: activeRunId,
-  sequence_num: pointSequence++,
-  lat: coord[1],
-  lon: coord[0],
-  accuracy: accuracy ?? null,
-  elevation_m: elevMeters ?? null,
-  recorded_at: recordedAt,
-  inst_pace_min_per_mile: instPace,
-  avg_pace_min_per_mile: avgPace,
-  distance_m: totalDistanceMeters
-});
+if (activeRunId) {
+  const pointPayload = {
+    run_id: activeRunId,
+    sequence_num: pointSequence++,
+    lat: coord[1],
+    lon: coord[0],
+    accuracy: accuracy ?? null,
+    elevation_m: elevMeters ?? null,
+    recorded_at: recordedAt,
+    inst_pace_min_per_mile: instPace,
+    avg_pace_min_per_mile: avgPace,
+    distance_m: totalDistanceMeters
+  };
 
-    if (error) {
-      console.error("Supabase run point insert error:", error);
-    }
+  await safeInsertRunPoint(pointPayload);
 
-    const { error: updateError } = await supabaseClient
-      .from("runs")
-      .update({
-        total_distance_m: totalDistanceMeters,
-        latest_lat: coord[1],
-        latest_lon: coord[0],
-        latest_timestamp: recordedAt
-      })
-      .eq("id", activeRunId);
+  await safeUpdateRunSummary({
+    total_distance_m: totalDistanceMeters,
+    latest_lat: coord[1],
+    latest_lon: coord[0],
+    latest_timestamp: recordedAt
+  });
 
-    if (updateError) {
-      console.error("Supabase run latest stats update error:", updateError);
-    }
-  }
+  flushSupabaseQueue();
+}
 
   if (now - lastComputeTime >= 1000) {
     lastComputeTime = now;
@@ -650,20 +751,16 @@ if (activeRunId) {
     ? pathCoords[pathCoords.length - 1]
     : null;
 
-  supabaseClient
-    .from("runs")
-    .update({
-      is_live: false,
-      finished_at: new Date().toISOString(),
-      total_distance_m: totalDistanceMeters,
-      latest_lat: lastPoint ? lastPoint.lat : null,
-      latest_lon: lastPoint ? lastPoint.lon : null,
-      latest_timestamp: lastPoint ? lastPoint.time : null
-    })
-    .eq("id", activeRunId)
-    .then(({ error }) => {
-      if (error) console.error("Supabase run finish error:", error);
-    });
+  safeUpdateRunSummary({
+    is_live: false,
+    finished_at: new Date().toISOString(),
+    total_distance_m: totalDistanceMeters,
+    latest_lat: lastPoint ? lastPoint.lat : null,
+    latest_lon: lastPoint ? lastPoint.lon : null,
+    latest_timestamp: lastPoint ? lastPoint.time : null
+  });
+
+  flushSupabaseQueue();
 }
 
   if (isPrivateMode) {

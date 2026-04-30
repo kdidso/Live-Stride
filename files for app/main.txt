@@ -555,7 +555,7 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   }
 
   let elevMeters = null;
-  let elevationFt = latestRunnerElevFt;;
+  let elevationFt = latestRunnerElevFt;
 
   let instPace = 0;
   let avgPace = 0;
@@ -685,6 +685,14 @@ fetchElevation(coord[1], coord[0]).then(elev => {
     lastPoint.elevation = elevMeters;
     lastPoint.elevationFt = elevationFt;
     latestRunnerElevFt = elevationFt;
+
+    if (activeRunId) {
+      supabaseClient
+        .from("run_points")
+        .update({ elevation_m: elevMeters })
+        .eq("run_id", activeRunId)
+        .eq("sequence_num", pointSequence - 1);
+    }
   }
 }).catch(err => {
   console.warn("Elevation update skipped:", err);

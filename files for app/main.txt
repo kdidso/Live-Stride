@@ -406,11 +406,13 @@ async function handleLocationUpdate(coord, accuracy = null) {
 
   lastPointTime = now;
 
+  const recordedAt = new Date(now).toISOString();
+
   const newPoint = {
     lat: coord[1],
     lon: coord[0],
     timestamp: now,
-    time: new Date(now).toISOString(),
+    time: recordedAt,
     elevation: elevMeters,
     elevationFt,
     distance: metersToMiles(totalDistanceMeters),
@@ -433,27 +435,27 @@ async function handleLocationUpdate(coord, accuracy = null) {
       lon: coord[0],
       accuracy: accuracy ?? null,
       elevation_m: elevMeters ?? null,
-      recorded_at: new Date(now).toISOString()
+      recorded_at: recordedAt
     });
 
     if (error) {
       console.error("Supabase run point insert error:", error);
     }
-  }
-  const { error: updateError } = await supabaseClient
-    .from("runs")
-    .update({
-      total_distance_m: totalDistanceMeters,
-      latest_lat: coord[1],
-      latest_lon: coord[0],
-      latest_timestamp: new Date(now).toISOString()
-    })
-    .eq("id", activeRunId);
 
-  if (updateError) {
-    console.error("Supabase run latest stats update error:", updateError);
+    const { error: updateError } = await supabaseClient
+      .from("runs")
+      .update({
+        total_distance_m: totalDistanceMeters,
+        latest_lat: coord[1],
+        latest_lon: coord[0],
+        latest_timestamp: recordedAt
+      })
+      .eq("id", activeRunId);
+
+    if (updateError) {
+      console.error("Supabase run latest stats update error:", updateError);
+    }
   }
-}
 
   if (now - lastComputeTime >= 1000) {
     lastComputeTime = now;
@@ -755,8 +757,6 @@ uploadStravaBtn.onclick = async () => {
 viewerGpxBtn.onclick = () => {
   window.open("https://kdidso.github.io/livestride-export/", "_blank");
 };
-
-let searchRequestId = 0;
 
 searchInput.oninput = async () => {
   const requestId = ++searchRequestId;

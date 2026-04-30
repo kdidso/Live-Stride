@@ -627,9 +627,11 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   latestRunnerElevFt = elevationFt;
 
 if (activeRunId) {
+  const thisSequenceNum = pointSequence++;
+
   const pointPayload = {
     run_id: activeRunId,
-    sequence_num: pointSequence++,
+    sequence_num: thisSequenceNum,
     lat: coord[1],
     lon: coord[0],
     accuracy: accuracy ?? null,
@@ -648,55 +650,36 @@ if (activeRunId) {
     latest_lon: coord[0],
     latest_timestamp: recordedAt
   }).then(() => flushSupabaseQueue());
-}
 
-// ✅ ALWAYS run these regardless of Supabase
-if (now - lastComputeTime >= 1000) {
-  lastComputeTime = now;
+  fetchElevation(coord[1], coord[0]).then(elev => {
+    if (elev == null) return;
 
-  if (broadcasting && broadcastRef) {
-    broadcastRef.set({
-      name: runnerName,
-      path: pathCoords,
-      current: coord,
-      distance: latestRunnerDistance,
-      pace: latestRunnerPace,
-      avgPace: latestRunnerAvgPace,
-      elevation: latestRunnerElevFt,
-      timestamp: now,
-      startTime
-    });
-  }
-}
+    elevMeters = elev;
+    elevationFt = elev * 3.28084;
 
-addOrUpdatePath();
+    const lastPoint = pathCoords[pathCoords.length - 1];
+    if (lastPoint && lastPoint.timestamp === now) {
+      lastPoint.elevation = elevMeters;
+      lastPoint.elevationFt = elevationFt;
+      latestRunnerElevFt = elevationFt;
 
-if (isPrivateMode) {
-  savePrivateRunToFile();
-}
-fetchElevation(coord[1], coord[0]).then(elev => {
-  if (elev == null) return;
+      updateStatsDisplay(
+        latestRunnerDistance,
+        latestRunnerPace,
+        latestRunnerAvgPace,
+        Date.now() - startTime,
+        latestRunnerElevFt
+      );
 
-  elevMeters = elev;
-  elevationFt = elev * 3.28084;
-
-  const lastPoint = pathCoords[pathCoords.length - 1];
-  if (lastPoint && lastPoint.timestamp === now) {
-    lastPoint.elevation = elevMeters;
-    lastPoint.elevationFt = elevationFt;
-    latestRunnerElevFt = elevationFt;
-
-    if (activeRunId) {
       supabaseClient
         .from("run_points")
         .update({ elevation_m: elevMeters })
         .eq("run_id", activeRunId)
-        .eq("sequence_num", pointSequence - 1);
+        .eq("sequence_num", thisSequenceNum);
     }
-  }
-}).catch(err => {
-  console.warn("Elevation update skipped:", err);
-});
+  }).catch(err => {
+    console.warn("Elevation update skipped:", err);
+  });
 }
 async function startTracking() {
   pathCoords = [];

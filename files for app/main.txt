@@ -681,6 +681,7 @@ if (activeRunId) {
     console.warn("Elevation update skipped:", err);
   });
 }
+}
 async function startTracking() {
   pathCoords = [];
   totalDistanceMeters = 0;

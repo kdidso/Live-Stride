@@ -331,79 +331,87 @@ runnerTimerId = setInterval(() => {
     latestRunnerElevFt
   );
 }, 1000);
-      watchId = navigator.geolocation.watchPosition(async pos => {
-        const coord=[pos.coords.longitude,pos.coords.latitude], now=Date.now();
+watchId = navigator.geolocation.watchPosition(async pos => {
+  const coord = [pos.coords.longitude, pos.coords.latitude];
+  const now = Date.now();
 
-        if (isFollowing) map.setCenter(coord);
-        const elevM = await fetchElevation(coord[1],coord[0]);
-if (activeRunId) {
+  if (isFollowing) map.setCenter(coord);
+
+  const elevM = await fetchElevation(coord[1], coord[0]);
+  const elevFt = elevM != null ? elevM * 3.28084 : null;
+
+  let segment = 0;
+
+  if (pathCoords.length > 0) {
+    const prev = pathCoords[pathCoords.length - 1];
+    segment = haversineDistance([prev.lon, prev.lat], coord);
+
+    const elapsedSeconds = lastPointTime ? (now - lastPointTime) / 1000 : 0;
+    const speedMps = elapsedSeconds > 0 ? segment / elapsedSeconds : 0;
+    const speedMph = speedMps * 2.23694;
+
+    // 🚫 FILTERS
+    if (elapsedSeconds <= 0) return;
+    if (segment < 2) return;
+    if (speedMph < 1) return;
+    if (speedMph > 15) return;
+
+    // ✅ ONLY AFTER PASSING FILTERS
+    totalDistanceMeters += segment;
+  } else {
+    startTime = now;
+  }
+
+  lastPointTime = now;
+
   const recordedAt = new Date(now).toISOString();
 
-  const { error } = await supabaseClient.from("run_points").insert({
-    run_id: activeRunId,
-    sequence_num: pointSequence++,
+  const newPoint = {
     lat: coord[1],
     lon: coord[0],
-    accuracy: pos.coords.accuracy ?? null,
-    elevation_m: elevM ?? null,
-    recorded_at: recordedAt
-  });
+    timestamp: now,
+    time: recordedAt,
+    elevation: elevM,
+    elevationFt: elevFt
+  };
 
-  if (error) {
-    console.error("Supabase run point insert error:", error);
+  // ✅ ACCEPTED POINT
+  pathCoords.push(newPoint);
+
+  // 🔥 👉 THIS IS WHERE SUPABASE GOES
+  if (activeRunId) {
+    const { error } = await supabaseClient.from("run_points").insert({
+      run_id: activeRunId,
+      sequence_num: pointSequence++,
+      lat: coord[1],
+      lon: coord[0],
+      accuracy: pos.coords.accuracy ?? null,
+      elevation_m: elevM ?? null,
+      recorded_at: recordedAt
+    });
+
+    if (error) console.error("Supabase insert error:", error);
+
+    const { error: updateError } = await supabaseClient
+      .from("runs")
+      .update({
+        total_distance_m: totalDistanceMeters,
+        latest_lat: coord[1],
+        latest_lon: coord[0],
+        latest_timestamp: recordedAt
+      })
+      .eq("id", activeRunId);
+
+    if (updateError) console.error("Supabase update error:", updateError);
   }
 
-  const { error: updateError } = await supabaseClient
-    .from("runs")
-    .update({
-      total_distance_m: totalDistanceMeters,
-      latest_lat: coord[1],
-      latest_lon: coord[0],
-      latest_timestamp: recordedAt
-    })
-    .eq("id", activeRunId);
+  addOrUpdatePath();
+  updateSupabaseViewerStats();
 
-  if (updateError) {
-    console.error("Supabase run latest stats update error:", updateError);
-  }
-}  
-        const elevFt = elevM!=null? elevM*3.28084 : null;
-
-        if (pathCoords.length>0) {
-          const prev = pathCoords[pathCoords.length-1];
-          const segment = haversineDistance([prev.lon,prev.lat],coord);
-          totalDistanceMeters += segment;
-          const deltaMin = (now - lastPointTime)/60000;
-          const instPace = deltaMin / metersToMiles(segment);
-          const totalMin = (now - startTime)/60000;
-          const avgPace = totalMin / metersToMiles(totalDistanceMeters);
-          const elapsedMs = now - startTime;
-          latestRunnerDistance = metersToMiles(totalDistanceMeters);
-          latestRunnerPace = instPace;
-          latestRunnerAvgPace = avgPace;
-          latestRunnerElevFt = elevFt;
-          if (broadcasting && broadcastRef) {
-            broadcastRef.set({ name:runnerName, path:pathCoords, current:coord, distance:metersToMiles(totalDistanceMeters), pace:instPace, avgPace, timestamp:now, startTime });
-          }
-        } else {
-          startTime = now;
-          if (broadcasting && broadcastRef) {
-            broadcastRef.set({ name:runnerName, path:pathCoords, current:coord, distance:0, pace:0, avgPace:0, timestamp:now, startTime });
-          }
-        }
-
-        lastPointTime = now;
-        pathCoords.push({
-          lat:coord[1], lon:coord[0], timestamp:now,
-          time:new Date(now).toISOString(), elevation:elevM, distance:metersToMiles(totalDistanceMeters),
-          instPace: pathCoords.length>0 ? ((now-lastPointTime)/60000)/metersToMiles(haversineDistance([pathCoords[pathCoords.length-1].lon,pathCoords[pathCoords.length-1].lat],coord)) : 0,
-          avgPace: pathCoords.length>0 ? ((now-startTime)/60000)/metersToMiles(totalDistanceMeters) : 0
-        });
-
-        addOrUpdatePath();
-        updateSupabaseViewerStats();
-      }, err=>console.error("Geolocation error:",err), { enableHighAccuracy:true, maximumAge:1000 });
-    }
+}, err => console.error("Geolocation error:", err), {
+  enableHighAccuracy: true,
+  maximumAge: 1000
+});
 
 function stopTracking() {
   // 1) Stop the GPS watch

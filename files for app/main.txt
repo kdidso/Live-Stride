@@ -300,25 +300,27 @@ function updateSupabaseViewerStats() {
   const avgPace = distMiles > 0 ? (elapsedMs / 60000) / distMiles : 0;
   const lastPoint = pathCoords[pathCoords.length - 1];
 
-  lastViewerData = {
-    distance: distMiles,
-    pace: 0,
-    avgPace,
-    startTime: firstTime,
-    current: [lastPoint.lon, lastPoint.lat],
-    elevationFt: lastPoint.elevationFt ?? null
-  };
-  lastViewerElapsed = elapsedMs;
+  const instPace = lastPoint.instPace ?? 0;
 
-  updateStatsDisplay(
-    distMiles,
-    0,
-    avgPace,
-    elapsedMs,
-    lastPoint.elevationFt ?? null
-  );
+lastViewerData = {
+  distance: distMiles,
+  pace: instPace,
+  avgPace,
+  startTime: firstTime,
+  current: [lastPoint.lon, lastPoint.lat],
+  elevationFt: lastPoint.elevationFt ?? null
+};
+
+lastViewerElapsed = elapsedMs;
+
+updateStatsDisplay(
+  distMiles,
+  instPace,
+  avgPace,
+  elapsedMs,
+  lastPoint.elevationFt ?? null
+);
 }
-
 async function savePrivateRunToFile() {
   if (!isPrivateMode || !pathCoords.length || !localRunFilename) return;
 
@@ -462,15 +464,18 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   latestRunnerElevFt = elevationFt;
 
   if (activeRunId) {
-    const { error } = await supabaseClient.from("run_points").insert({
-      run_id: activeRunId,
-      sequence_num: pointSequence++,
-      lat: coord[1],
-      lon: coord[0],
-      accuracy: accuracy ?? null,
-      elevation_m: elevMeters ?? null,
-      recorded_at: recordedAt
-    });
+const { error } = await supabaseClient.from("run_points").insert({
+  run_id: activeRunId,
+  sequence_num: pointSequence++,
+  lat: coord[1],
+  lon: coord[0],
+  accuracy: accuracy ?? null,
+  elevation_m: elevMeters ?? null,
+  recorded_at: recordedAt,
+  inst_pace_min_per_mile: instPace,
+  avg_pace_min_per_mile: avgPace,
+  distance_m: totalDistanceMeters
+});
 
     if (error) {
       console.error("Supabase run point insert error:", error);
@@ -881,14 +886,17 @@ async function trackRunnerSupabase(runId) {
     return;
   }
 
-  pathCoords = data.map(pt => ({
-    lat: pt.lat,
-    lon: pt.lon,
-    timestamp: new Date(pt.recorded_at).getTime(),
-    time: pt.recorded_at,
-    elevation: pt.elevation_m,
-    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null
-  }));
+pathCoords = data.map(pt => ({
+  lat: pt.lat,
+  lon: pt.lon,
+  timestamp: new Date(pt.recorded_at).getTime(),
+  time: pt.recorded_at,
+  elevation: pt.elevation_m,
+  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+  instPace: pt.inst_pace_min_per_mile ?? 0,
+  avgPace: pt.avg_pace_min_per_mile ?? 0,
+  distanceM: pt.distance_m ?? null
+}));
 
   addOrUpdatePath();
   updateSupabaseViewerStats();
@@ -923,14 +931,17 @@ async function trackRunnerSupabase(runId) {
       payload => {
         const pt = payload.new;
 
-        pathCoords.push({
-          lat: pt.lat,
-          lon: pt.lon,
-          timestamp: new Date(pt.recorded_at).getTime(),
-          time: pt.recorded_at,
-          elevation: pt.elevation_m,
-          elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null
-        });
+pathCoords.push({
+  lat: pt.lat,
+  lon: pt.lon,
+  timestamp: new Date(pt.recorded_at).getTime(),
+  time: pt.recorded_at,
+  elevation: pt.elevation_m,
+  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+  instPace: pt.inst_pace_min_per_mile ?? 0,
+  avgPace: pt.avg_pace_min_per_mile ?? 0,
+  distanceM: pt.distance_m ?? null
+});
 
         addOrUpdatePath();
         updateSupabaseViewerStats();

@@ -366,14 +366,17 @@ watchId = navigator.geolocation.watchPosition(async pos => {
 
   const recordedAt = new Date(now).toISOString();
 
-  const newPoint = {
-    lat: coord[1],
-    lon: coord[0],
-    timestamp: now,
-    time: recordedAt,
-    elevation: elevM,
-    elevationFt: elevFt
-  };
+const newPoint = {
+  lat: coord[1],
+  lon: coord[0],
+  timestamp: now,
+  time: recordedAt,
+  elevation: elevM,
+  elevationFt: elevFt,
+  distance: metersToMiles(totalDistanceMeters),
+  instPace,
+  avgPace
+};
 
   // ✅ ACCEPTED POINT
   pathCoords.push(newPoint);
@@ -381,14 +384,17 @@ watchId = navigator.geolocation.watchPosition(async pos => {
   // 🔥 👉 THIS IS WHERE SUPABASE GOES
   if (activeRunId) {
     const { error } = await supabaseClient.from("run_points").insert({
-      run_id: activeRunId,
-      sequence_num: pointSequence++,
-      lat: coord[1],
-      lon: coord[0],
-      accuracy: pos.coords.accuracy ?? null,
-      elevation_m: elevM ?? null,
-      recorded_at: recordedAt
-    });
+  run_id: activeRunId,
+  sequence_num: pointSequence++,
+  lat: coord[1],
+  lon: coord[0],
+  accuracy: pos.coords.accuracy ?? null,
+  elevation_m: elevM ?? null,
+  recorded_at: recordedAt,
+  inst_pace_min_per_mile: instPace,
+  avg_pace_min_per_mile: avgPace,
+  distance_m: totalDistanceMeters
+});
 
     if (error) console.error("Supabase insert error:", error);
 
@@ -599,8 +605,16 @@ function updateSupabaseViewerStats() {
   const elapsedMs = Math.max(0, lastTime - firstTime);
   const distMiles = metersToMiles(distM);
   const avgPace = distMiles > 0 ? (elapsedMs / 60000) / distMiles : 0;
+  const lastPoint = pathCoords[pathCoords.length - 1];
+  const instPace = lastPoint.instPace ?? 0;
 
-  updateStatsDisplay(distMiles, 0, avgPace, elapsedMs, pathCoords[pathCoords.length - 1].elevationFt ?? null);
+updateStatsDisplay(
+  distMiles,
+  instPace,
+  avgPace,
+  elapsedMs,
+  lastPoint.elevationFt ?? null
+);
 }
     
 function trackRunnerSupabase(runId) {
@@ -622,7 +636,12 @@ pathCoords = data.map(pt => ({
   lat: pt.lat,
   lon: pt.lon,
   timestamp: new Date(pt.recorded_at).getTime(),
-  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null
+  time: pt.recorded_at,
+  elevation: pt.elevation_m,
+  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+  instPace: pt.inst_pace_min_per_mile ?? 0,
+  avgPace: pt.avg_pace_min_per_mile ?? 0,
+  distanceM: pt.distance_m ?? null
 }));
 
       addOrUpdatePath();
@@ -663,7 +682,10 @@ pathCoords.push({
   lat: pt.lat,
   lon: pt.lon,
   timestamp: new Date(pt.recorded_at).getTime(),
-  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null
+  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+  instPace: pt.inst_pace_min_per_mile ?? 0,
+  avgPace: pt.avg_pace_min_per_mile ?? 0,
+  distanceM: pt.distance_m ?? null
 });
 
         addOrUpdatePath();

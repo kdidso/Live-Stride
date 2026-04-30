@@ -845,7 +845,7 @@ searchInput.oninput = async () => {
       searchInput.value = run.runner_name;
       viewerFollowing = true;
       selectedRunner = run.id;
-      trackRunnerSupabase(run.id);
+      trackRunnerSupabase(run.id, run.is_live);
 
       suggestionsList.innerHTML = "";
       suggestionsList.style.display = "none";
@@ -856,7 +856,7 @@ searchInput.oninput = async () => {
   });
 };
 
-async function trackRunnerSupabase(runId) {
+async function trackRunnerSupabase(runId, isLive = false) {
   if (activeListener) {
     activeListener.off();
     activeListener = null;
@@ -961,21 +961,21 @@ pathCoords.push({
     )
     .subscribe();
 
-  if (viewerTimerId === null) {
-    viewerTimerId = setInterval(() => {
-      if (!lastViewerData) return;
+if (isLive && viewerTimerId === null) {
+  viewerTimerId = setInterval(() => {
+    if (!lastViewerData) return;
 
-      lastViewerElapsed += 1000;
+    lastViewerElapsed += 1000;
 
-      updateStatsDisplay(
-        lastViewerData.distance,
-        lastViewerData.pace,
-        lastViewerData.avgPace,
-        lastViewerElapsed,
-        lastViewerData.elevationFt ?? null
-      );
-    }, 1000);
-  }
+    updateStatsDisplay(
+      lastViewerData.distance,
+      lastViewerData.pace,
+      lastViewerData.avgPace,
+      lastViewerElapsed,
+      lastViewerData.elevationFt ?? null
+    );
+  }, 1000);
+}
 }
 
 // → Firebase legacy fallback viewer function kept for older Firebase-only runs

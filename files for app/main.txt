@@ -282,6 +282,27 @@ function clearRunPathLayer() {
   }
 }
 
+function resetRunDisplay() {
+  pathCoords = [];
+  totalDistanceMeters = 0;
+  latestRunnerDistance = 0;
+  latestRunnerPace = 0;
+  latestRunnerAvgPace = 0;
+  latestRunnerElevFt = null;
+  lastViewerData = null;
+  lastViewerElapsed = 0;
+
+  clearRunPathLayer();
+
+  if (viewerMarker) {
+    viewerMarker.remove();
+    viewerMarker = null;
+  }
+
+  statsBar.style.display = "none";
+  statsBar.innerHTML = "";
+}
+
 function updateSupabaseViewerStats() {
   if (!pathCoords.length) return;
 
@@ -722,6 +743,8 @@ broadcastBtn.onclick = async () => {
 
 exportUploadBtn.onclick = () => {
   window.open("https://kdidso.github.io/livestride-export/", "_blank");
+  resetRunDisplay();
+  exportUploadBtn.style.display = "none";
 };
 
 exportGpxBtn.onclick = async () => {
@@ -791,7 +814,10 @@ uploadStravaBtn.onclick = async () => {
     console.warn("Cleanup skipped or failed:", err);
   }
 
-  window.open("https://www.strava.com/upload/select", "_blank");
+window.open("https://www.strava.com/upload/select", "_blank");
+resetRunDisplay();
+exportGpxBtn.style.display = "none";
+uploadStravaBtn.style.display = "none";
 };
 
 viewerGpxBtn.onclick = () => {

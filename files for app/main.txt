@@ -375,8 +375,15 @@ function convertToGpx(runData) {
   return gpx;
 }
 
-async function handleLocationUpdate(coord, accuracy = null) {
-  const now = Date.now();
+async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.now()) {
+  const now = typeof locationTime === "number"
+    ? locationTime
+    : new Date(locationTime).getTime();
+
+  if (lastPointTime && now <= lastPointTime) {
+    console.warn("Ignoring out-of-order location point:", new Date(now).toISOString());
+    return;
+  }
 
   if (isFollowing) {
     map.setCenter(coord);
@@ -391,6 +398,33 @@ async function handleLocationUpdate(coord, accuracy = null) {
   if (pathCoords.length > 0) {
     const prev = pathCoords[pathCoords.length - 1];
     const segmentMeters = haversineDistance([prev.lon, prev.lat], coord);
+      const elapsedSeconds = lastPointTime ? (now - lastPointTime) / 1000 : 0;
+  const speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0;
+  const speedMph = speedMps * 2.23694;
+
+  // Ignore duplicate / nearly stationary GPS noise
+  if (segmentMeters < 1) {
+    console.warn("Ignoring tiny GPS movement:", segmentMeters.toFixed(2), "m");
+    return;
+  }
+
+  // Ignore impossible or bad timing points
+  if (elapsedSeconds <= 0) {
+    console.warn("Ignoring zero/negative time point:", elapsedSeconds);
+    return;
+  }
+
+  // Ignore very slow drift that is probably GPS wobble, not running/walking
+  if (speedMph < 1) {
+    console.warn("Ignoring low-speed GPS drift:", speedMph.toFixed(2), "mph");
+    return;
+  }
+
+  // Ignore unrealistic jumps
+  if (speedMph > 140) {
+    console.warn("Ignoring unrealistic GPS jump:", speedMph.toFixed(2), "mph");
+    return;
+  }
     totalDistanceMeters += segmentMeters;
 
     const segmentMiles = metersToMiles(segmentMeters);
@@ -546,10 +580,11 @@ async function startTracking() {
 
     if (!location) return;
 
-    await handleLocationUpdate(
-      [location.longitude, location.latitude],
-      location.accuracy ?? null
-    );
+await handleLocationUpdate(
+  [location.longitude, location.latitude],
+  location.accuracy ?? null,
+  location.time ?? location.timestamp ?? Date.now()
+);
   });
 }
 

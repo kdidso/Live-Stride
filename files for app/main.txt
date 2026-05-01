@@ -628,6 +628,20 @@ latestRunnerDistance = metersToMiles(totalDistanceMeters);
   latestRunnerAvgPace = avgPace;
   latestRunnerElevFt = elevationFt;
 
+if (broadcasting && broadcastRef) {
+  broadcastRef.update({
+    name: runnerName,
+    path: pathCoords,
+    current: [coord[0], coord[1]],
+    distance: latestRunnerDistance,
+    pace: latestRunnerPace,
+    avgPace: latestRunnerAvgPace,
+    elevation: latestRunnerElevFt,
+    timestamp: Date.now(),
+    startTime
+  });
+}
+
 if (activeRunId) {
   const thisSequenceNum = pointSequence++;
 
@@ -659,40 +673,35 @@ fetchElevation(coord[1], coord[0]).then(elev => {
   elevMeters = elev;
   elevationFt = elev * 3.28084;
 
-  const lastPoint = pathCoords[pathCoords.length - 1];
+  newPoint.elevation = elevMeters;
+  newPoint.elevationFt = elevationFt;
+  latestRunnerElevFt = elevationFt;
 
-  if (lastPoint && lastPoint.timestamp === now) {
-    lastPoint.elevation = elevMeters;
-    lastPoint.elevationFt = elevationFt;
-    latestRunnerElevFt = elevationFt;
+  updateStatsDisplay(
+    latestRunnerDistance,
+    latestRunnerPace,
+    latestRunnerAvgPace,
+    Date.now() - startTime,
+    latestRunnerElevFt
+  );
 
-    updateStatsDisplay(
-      latestRunnerDistance,
-      latestRunnerPace,
-      latestRunnerAvgPace,
-      Date.now() - startTime,
-      latestRunnerElevFt
-    );
-
-    if (broadcasting && broadcastRef) {
-      broadcastRef.update({
-        path: pathCoords,
-        elevation: latestRunnerElevFt,
-        timestamp: Date.now()
-      });
-    }
-
-    supabaseClient
-      .from("run_points")
-      .update({ elevation_m: elevMeters })
-      .eq("run_id", activeRunId)
-      .eq("sequence_num", thisSequenceNum);
+  if (broadcasting && broadcastRef) {
+    broadcastRef.update({
+      path: pathCoords,
+      elevation: latestRunnerElevFt,
+      timestamp: Date.now()
+    });
   }
+
+  supabaseClient
+    .from("run_points")
+    .update({ elevation_m: elevMeters })
+    .eq("run_id", activeRunId)
+    .eq("sequence_num", thisSequenceNum);
+
 }).catch(err => {
   console.warn("Elevation update skipped:", err);
 });
-}
-
 }
 async function startTracking() {
   pathCoords = [];

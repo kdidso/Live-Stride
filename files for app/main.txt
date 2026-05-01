@@ -703,6 +703,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
   console.warn("Elevation update skipped:", err);
 });
 }
+}
 async function startTracking() {
   pathCoords = [];
   totalDistanceMeters = 0;

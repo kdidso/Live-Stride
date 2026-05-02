@@ -132,6 +132,11 @@ function setMode(mode) {
   const broadcastLabel = document.getElementById("broadcastLabel");
   const searchBar = document.getElementById("searchBar");
   const buttonWrapper = document.getElementById("buttonWrapper");
+  if (mode === "viewer") {
+    document.body.classList.add("viewer-mode");
+  } else {
+    document.body.classList.remove("viewer-mode");
+  }
 
   controls.style.display = mode === "runner" ? "flex" : "none";
   broadcastLabel.style.display = mode === "runner" ? "flex" : "none";

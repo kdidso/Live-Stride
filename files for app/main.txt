@@ -701,11 +701,33 @@ fetchElevation(coord[1], coord[0]).then(elev => {
     });
   }
 
+  // Also update the queued/inserted payload object.
+  // This matters if the point was queued before elevation returned.
+  pointPayload.elevation_m = elevMeters;
+
   supabaseClient
     .from("run_points")
     .update({ elevation_m: elevMeters })
     .eq("run_id", activeRunId)
-    .eq("sequence_num", thisSequenceNum);
+    .eq("sequence_num", thisSequenceNum)
+    .select()
+    .then(({ data, error }) => {
+      if (error) {
+        console.error("Supabase elevation update failed:", error);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        console.warn("Supabase elevation update matched 0 rows", {
+          activeRunId,
+          thisSequenceNum,
+          elevMeters
+        });
+        return;
+      }
+
+      console.log("Supabase elevation update succeeded:", data);
+    });
 
 }).catch(err => {
   console.warn("Elevation update skipped:", err);

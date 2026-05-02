@@ -62,6 +62,15 @@ function addControls() {
   });
 
   map.addControl(geoControl, "bottom-right");
+if (currentMode === "runner") {
+  setTimeout(() => {
+    try {
+      geoControl.trigger();
+    } catch (err) {
+      console.warn("Unable to re-trigger geolocation after style change:", err);
+    }
+  }, 500);
+}
 }
 map.on("style.load", addControls);
 
@@ -108,6 +117,7 @@ let viewerConnectionLost = false;
 let viewerStatusEl = null;
 let viewerConnectionWatchId = null;
 let runnerSyncHadFailure = false;
+let currentMode = "runner";
 
 // → DOM references
 const startBtn = document.getElementById("startBtn");
@@ -128,6 +138,7 @@ const uploadStravaBtn = document.getElementById("uploadStravaBtn");
 
 // → Mode switching
 function setMode(mode) {
+  currentMode = mode;
   const controls = document.getElementById("controls");
   const broadcastLabel = document.getElementById("broadcastLabel");
   const searchBar = document.getElementById("searchBar");

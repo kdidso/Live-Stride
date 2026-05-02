@@ -19,7 +19,10 @@
       padding: 0;
       height: 100%;
       overflow: hidden;
-    }
+    }  
+body.viewer-mode .maplibregl-ctrl-geolocate {
+  display: none !important;
+}
 
 :root {
   --top-safe-offset: 30px;

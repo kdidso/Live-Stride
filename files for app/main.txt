@@ -222,7 +222,7 @@ function formatPace(minsPerMile) {
   return `${minutes}:${seconds.toString().padStart(2, "0")} /mi`;
 }
 
-const ELEVATION_API_BASE = "https://inf-mozilla-tel-work.trycloudflare.com";
+const ELEVATION_API_BASE = "https://ranking-marketplace-significance-salvation.trycloudflare.com";
 
 async function fetchElevation(lat, lon) {
   try {

@@ -126,6 +126,67 @@ const broadcastCheckbox = document.getElementById("broadcastCheckbox");
 const exportGpxBtn = document.getElementById("exportGpxBtn");
 const uploadStravaBtn = document.getElementById("uploadStravaBtn");
 
+const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
+
+function loadSyncQueue() {
+  try {
+    return JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY)) || {
+      points: [],
+      runUpdates: {},
+      finishEvents: {}
+    };
+  } catch {
+    return { points: [], runUpdates: {}, finishEvents: {} };
+  }
+}
+
+function saveSyncQueue(queue) {
+  localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
+}
+
+function queueRunPoint(pointPayload) {
+  const queue = loadSyncQueue();
+
+  const exists = queue.points.some(p =>
+    p.run_id === pointPayload.run_id &&
+    p.sequence_num === pointPayload.sequence_num
+  );
+
+  if (!exists) {
+    queue.points.push(pointPayload);
+    saveSyncQueue(queue);
+  }
+}
+
+function queueRunUpdate(runId, updatePayload) {
+  const queue = loadSyncQueue();
+  queue.runUpdates[runId] = {
+    ...(queue.runUpdates[runId] || {}),
+    ...updatePayload
+  };
+  saveSyncQueue(queue);
+}
+
+function queueFinishEvent(runId, finishPayload) {
+  const queue = loadSyncQueue();
+  queue.finishEvents[runId] = finishPayload;
+  saveSyncQueue(queue);
+}
+
+function updateQueuedPointElevation(runId, sequenceNum, elevationM) {
+  const queue = loadSyncQueue();
+  let changed = false;
+
+  queue.points.forEach(point => {
+    if (point.run_id === runId && point.sequence_num === sequenceNum) {
+      point.elevation_m = elevationM;
+      changed = true;
+    }
+  });
+
+  if (changed) saveSyncQueue(queue);
+}
+
 // → Mode switching
 function setMode(mode) {
   const controls = document.getElementById("controls");
@@ -358,11 +419,20 @@ function hideConnectionStatusSoon() {
 }
 
 async function safeInsertRunPoint(pointPayload) {
-  const { error } = await supabaseClient.from("run_points").insert(pointPayload);
+  if (!navigator.onLine) {
+    queueRunPoint(pointPayload);
+    runnerSyncHadFailure = true;
+    showConnectionStatus("Connection lost — saving run locally", "bad");
+    return false;
+  }
+
+  const { error } = await supabaseClient
+    .from("run_points")
+    .insert(pointPayload);
 
   if (error) {
     console.warn("Supabase point insert failed; queued for retry:", error);
-    pendingSupabasePoints.push(pointPayload);
+    queueRunPoint(pointPayload);
     runnerSyncHadFailure = true;
     showConnectionStatus("Connection lost — saving run locally", "bad");
     return false;
@@ -374,6 +444,13 @@ async function safeInsertRunPoint(pointPayload) {
 async function safeUpdateRunSummary(updatePayload) {
   if (!activeRunId) return false;
 
+  if (!navigator.onLine) {
+    queueRunUpdate(activeRunId, updatePayload);
+    runnerSyncHadFailure = true;
+    showConnectionStatus("Connection lost — syncing when back online", "bad");
+    return false;
+  }
+
   const { error } = await supabaseClient
     .from("runs")
     .update(updatePayload)
@@ -381,7 +458,7 @@ async function safeUpdateRunSummary(updatePayload) {
 
   if (error) {
     console.warn("Supabase run update failed; queued latest summary:", error);
-    pendingRunUpdate = updatePayload;
+    queueRunUpdate(activeRunId, updatePayload);
     runnerSyncHadFailure = true;
     showConnectionStatus("Connection lost — syncing when back online", "bad");
     return false;
@@ -391,14 +468,23 @@ async function safeUpdateRunSummary(updatePayload) {
 }
 
 async function flushSupabaseQueue() {
-  if (isFlushingSupabase || !activeRunId) return;
+  if (isFlushingSupabase) return;
   if (!navigator.onLine) return;
+
+  let queue = loadSyncQueue();
+
+  const hasWork =
+    queue.points.length > 0 ||
+    Object.keys(queue.runUpdates).length > 0 ||
+    Object.keys(queue.finishEvents).length > 0;
+
+  if (!hasWork) return;
 
   isFlushingSupabase = true;
 
   try {
-    while (pendingSupabasePoints.length > 0) {
-      const pointPayload = pendingSupabasePoints[0];
+    while (queue.points.length > 0) {
+      const pointPayload = queue.points[0];
 
       const { error } = await supabaseClient
         .from("run_points")
@@ -407,35 +493,72 @@ async function flushSupabaseQueue() {
       if (error) {
         console.warn("Still unable to sync queued point:", error);
         showConnectionStatus("Still offline — run is saved locally", "bad");
-        break;
+        saveSyncQueue(queue);
+        return;
       }
 
-      pendingSupabasePoints.shift();
+      queue.points.shift();
+      saveSyncQueue(queue);
     }
 
-    if (pendingRunUpdate) {
+    for (const [runId, updatePayload] of Object.entries(queue.runUpdates)) {
       const { error } = await supabaseClient
         .from("runs")
-        .update(pendingRunUpdate)
-        .eq("id", activeRunId);
+        .update(updatePayload)
+        .eq("id", runId);
 
-      if (!error) pendingRunUpdate = null;
+      if (error) {
+        console.warn("Still unable to sync queued run update:", error);
+        showConnectionStatus("Still offline — run summary is saved locally", "bad");
+        saveSyncQueue(queue);
+        return;
+      }
+
+      delete queue.runUpdates[runId];
+      saveSyncQueue(queue);
     }
 
-if (pendingSupabasePoints.length === 0 && !pendingRunUpdate && runnerSyncHadFailure) {
-  runnerSyncHadFailure = false;
-  showConnectionStatus("Connection restored — run synced", "good");
-  hideConnectionStatusSoon();
-}
+    for (const [runId, finishPayload] of Object.entries(queue.finishEvents)) {
+      const { error } = await supabaseClient
+        .from("runs")
+        .update(finishPayload)
+        .eq("id", runId);
+
+      if (error) {
+        console.warn("Still unable to sync finish event:", error);
+        showConnectionStatus("Still offline — finish will sync later", "bad");
+        saveSyncQueue(queue);
+        return;
+      }
+
+      delete queue.finishEvents[runId];
+      saveSyncQueue(queue);
+    }
+
+    if (runnerSyncHadFailure) {
+      runnerSyncHadFailure = false;
+      showConnectionStatus("Connection restored — run synced", "good");
+      hideConnectionStatusSoon();
+    }
   } finally {
     isFlushingSupabase = false;
   }
 }
 
-window.addEventListener("online", flushSupabaseQueue);
+window.addEventListener("online", () => {
+  showConnectionStatus("Connection restored — syncing run", "good");
+  flushSupabaseQueue();
+});
+
 window.addEventListener("offline", () => {
   showConnectionStatus("Connection lost — saving run locally", "bad");
 });
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) flushSupabaseQueue();
+});
+
+window.addEventListener("focus", flushSupabaseQueue);
 
 function resetRunDisplay() {
   pathCoords = [];
@@ -709,6 +832,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
   // Also update the queued/inserted payload object.
   // This matters if the point was queued before elevation returned.
   pointPayload.elevation_m = elevMeters;
+  updateQueuedPointElevation(activeRunId, thisSequenceNum, elevMeters);
 
   supabaseClient
     .from("run_points")
@@ -847,15 +971,16 @@ if (activeRunId) {
     ? pathCoords[pathCoords.length - 1]
     : null;
 
-  safeUpdateRunSummary({
+  const finishPayload = {
     is_live: false,
     finished_at: new Date().toISOString(),
     total_distance_m: totalDistanceMeters,
     latest_lat: lastPoint ? lastPoint.lat : null,
     latest_lon: lastPoint ? lastPoint.lon : null,
     latest_timestamp: lastPoint ? lastPoint.time : null
-  });
+  };
 
+  queueFinishEvent(activeRunId, finishPayload);
   flushSupabaseQueue();
 }
 

@@ -324,15 +324,23 @@ function showViewerStatus(message, type = "info") {
   if (!viewerStatusEl) {
     viewerStatusEl = document.createElement("div");
     viewerStatusEl.style.position = "absolute";
-    viewerStatusEl.style.top = "10px";
-    viewerStatusEl.style.left = "10px";
     viewerStatusEl.style.zIndex = "1000";
     viewerStatusEl.style.padding = "8px 12px";
     viewerStatusEl.style.borderRadius = "6px";
     viewerStatusEl.style.fontSize = "13px";
     viewerStatusEl.style.color = "white";
+    viewerStatusEl.style.textAlign = "center";
     document.body.appendChild(viewerStatusEl);
   }
+
+  const buttonWrapper = document.getElementById("buttonWrapper");
+  const buttonBottom = buttonWrapper
+    ? buttonWrapper.getBoundingClientRect().bottom + 10
+    : 180;
+
+  viewerStatusEl.style.top = `${buttonBottom}px`;
+  viewerStatusEl.style.left = "10px";
+  viewerStatusEl.style.right = "10px";
 
   viewerStatusEl.textContent = message;
   viewerStatusEl.style.background =
@@ -393,20 +401,29 @@ function showConnectionStatus(message, type = "info") {
   if (!connectionStatusEl) {
     connectionStatusEl = document.createElement("div");
     connectionStatusEl.style.position = "absolute";
-    connectionStatusEl.style.top = "10px";
-    connectionStatusEl.style.right = "10px";
     connectionStatusEl.style.zIndex = "1000";
     connectionStatusEl.style.padding = "8px 12px";
     connectionStatusEl.style.borderRadius = "6px";
     connectionStatusEl.style.fontSize = "13px";
     connectionStatusEl.style.color = "white";
+    connectionStatusEl.style.textAlign = "center";
     document.body.appendChild(connectionStatusEl);
   }
 
+  const buttonWrapper = document.getElementById("buttonWrapper");
+  const buttonBottom = buttonWrapper
+    ? buttonWrapper.getBoundingClientRect().bottom + 10
+    : 180;
+
+  connectionStatusEl.style.top = `${buttonBottom}px`;
+  connectionStatusEl.style.left = "10px";
+  connectionStatusEl.style.right = "10px";
+
   connectionStatusEl.textContent = message;
-  connectionStatusEl.style.background = type === "bad"
-    ? "rgba(200,0,0,0.85)"
-    : "rgba(0,120,0,0.85)";
+  connectionStatusEl.style.background =
+    type === "bad"
+      ? "rgba(200,0,0,0.85)"
+      : "rgba(0,120,0,0.85)";
   connectionStatusEl.style.display = "block";
 }
 

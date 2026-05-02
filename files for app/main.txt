@@ -222,11 +222,19 @@ function formatPace(minsPerMile) {
   return `${minutes}:${seconds.toString().padStart(2, "0")} /mi`;
 }
 
+const ELEVATION_API_BASE = "https://inf-mozilla-tel-work.trycloudflare.com";
+
 async function fetchElevation(lat, lon) {
   try {
     const response = await fetch(
-      `https://api.open-elevation.com/api/v1/lookup?locations=${lat},${lon}`
+      `${ELEVATION_API_BASE}/api/v1/lookup?locations=${lat},${lon}`
     );
+
+    if (!response.ok) {
+      console.warn("Elevation server returned:", response.status);
+      return null;
+    }
+
     const data = await response.json();
     return data.results?.[0]?.elevation ?? null;
   } catch (err) {

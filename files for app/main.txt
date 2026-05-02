@@ -99,8 +99,6 @@ let isPrivateMode = false;
 let localRunFilename = "";
 let privateSaveIntervalId = null;
 let searchRequestId = 0;
-let pendingSupabasePoints = [];
-let pendingRunUpdate = null;
 let isFlushingSupabase = false;
 let connectionStatusEl = null;
 let lastPointReceivedTime = null;
@@ -794,14 +792,15 @@ if (activeRunId) {
     distance_m: totalDistanceMeters
   };
 
-  safeInsertRunPoint(pointPayload).then(() => flushSupabaseQueue());
+await safeInsertRunPoint(pointPayload);
+await safeUpdateRunSummary({
+  total_distance_m: totalDistanceMeters,
+  latest_lat: coord[1],
+  latest_lon: coord[0],
+  latest_timestamp: recordedAt
+});
 
-  safeUpdateRunSummary({
-    total_distance_m: totalDistanceMeters,
-    latest_lat: coord[1],
-    latest_lon: coord[0],
-    latest_timestamp: recordedAt
-  }).then(() => flushSupabaseQueue());
+flushSupabaseQueue();
 
 fetchElevation(coord[1], coord[0]).then(elev => {
   if (elev == null) return;

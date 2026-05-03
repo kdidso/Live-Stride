@@ -124,6 +124,64 @@ public class LiveStrideSyncService extends Service {
         }
     }
 
+    private void handleQueuePoint(Intent intent) {
+    String supabaseUrl = intent.getStringExtra("supabaseUrl");
+    String supabaseAnonKey = intent.getStringExtra("supabaseAnonKey");
+    String pointPayloadJson = intent.getStringExtra("pointPayload");
+
+    for (int attempt = 1; attempt <= 30; attempt++) {
+        boolean success = syncSupabasePoint(
+                supabaseUrl,
+                supabaseAnonKey,
+                pointPayloadJson
+        );
+
+        if (success) {
+            stopSelf();
+            return;
+        }
+
+        try {
+            Thread.sleep(5000);
+        } catch (InterruptedException ignored) {}
+    }
+
+    stopSelf();
+}
+
+private boolean syncSupabasePoint(
+        String supabaseUrl,
+        String supabaseAnonKey,
+        String pointPayloadJson
+) {
+    HttpURLConnection conn = null;
+
+    try {
+        String endpoint = supabaseUrl + "/rest/v1/run_points";
+
+        URL url = new URL(endpoint);
+        conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("apikey", supabaseAnonKey);
+        conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("Prefer", "return=minimal");
+        conn.setDoOutput(true);
+
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(pointPayloadJson.getBytes("UTF-8"));
+        }
+
+        int code = conn.getResponseCode();
+        return code >= 200 && code < 300;
+
+    } catch (Exception e) {
+        e.printStackTrace();
+        return false;
+    } finally {
+        if (conn != null) conn.disconnect();
+    }
+}
     private boolean syncFirebaseFinish(String firebaseRunnerPath) {
         HttpURLConnection conn = null;
 

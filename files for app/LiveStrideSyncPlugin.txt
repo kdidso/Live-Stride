@@ -41,4 +41,30 @@ public class LiveStrideSyncPlugin extends Plugin {
         result.put("started", true);
         call.resolve(result);
     }
+@PluginMethod
+public void queuePoint(PluginCall call) {
+    String runId = call.getString("runId");
+    String supabaseUrl = call.getString("supabaseUrl");
+    String supabaseAnonKey = call.getString("supabaseAnonKey");
+
+    JSObject pointPayload = call.getObject("pointPayload");
+
+    if (runId == null || supabaseUrl == null || supabaseAnonKey == null || pointPayload == null) {
+        call.reject("Missing required point sync data.");
+        return;
+    }
+
+    Intent intent = new Intent(getContext(), LiveStrideSyncService.class);
+    intent.setAction("QUEUE_POINT");
+    intent.putExtra("runId", runId);
+    intent.putExtra("supabaseUrl", supabaseUrl);
+    intent.putExtra("supabaseAnonKey", supabaseAnonKey);
+    intent.putExtra("pointPayload", pointPayload.toString());
+
+    getContext().startForegroundService(intent);
+
+    JSObject result = new JSObject();
+    result.put("queued", true);
+    call.resolve(result);
+}
 }

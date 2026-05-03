@@ -1,0 +1,44 @@
+package com.kdidso.livestride;
+
+import android.content.Intent;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+@CapacitorPlugin(name = "LiveStrideSync")
+public class LiveStrideSyncPlugin extends Plugin {
+
+    @PluginMethod
+    public void finishRun(PluginCall call) {
+        String runId = call.getString("runId");
+        String supabaseUrl = call.getString("supabaseUrl");
+        String supabaseAnonKey = call.getString("supabaseAnonKey");
+        String firebaseDatabaseUrl = call.getString("firebaseDatabaseUrl");
+        String firebaseRunnerPath = call.getString("firebaseRunnerPath");
+
+        JSObject finishPayload = call.getObject("finishPayload");
+
+        if (runId == null || supabaseUrl == null || supabaseAnonKey == null || finishPayload == null) {
+            call.reject("Missing required finish sync data.");
+            return;
+        }
+
+        Intent intent = new Intent(getContext(), LiveStrideSyncService.class);
+        intent.setAction("FINISH_RUN");
+        intent.putExtra("runId", runId);
+        intent.putExtra("supabaseUrl", supabaseUrl);
+        intent.putExtra("supabaseAnonKey", supabaseAnonKey);
+        intent.putExtra("firebaseDatabaseUrl", firebaseDatabaseUrl);
+        intent.putExtra("firebaseRunnerPath", firebaseRunnerPath);
+        intent.putExtra("finishPayload", finishPayload.toString());
+
+        getContext().startForegroundService(intent);
+
+        JSObject result = new JSObject();
+        result.put("started", true);
+        call.resolve(result);
+    }
+}

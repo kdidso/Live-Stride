@@ -1,0 +1,180 @@
+package com.kdidso.livestride;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Intent;
+import android.os.Build;
+import android.os.IBinder;
+
+import androidx.annotation.Nullable;
+import androidx.core.app.NotificationCompat;
+
+import org.json.JSONObject;
+
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
+public class LiveStrideSyncService extends Service {
+
+    private static final String CHANNEL_ID = "livestride_sync_channel";
+    private static final int NOTIFICATION_ID = 2002;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        createNotificationChannel();
+
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("LiveStride Syncing")
+                .setContentText("Finishing your run safely")
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setOngoing(true)
+                .build();
+
+        startForeground(NOTIFICATION_ID, notification);
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && "FINISH_RUN".equals(intent.getAction())) {
+            new Thread(() -> handleFinishRun(intent)).start();
+        }
+
+        return START_NOT_STICKY;
+    }
+
+    private void handleFinishRun(Intent intent) {
+        String runId = intent.getStringExtra("runId");
+        String supabaseUrl = intent.getStringExtra("supabaseUrl");
+        String supabaseAnonKey = intent.getStringExtra("supabaseAnonKey");
+        String firebaseDatabaseUrl = intent.getStringExtra("firebaseDatabaseUrl");
+        String firebaseRunnerPath = intent.getStringExtra("firebaseRunnerPath");
+        String finishPayloadJson = intent.getStringExtra("finishPayload");
+
+        boolean supabaseDone = false;
+        boolean firebaseDone = false;
+
+        for (int attempt = 1; attempt <= 30; attempt++) {
+            if (!supabaseDone) {
+                supabaseDone = syncSupabaseFinish(
+                        supabaseUrl,
+                        supabaseAnonKey,
+                        runId,
+                        finishPayloadJson
+                );
+            }
+
+            if (!firebaseDone && firebaseDatabaseUrl != null && firebaseRunnerPath != null) {
+                firebaseDone = syncFirebaseFinish(firebaseRunnerPath);
+            } else {
+                firebaseDone = true;
+            }
+
+            if (supabaseDone && firebaseDone) {
+                stopSelf();
+                return;
+            }
+
+            try {
+                Thread.sleep(10000);
+            } catch (InterruptedException ignored) {
+            }
+        }
+
+        stopSelf();
+    }
+
+    private boolean syncSupabaseFinish(
+            String supabaseUrl,
+            String supabaseAnonKey,
+            String runId,
+            String finishPayloadJson
+    ) {
+        HttpURLConnection conn = null;
+
+        try {
+            String endpoint = supabaseUrl
+                    + "/rest/v1/runs?id=eq."
+                    + runId;
+
+            URL url = new URL(endpoint);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("PATCH");
+            conn.setRequestProperty("apikey", supabaseAnonKey);
+            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Prefer", "return=minimal");
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(finishPayloadJson.getBytes("UTF-8"));
+            }
+
+            int code = conn.getResponseCode();
+            return code >= 200 && code < 300;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private boolean syncFirebaseFinish(String firebaseRunnerPath) {
+        HttpURLConnection conn = null;
+
+        try {
+            JSONObject body = new JSONObject();
+            body.put("finished", true);
+            body.put("timestamp", System.currentTimeMillis());
+
+            String endpoint = firebaseRunnerPath + ".json";
+
+            URL url = new URL(endpoint);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("PATCH");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toString().getBytes("UTF-8"));
+            }
+
+            int code = conn.getResponseCode();
+            return code >= 200 && code < 300;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "LiveStride Sync",
+                NotificationManager.IMPORTANCE_LOW
+        );
+
+        channel.setDescription("Keeps LiveStride run finish sync reliable.");
+
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.createNotificationChannel(channel);
+        }
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}

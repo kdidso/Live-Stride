@@ -482,22 +482,41 @@ async function safeUpdateRunSummary(updatePayload) {
   return true;
 }
 
+async function fillMissingQueuedElevations(queue) {
+  for (const point of queue.points) {
+    if (point.elevation_m != null) continue;
+
+    try {
+      const elev = await fetchElevation(point.lat, point.lon);
+      if (elev != null) {
+        point.elevation_m = elev;
+      }
+    } catch (err) {
+      console.warn("Could not fetch queued point elevation:", err);
+    }
+  }
+
+  saveSyncQueue(queue);
+}
+
 async function flushSupabaseQueue() {
   if (isFlushingSupabase) return;
   if (!navigator.onLine) return;
 
-  let queue = loadSyncQueue();
+let queue = loadSyncQueue();
 
-  const hasWork =
-    queue.points.length > 0 ||
-    Object.keys(queue.runUpdates).length > 0 ||
-    Object.keys(queue.finishEvents).length > 0;
+const hasWork =
+  queue.points.length > 0 ||
+  Object.keys(queue.runUpdates).length > 0 ||
+  Object.keys(queue.finishEvents).length > 0;
 
-  if (!hasWork) return;
+if (!hasWork) return;
 
-  isFlushingSupabase = true;
+isFlushingSupabase = true;
 
-  try {
+try {
+  await fillMissingQueuedElevations(queue);
+  queue = loadSyncQueue();
     while (queue.points.length > 0) {
       const pointPayload = queue.points[0];
 
@@ -560,6 +579,30 @@ async function flushSupabaseQueue() {
   }
 }
 
+
+async function forceFlushAll() {
+  for (let i = 0; i < 5; i++) {
+    await flushSupabaseQueue();
+
+    const queue = loadSyncQueue();
+    const hasWork =
+      queue.points.length > 0 ||
+      Object.keys(queue.runUpdates).length > 0 ||
+      Object.keys(queue.finishEvents).length > 0;
+
+    if (!hasWork) {
+      showConnectionStatus("Run fully synced", "good");
+      hideConnectionStatusSoon();
+      return true;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+
+  console.warn("Some run data still not synced after retries.");
+  showConnectionStatus("Some run data still needs syncing", "bad");
+  return false;
+}
 window.addEventListener("online", () => {
   showConnectionStatus("Connection restored — syncing run", "good");
   flushSupabaseQueue();
@@ -951,7 +994,7 @@ await handleLocationUpdate(
   });
 }
 
-function stopTracking() {
+async function stopTracking() {
   if (runnerTimerId !== null) {
     clearInterval(runnerTimerId);
     runnerTimerId = null;
@@ -997,7 +1040,7 @@ if (activeRunId) {
   };
 
   queueFinishEvent(activeRunId, finishPayload);
-  flushSupabaseQueue();
+  await forceFlushAll();
 }
 
   if (isPrivateMode) {

@@ -467,23 +467,25 @@ function hideConnectionStatusSoon() {
 
 async function safeInsertRunPoint(pointPayload) {
   if (!navigator.onLine) {
-    queueRunPoint(pointPayload);
-    runnerSyncHadFailure = true;
-    showConnectionStatus("Connection lost — saving run locally", "bad");
-    return false;
-  }
+  queueRunPoint(pointPayload);
+  await nativeQueuePoint(pointPayload); // 🔥 NEW
+  runnerSyncHadFailure = true;
+  showConnectionStatus("Connection lost — saving run locally", "bad");
+  return false;
+}
 
   const { error } = await supabaseClient
     .from("run_points")
     .insert(pointPayload);
 
-  if (error) {
-    console.warn("Supabase point insert failed; queued for retry:", error);
-    queueRunPoint(pointPayload);
-    runnerSyncHadFailure = true;
-    showConnectionStatus("Connection lost — saving run locally", "bad");
-    return false;
-  }
+if (error) {
+  console.warn("Supabase point insert failed; queued for retry:", error);
+  queueRunPoint(pointPayload);
+  await nativeQueuePoint(pointPayload); // 🔥 NEW
+  runnerSyncHadFailure = true;
+  showConnectionStatus("Connection lost — saving run locally", "bad");
+  return false;
+}
 
   return true;
 }
@@ -611,6 +613,23 @@ try {
   }
 }
 
+async function nativeQueuePoint(pointPayload) {
+  if (!LiveStrideSync || !activeRunId) return false;
+
+  try {
+    await LiveStrideSync.queuePoint({
+      runId: activeRunId,
+      supabaseUrl: SUPABASE_URL,
+      supabaseAnonKey: SUPABASE_ANON_KEY,
+      pointPayload
+    });
+
+    return true;
+  } catch (err) {
+    console.warn("Native point queue failed:", err);
+    return false;
+  }
+}
 
 async function nativeFinishSync(finishPayload) {
   if (!LiveStrideSync || !activeRunId) {

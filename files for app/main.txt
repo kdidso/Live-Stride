@@ -1,5 +1,5 @@
 // → Capacitor plugins
-const { BackgroundGeolocation, Filesystem, Share } = Capacitor.Plugins;
+const { BackgroundGeolocation, Filesystem, Share, LiveStrideSync } = Capacitor.Plugins;
 const Directory = Filesystem.Directory;
 const Encoding  = Filesystem.Encoding;
 
@@ -612,6 +612,30 @@ try {
 }
 
 
+async function nativeFinishSync(finishPayload) {
+  if (!LiveStrideSync || !activeRunId) {
+    console.warn("LiveStrideSync native plugin not available.");
+    return false;
+  }
+
+  try {
+    await LiveStrideSync.finishRun({
+      runId: activeRunId,
+      supabaseUrl: SUPABASE_URL,
+      supabaseAnonKey: SUPABASE_ANON_KEY,
+      firebaseDatabaseUrl: firebaseConfig.databaseURL,
+      firebaseRunnerPath: broadcastRef ? broadcastRef.toString() : null,
+      finishPayload
+    });
+
+    console.log("Native finish sync started.");
+    return true;
+  } catch (err) {
+    console.warn("Native finish sync failed to start:", err);
+    return false;
+  }
+}
+
 async function forceFlushAll() {
   for (let i = 0; i < 5; i++) {
     await flushFirebaseFinish();
@@ -1093,8 +1117,13 @@ if (activeRunId) {
     latest_timestamp: lastPoint ? lastPoint.time : null
   };
 
-  queueFinishEvent(activeRunId, finishPayload);
-  await forceFlushAll();
+queueFinishEvent(activeRunId, finishPayload);
+queueFirebaseFinish();
+
+await nativeFinishSync(finishPayload);
+
+// Keep the JavaScript flush too as a backup when the WebView is still awake.
+await forceFlushAll();
 }
 
   if (isPrivateMode) {

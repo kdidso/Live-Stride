@@ -125,6 +125,38 @@ const exportGpxBtn = document.getElementById("exportGpxBtn");
 const uploadStravaBtn = document.getElementById("uploadStravaBtn");
 
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
+const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
+
+function queueFirebaseFinish() {
+  localStorage.setItem(FIREBASE_FINISH_QUEUE_KEY, "true");
+}
+
+function clearFirebaseFinishQueue() {
+  localStorage.removeItem(FIREBASE_FINISH_QUEUE_KEY);
+}
+
+function hasQueuedFirebaseFinish() {
+  return localStorage.getItem(FIREBASE_FINISH_QUEUE_KEY) === "true";
+}
+
+async function flushFirebaseFinish() {
+  if (!broadcastRef) return true;
+  if (!hasQueuedFirebaseFinish()) return true;
+  if (!navigator.onLine) return false;
+
+  try {
+    await broadcastRef.update({
+      finished: true,
+      timestamp: Date.now()
+    });
+
+    clearFirebaseFinishQueue();
+    return true;
+  } catch (err) {
+    console.warn("Firebase finish retry failed:", err);
+    return false;
+  }
+}
 
 function loadSyncQueue() {
   try {
@@ -582,13 +614,16 @@ try {
 
 async function forceFlushAll() {
   for (let i = 0; i < 5; i++) {
+    await flushFirebaseFinish();
     await flushSupabaseQueue();
+    
 
     const queue = loadSyncQueue();
     const hasWork =
       queue.points.length > 0 ||
       Object.keys(queue.runUpdates).length > 0 ||
-      Object.keys(queue.finishEvents).length > 0;
+      Object.keys(queue.finishEvents).length > 0 ||
+      hasQueuedFirebaseFinish();
 
     if (!hasWork) {
       showConnectionStatus("Run fully synced", "good");
@@ -991,6 +1026,13 @@ await handleLocationUpdate(
   location.accuracy ?? null,
   location.time ?? location.timestamp ?? Date.now()
 );
+if (navigator.onLine) {
+  flushSupabaseQueue();
+
+  if (hasQueuedFirebaseFinish()) {
+    flushFirebaseFinish();
+  }
+}
   });
 }
 
@@ -1020,10 +1062,22 @@ async function stopTracking() {
     viewerTimerId = null;
   }
 
-  if (broadcasting && broadcastRef) {
-    broadcastRef.update({ finished: true });
-    broadcasting = false;
+if (broadcasting && broadcastRef) {
+  queueFirebaseFinish();
+
+  try {
+    await broadcastRef.update({
+      finished: true,
+      timestamp: Date.now()
+    });
+
+    clearFirebaseFinishQueue();
+  } catch (err) {
+    console.warn("Firebase finish failed; queued for retry:", err);
   }
+
+  broadcasting = false;
+}
 
 if (activeRunId) {
   const lastPoint = pathCoords.length > 0

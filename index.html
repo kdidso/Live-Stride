@@ -255,6 +255,7 @@
     let viewerStatusEl = null;
     let viewerConnectionWatchId = null;
     let runnerSyncHadFailure = false;
+    let programmaticViewerMove = false;
 
     // → DOM
     const startBtn = document.getElementById("startBtn");
@@ -291,20 +292,30 @@
     runnerModeBtn.onclick = () => setMode("runner");
     viewerModeBtn.onclick = () => setMode("viewer");
 
-    map.on("dragstart", () => {
-      isFollowing = false;
-      viewerFollowing = false;
-    });
+map.on("dragstart", () => {
+  if (programmaticViewerMove) return;
 
-    map.on("zoomstart", () => {
-      isFollowing = false;
-      viewerFollowing = false;
-    });
+  isFollowing = false;
+  viewerFollowing = false;
+});
+
+map.on("zoomstart", () => {
+  if (programmaticViewerMove) return;
+
+  isFollowing = false;
+  viewerFollowing = false;
+});
 
     recenterBtn.onclick = () => {
       if (viewerMarker) {
         viewerFollowing = true;
-        map.flyTo({ center: viewerMarker.getLngLat(), zoom: 16 });
+programmaticViewerMove = true;
+
+map.flyTo({ center: viewerMarker.getLngLat(), zoom: 16 });
+
+setTimeout(() => {
+  programmaticViewerMove = false;
+}, 1000);
       }
     };
 
@@ -1359,9 +1370,18 @@ viewerConnectionWatchId = setInterval(async () => {
           viewerTimerId = null;
         }
 
-        if (viewerFollowing) {
-          map.flyTo({ center: data.current, zoom: 16 });
-        }
+if (viewerFollowing) {
+  programmaticViewerMove = true;
+
+  map.flyTo({
+    center: data.current,
+    zoom: 16
+  });
+
+  setTimeout(() => {
+    programmaticViewerMove = false;
+  }, 1000);
+}
       });
 
       if (viewerTimerId === null) {

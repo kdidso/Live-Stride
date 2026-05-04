@@ -1078,6 +1078,10 @@ let lastViewerSequenceNum = data.length > 0
           },
           payload => {
             const pt = payload.new;
+            lastViewerSequenceNum = Math.max(
+            lastViewerSequenceNum,
+         pt.sequence_num ?? lastViewerSequenceNum
+      );
 
             lastPointReceivedTime = Date.now();
 
@@ -1123,27 +1127,56 @@ let lastViewerSequenceNum = data.length > 0
             table: "run_points",
             filter: `run_id=eq.${runId}`
           },
-          payload => {
-            const pt = payload.new;
-            lastViewerSequenceNum = Math.max(lastViewerSequenceNum, pt.sequence_num ?? lastViewerSequenceNum);
-            const ptTime = new Date(pt.recorded_at).getTime();
+payload => {
+  const pt = payload.new;
 
-            const existingPoint = pathCoords.find(p => p.timestamp === ptTime);
-            if (!existingPoint) return;
+  lastPointReceivedTime = Date.now();
 
-            existingPoint.elevation = pt.elevation_m;
-            existingPoint.elevationFt = pt.elevation_m != null
-              ? pt.elevation_m * 3.28084
-              : null;
+  if (viewerConnectionLost) {
+    viewerConnectionLost = false;
+    showViewerStatus("Runner reconnected", "good");
+    hideViewerStatusSoon();
+  }
 
-            existingPoint.instPace = pt.inst_pace_min_per_mile ?? existingPoint.instPace;
-            existingPoint.avgPace = pt.avg_pace_min_per_mile ?? existingPoint.avgPace;
-            existingPoint.distanceM = pt.distance_m ?? existingPoint.distanceM;
+  // 🔥 Find the existing point (DO NOT push a new one)
+  const existingPoint = pathCoords.find(p =>
+    p.timestamp === new Date(pt.recorded_at).getTime()
+  );
 
-            updateSupabaseViewerStats();
-          }
-        )
-        .subscribe();
+  if (!existingPoint) return;
+
+  // 🔥 Update ONLY elevation + values
+  existingPoint.elevation = pt.elevation_m;
+  existingPoint.elevationFt = pt.elevation_m != null ? pt.elevation_m * 3.28084 : null;
+
+  existingPoint.instPace = pt.inst_pace_min_per_mile ?? existingPoint.instPace;
+  existingPoint.avgPace = pt.avg_pace_min_per_mile ?? existingPoint.avgPace;
+  existingPoint.distanceM = pt.distance_m ?? existingPoint.distanceM;
+
+  addOrUpdatePath();
+  updateSupabaseViewerStats();
+
+  // 🔥 Update stats display if it's the latest point
+  if (pathCoords.length > 0) {
+    const last = pathCoords[pathCoords.length - 1];
+
+    if (last && existingPoint.timestamp === last.timestamp && lastViewerData) {
+      lastViewerData.elevationFt =
+        existingPoint.elevationFt ?? lastViewerData.elevationFt;
+
+      updateStatsDisplay(
+        lastViewerData.distance,
+        lastViewerData.pace,
+        lastViewerData.avgPace,
+        lastViewerElapsed,
+        lastViewerData.elevationFt ?? null
+      );
+    }
+  }
+}  // <-- ONLY ONE closing brace for payload
+
+)  // <-- closes .on(...)
+.subscribe();
 
       if (isLive && viewerTimerId === null) {
         viewerTimerId = setInterval(() => {
@@ -1165,6 +1198,12 @@ let lastViewerSequenceNum = data.length > 0
 
 viewerConnectionWatchId = setInterval(async () => {
   if (!isLive) return;
+  if (!lastPointReceivedTime) return;
+
+  const secondsSinceLastPoint = (Date.now() - lastPointReceivedTime) / 1000;
+
+  // Realtime is working, so do nothing.
+  if (secondsSinceLastPoint < 12) return;
 
   const { data: newPoints, error } = await supabaseClient
     .from("run_points")
@@ -1174,7 +1213,7 @@ viewerConnectionWatchId = setInterval(async () => {
     .order("sequence_num", { ascending: true });
 
   if (error) {
-    console.warn("Viewer polling failed:", error);
+    console.warn("Viewer backup polling failed:", error);
     return;
   }
 
@@ -1188,7 +1227,10 @@ viewerConnectionWatchId = setInterval(async () => {
     }
 
     newPoints.forEach(pt => {
-      lastViewerSequenceNum = Math.max(lastViewerSequenceNum, pt.sequence_num ?? lastViewerSequenceNum);
+      lastViewerSequenceNum = Math.max(
+        lastViewerSequenceNum,
+        pt.sequence_num ?? lastViewerSequenceNum
+      );
 
       pathCoords.push({
         lat: pt.lat,
@@ -1217,20 +1259,17 @@ viewerConnectionWatchId = setInterval(async () => {
     }
 
     if (viewerFollowing) {
-      map.flyTo({ center: [last.lon, last.lat], zoom: 16 });
+      map.jumpTo({ center: [last.lon, last.lat], zoom: 16 });
     }
 
     return;
   }
 
-  const secondsSinceLastPoint = (Date.now() - lastPointReceivedTime) / 1000;
-
-  // Give it longer than 15 seconds before warning.
   if (secondsSinceLastPoint > 45 && !viewerConnectionLost) {
     viewerConnectionLost = true;
     showViewerStatus("Signal lost — waiting for runner", "bad");
   }
-}, 5000);
+}, 15000);
     }
 
     // → Firebase legacy fallback viewer function kept for older Firebase-only runs

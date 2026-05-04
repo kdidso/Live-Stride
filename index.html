@@ -1043,7 +1043,9 @@ fetchElevation(coord[1], coord[0]).then(elev => {
         avgPace: pt.avg_pace_min_per_mile ?? 0,
         distanceM: pt.distance_m ?? null
       }));
-
+let lastViewerSequenceNum = data.length > 0
+  ? Math.max(...data.map(pt => pt.sequence_num ?? 0))
+  : -1;
       addOrUpdatePath();
       updateSupabaseViewerStats();
 
@@ -1123,6 +1125,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
           },
           payload => {
             const pt = payload.new;
+            lastViewerSequenceNum = Math.max(lastViewerSequenceNum, pt.sequence_num ?? lastViewerSequenceNum);
             const ptTime = new Date(pt.recorded_at).getTime();
 
             const existingPoint = pathCoords.find(p => p.timestamp === ptTime);
@@ -1160,18 +1163,74 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 
       lastPointReceivedTime = Date.now();
 
-      viewerConnectionWatchId = setInterval(() => {
-        if (!isLive) return;
-        if (!lastPointReceivedTime) return;
+viewerConnectionWatchId = setInterval(async () => {
+  if (!isLive) return;
 
-        const now = Date.now();
-        const secondsSinceLastPoint = (now - lastPointReceivedTime) / 1000;
+  const { data: newPoints, error } = await supabaseClient
+    .from("run_points")
+    .select("*")
+    .eq("run_id", runId)
+    .gt("sequence_num", lastViewerSequenceNum)
+    .order("sequence_num", { ascending: true });
 
-        if (secondsSinceLastPoint > 15 && !viewerConnectionLost) {
-          viewerConnectionLost = true;
-          showViewerStatus("Signal lost — waiting for runner", "bad");
-        }
-      }, 3000);
+  if (error) {
+    console.warn("Viewer polling failed:", error);
+    return;
+  }
+
+  if (newPoints && newPoints.length > 0) {
+    lastPointReceivedTime = Date.now();
+
+    if (viewerConnectionLost) {
+      viewerConnectionLost = false;
+      showViewerStatus("Runner reconnected", "good");
+      hideViewerStatusSoon();
+    }
+
+    newPoints.forEach(pt => {
+      lastViewerSequenceNum = Math.max(lastViewerSequenceNum, pt.sequence_num ?? lastViewerSequenceNum);
+
+      pathCoords.push({
+        lat: pt.lat,
+        lon: pt.lon,
+        timestamp: new Date(pt.recorded_at).getTime(),
+        time: pt.recorded_at,
+        elevation: pt.elevation_m,
+        elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+        instPace: pt.inst_pace_min_per_mile ?? 0,
+        avgPace: pt.avg_pace_min_per_mile ?? 0,
+        distanceM: pt.distance_m ?? null
+      });
+    });
+
+    addOrUpdatePath();
+    updateSupabaseViewerStats();
+
+    const last = pathCoords[pathCoords.length - 1];
+
+    if (!viewerMarker) {
+      viewerMarker = new maplibregl.Marker({ color: "red" })
+        .setLngLat([last.lon, last.lat])
+        .addTo(map);
+    } else {
+      viewerMarker.setLngLat([last.lon, last.lat]);
+    }
+
+    if (viewerFollowing) {
+      map.flyTo({ center: [last.lon, last.lat], zoom: 16 });
+    }
+
+    return;
+  }
+
+  const secondsSinceLastPoint = (Date.now() - lastPointReceivedTime) / 1000;
+
+  // Give it longer than 15 seconds before warning.
+  if (secondsSinceLastPoint > 45 && !viewerConnectionLost) {
+    viewerConnectionLost = true;
+    showViewerStatus("Signal lost — waiting for runner", "bad");
+  }
+}, 5000);
     }
 
     // → Firebase legacy fallback viewer function kept for older Firebase-only runs

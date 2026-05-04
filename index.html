@@ -982,16 +982,25 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 
         li.textContent = `${run.runner_name} — ${status} — ${started}`;
 
-        li.onclick = () => {
-          searchInput.value = run.runner_name;
-          viewerFollowing = true;
-          selectedRunner = run.id;
-          trackRunnerSupabase(run.id, run.is_live);
+li.onclick = () => {
+  searchInput.value = run.runner_name;
+  viewerFollowing = true;
+  selectedRunner = run.id;
 
-          suggestionsList.innerHTML = "";
-          suggestionsList.style.display = "none";
-          searchInput.blur();
-        };
+  if (run.is_live) {
+    const firebaseKey = run.runner_name
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "-");
+
+    trackRunner(firebaseKey);
+  } else {
+    trackRunnerSupabase(run.id, false);
+  }
+
+  suggestionsList.innerHTML = "";
+  suggestionsList.style.display = "none";
+  searchInput.blur();
+};
 
         suggestionsList.appendChild(li);
       });

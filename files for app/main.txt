@@ -127,6 +127,30 @@ const uploadStravaBtn = document.getElementById("uploadStravaBtn");
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
+function logGpsCallbackAudit(locationTime = Date.now()) {
+  try {
+    const key = "livestride_gps_callback_audit";
+    const existing = JSON.parse(localStorage.getItem(key) || "[]");
+
+    existing.push({
+      appTime: new Date().toISOString(),
+      locationTime: new Date(locationTime).toISOString(),
+      online: navigator.onLine,
+      hidden: document.hidden
+    });
+
+    localStorage.setItem(key, JSON.stringify(existing.slice(-500)));
+  } catch (err) {
+    console.warn("GPS audit log failed:", err);
+  }
+}
+
+function showGpsCallbackAudit() {
+  const rows = JSON.parse(localStorage.getItem("livestride_gps_callback_audit") || "[]");
+  console.table(rows);
+  alert(`GPS callback audit entries: ${rows.length}. Check console table.`);
+}
+
 function queueFirebaseFinish() {
   localStorage.setItem(FIREBASE_FINISH_QUEUE_KEY, "true");
 }
@@ -816,7 +840,7 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   const now = typeof locationTime === "number"
     ? locationTime
     : new Date(locationTime).getTime();
-
+    logGpsCallbackAudit(now);
   if (lastPointTime && now <= lastPointTime) {
     console.warn("Ignoring out-of-order location point:", new Date(now).toISOString());
     return;

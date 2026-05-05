@@ -82,7 +82,12 @@ def cleanup_old_supabase_runs():
         params=params,
         timeout=30
     )
-    response.raise_for_status()
+    if not response.ok:
+        print("Supabase GET failed")
+        print("Status:", response.status_code)
+        print("URL:", response.url)
+        print("Response text:", response.text)
+        response.raise_for_status()
 
     old_runs = response.json()
 

@@ -1,0 +1,29 @@
+LiveStride Native Plugin Rebuild Process
+
+Open command prompt in the LiveStride project folder.
+Run:
+
+npx cap sync android
+
+Run:
+
+npx cap open android
+
+In Android Studio:
+
+File > Sync Project with Gradle Files
+
+Then:
+
+Build > Clean Project
+
+Then:
+
+Build > Compile All Sources
+
+Then build APK:
+
+Build > Generate App Bundles or APKs > Generate APK
+
+Wait for build to finish.
+Install the APK onto the phone.

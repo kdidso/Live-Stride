@@ -1,0 +1,235 @@
+package com.kdidso.livestride;
+
+import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.os.Build;
+import android.os.IBinder;
+import android.os.Looper;
+
+import androidx.annotation.Nullable;
+import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
+
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
+
+import org.json.JSONObject;
+
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.time.Instant;
+
+public class LiveStrideNativeTrackerService extends Service {
+
+    private static final String CHANNEL_ID = "livestride_native_tracker";
+    private static final int NOTIFICATION_ID = 44221;
+
+    public static final String ACTION_START = "START_NATIVE_TEST_RUN";
+    public static final String ACTION_STOP = "STOP_NATIVE_TEST_RUN";
+
+    private FusedLocationProviderClient fusedLocationClient;
+    private LocationCallback locationCallback;
+
+    private String supabaseUrl;
+    private String supabaseAnonKey;
+    private String runId;
+    private String runnerName;
+    private String nativeSessionId;
+
+    private int sequenceNum = 0;
+    private boolean isTracking = false;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        createNotificationChannel();
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent == null || intent.getAction() == null) {
+            return START_NOT_STICKY;
+        }
+
+        if (ACTION_START.equals(intent.getAction())) {
+            supabaseUrl = intent.getStringExtra("supabaseUrl");
+            supabaseAnonKey = intent.getStringExtra("supabaseAnonKey");
+            runId = intent.getStringExtra("runId");
+            runnerName = intent.getStringExtra("runnerName");
+            nativeSessionId = intent.getStringExtra("nativeSessionId");
+
+            if (runnerName == null || runnerName.trim().isEmpty()) {
+                runnerName = "Native Test Runner";
+            }
+
+            if (nativeSessionId == null || nativeSessionId.trim().isEmpty()) {
+                nativeSessionId = "native_" + System.currentTimeMillis();
+            }
+
+            startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
+            startLocationUpdates();
+
+            return START_STICKY;
+        }
+
+        if (ACTION_STOP.equals(intent.getAction())) {
+            stopLocationUpdates();
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        return START_NOT_STICKY;
+    }
+
+    private void startLocationUpdates() {
+        if (isTracking) return;
+
+        if (supabaseUrl == null || supabaseAnonKey == null) {
+            stopSelf();
+            return;
+        }
+
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+                && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            stopSelf();
+            return;
+        }
+
+        LocationRequest locationRequest = new LocationRequest.Builder(
+                Priority.PRIORITY_HIGH_ACCURACY,
+                1000L
+        )
+                .setMinUpdateIntervalMillis(1000L)
+                .setMinUpdateDistanceMeters(1.0f)
+                .build();
+
+        locationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(LocationResult locationResult) {
+                if (locationResult == null) return;
+
+                for (Location location : locationResult.getLocations()) {
+                    if (location == null) continue;
+                    uploadNativePoint(location);
+                }
+            }
+        };
+
+        fusedLocationClient.requestLocationUpdates(
+                locationRequest,
+                locationCallback,
+                Looper.getMainLooper()
+        );
+
+        isTracking = true;
+    }
+
+    private void stopLocationUpdates() {
+        if (locationCallback != null && fusedLocationClient != null) {
+            fusedLocationClient.removeLocationUpdates(locationCallback);
+        }
+
+        locationCallback = null;
+        isTracking = false;
+    }
+
+    private void uploadNativePoint(Location location) {
+        final int thisSequence = sequenceNum++;
+
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject();
+
+                if (runId != null && !runId.trim().isEmpty()) {
+                    body.put("run_id", runId);
+                }
+
+                body.put("runner_name", runnerName);
+                body.put("source", "native");
+                body.put("native_session_id", nativeSessionId);
+                body.put("sequence_num", thisSequence);
+                body.put("lat", location.getLatitude());
+                body.put("lon", location.getLongitude());
+                body.put("accuracy", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL);
+                body.put("recorded_at", Instant.ofEpochMilli(location.getTime()).toString());
+                body.put("app_state", "foreground_service");
+                body.put("note", "Inserted from native Android GPS service");
+
+                URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
+
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("apikey", supabaseAnonKey);
+                conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("Accept-Profile", "public");
+                conn.setRequestProperty("Content-Profile", "public");
+                conn.setRequestProperty("Prefer", "return=minimal");
+                conn.setDoOutput(true);
+
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(body.toString().getBytes("UTF-8"));
+                }
+
+                int code = conn.getResponseCode();
+
+                if (code < 200 || code >= 300) {
+                    System.out.println("LiveStride native point upload failed. HTTP " + code);
+                }
+
+                conn.disconnect();
+
+            } catch (Exception e) {
+                System.out.println("LiveStride native point upload exception: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    private Notification buildNotification(String text) {
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("LiveStride Native Tracker")
+                .setContentText(text)
+                .setSmallIcon(getApplicationInfo().icon)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build();
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "LiveStride Native Tracker",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
+        }
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}

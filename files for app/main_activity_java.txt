@@ -1,84 +1,30 @@
 package com.kdidso.livestride;
 
-import com.getcapacitor.JSObject;
-import com.getcapacitor.Plugin;
-import com.getcapacitor.PluginCall;
-import com.getcapacitor.PluginMethod;
-import com.getcapacitor.annotation.CapacitorPlugin;
+import static androidx.core.content.ContextCompat.getSystemService;
 
-@CapacitorPlugin(name = "LiveStrideNativeTracker")
-public class LiveStrideNativeTrackerPlugin extends Plugin {
+import android.os.Bundle;
+import com.getcapacitor.BridgeActivity;
 
-    @PluginMethod
-    public void ping(PluginCall call) {
-        JSObject result = new JSObject();
-        result.put("ok", true);
-        result.put("message", "LiveStrideNativeTracker native plugin is loaded.");
-        call.resolve(result);
-    }
+import com.equimaps.capacitor_background_geolocation.BackgroundGeolocation;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.os.Build;
 
-    @PluginMethod
-    public void insertTestPoint(PluginCall call) {
-        String supabaseUrl = call.getString("supabaseUrl");
-        String supabaseAnonKey = call.getString("supabaseAnonKey");
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(BackgroundGeolocation.class);
+        registerPlugin(LiveStrideNativeTrackerPlugin.class);
 
-        double lat = call.getDouble("lat", 37.1);
-        double lon = call.getDouble("lon", -113.6);
+        super.onCreate(savedInstanceState);
 
-        if (supabaseUrl == null || supabaseAnonKey == null) {
-            call.reject("Missing Supabase URL or anon key.");
-            return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    "background_location",
+                    "Background Location",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            getSystemService(NotificationManager.class).createNotificationChannel(channel);
         }
-
-        new Thread(() -> {
-            try {
-                org.json.JSONObject body = new org.json.JSONObject();
-                body.put("runner_name", "Native Test");
-                body.put("source", "native");
-                body.put("native_session_id", "manual_test");
-                body.put("sequence_num", 1);
-                body.put("lat", lat);
-                body.put("lon", lon);
-                body.put("accuracy", 5.0);
-                body.put("recorded_at", java.time.Instant.now().toString());
-                body.put("app_state", "manual_plugin_test");
-                body.put("note", "Inserted from native Android plugin");
-
-                java.net.URL url = new java.net.URL(
-                        supabaseUrl + "/rest/v1/run_points_native_test"
-                );
-
-                java.net.HttpURLConnection conn =
-                        (java.net.HttpURLConnection) url.openConnection();
-
-                conn.setRequestMethod("POST");
-                conn.setRequestProperty("apikey", supabaseAnonKey);
-                conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setRequestProperty("Prefer", "return=representation");
-                conn.setDoOutput(true);
-
-                try (java.io.OutputStream os = conn.getOutputStream()) {
-                    os.write(body.toString().getBytes("UTF-8"));
-                }
-
-                int code = conn.getResponseCode();
-
-                if (code >= 200 && code < 300) {
-                    JSObject result = new JSObject();
-                    result.put("ok", true);
-                    result.put("status", code);
-                    result.put("message", "Native test point inserted.");
-                    call.resolve(result);
-                } else {
-                    call.reject("Supabase insert failed. HTTP status: " + code);
-                }
-
-                conn.disconnect();
-
-            } catch (Exception e) {
-                call.reject("Native insert exception: " + e.getMessage(), e);
-            }
-        }).start();
     }
 }

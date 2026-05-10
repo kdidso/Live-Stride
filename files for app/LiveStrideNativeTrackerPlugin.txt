@@ -1,5 +1,8 @@
 package com.kdidso.livestride;
 
+import android.content.Intent;
+import android.os.Build;
+
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -55,9 +58,10 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                 conn.setRequestProperty("apikey", supabaseAnonKey);
                 conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
                 conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("Accept", "application/json");
                 conn.setRequestProperty("Accept-Profile", "public");
                 conn.setRequestProperty("Content-Profile", "public");
-                conn.setRequestProperty("Prefer", "return=representation");
+                conn.setRequestProperty("Prefer", "return=minimal");
                 conn.setDoOutput(true);
 
                 try (java.io.OutputStream os = conn.getOutputStream()) {
@@ -82,5 +86,59 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                 call.reject("Native insert exception: " + e.getMessage(), e);
             }
         }).start();
+    }
+
+    @PluginMethod
+    public void startNativeTestRun(PluginCall call) {
+        String supabaseUrl = call.getString("supabaseUrl");
+        String supabaseAnonKey = call.getString("supabaseAnonKey");
+        String runId = call.getString("runId");
+        String runnerName = call.getString("runnerName", "Native Test Runner");
+        String nativeSessionId = call.getString(
+                "nativeSessionId",
+                "native_" + System.currentTimeMillis()
+        );
+
+        if (supabaseUrl == null || supabaseAnonKey == null) {
+            call.reject("Missing Supabase URL or anon key.");
+            return;
+        }
+
+        Intent intent = new Intent(getContext(), LiveStrideNativeTrackerService.class);
+        intent.setAction(LiveStrideNativeTrackerService.ACTION_START);
+        intent.putExtra("supabaseUrl", supabaseUrl);
+        intent.putExtra("supabaseAnonKey", supabaseAnonKey);
+        intent.putExtra("runId", runId);
+        intent.putExtra("runnerName", runnerName);
+        intent.putExtra("nativeSessionId", nativeSessionId);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getContext().startForegroundService(intent);
+        } else {
+            getContext().startService(intent);
+        }
+
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        result.put("message", "Native GPS test service started.");
+        result.put("nativeSessionId", nativeSessionId);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void stopNativeTestRun(PluginCall call) {
+        Intent intent = new Intent(getContext(), LiveStrideNativeTrackerService.class);
+        intent.setAction(LiveStrideNativeTrackerService.ACTION_STOP);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getContext().startForegroundService(intent);
+        } else {
+            getContext().startService(intent);
+        }
+
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        result.put("message", "Native GPS test service stop requested.");
+        call.resolve(result);
     }
 }

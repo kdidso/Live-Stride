@@ -55,6 +55,8 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                 conn.setRequestProperty("apikey", supabaseAnonKey);
                 conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
                 conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("Accept-Profile", "public");
+                conn.setRequestProperty("Content-Profile", "public");
                 conn.setRequestProperty("Prefer", "return=representation");
                 conn.setDoOutput(true);
 

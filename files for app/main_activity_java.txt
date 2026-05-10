@@ -1,0 +1,31 @@
+package com.kdidso.livestride;
+
+import static androidx.core.content.ContextCompat.getSystemService;
+
+import android.os.Bundle;
+import com.getcapacitor.BridgeActivity;
+
+import com.equimaps.capacitor_background_geolocation.BackgroundGeolocation;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.os.Build;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        // Register the plugin
+        registerPlugin(BackgroundGeolocation.class);
+
+        // Create notification channel for Android Oreo and above
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    "background_location",
+                    "Background Location",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            getSystemService(NotificationManager.class).createNotificationChannel(channel);
+        }
+    }
+}

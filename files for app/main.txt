@@ -1,5 +1,5 @@
 // → Capacitor plugins
-const { BackgroundGeolocation, Filesystem, Share, LiveStrideSync } = Capacitor.Plugins;
+const { BackgroundGeolocation, Filesystem, Share, LiveStrideSync, LiveStrideNativeTracker } = Capacitor.Plugins;
 const Directory = Filesystem.Directory;
 const Encoding  = Filesystem.Encoding;
 
@@ -679,6 +679,39 @@ async function nativeFinishSync(finishPayload) {
   }
 }
 
+async function startNativeComparisonRun() {
+  if (!LiveStrideNativeTracker || !activeRunId || !runnerName) return false;
+
+  try {
+    const result = await LiveStrideNativeTracker.startNativeTestRun({
+      supabaseUrl: SUPABASE_URL,
+      supabaseAnonKey: SUPABASE_ANON_KEY,
+      runId: activeRunId,
+      runnerName,
+      nativeSessionId: `native_compare_${activeRunId}`
+    });
+
+    console.log("Native comparison tracker started:", result);
+    return true;
+  } catch (err) {
+    console.warn("Native comparison tracker failed to start:", err);
+    return false;
+  }
+}
+
+async function stopNativeComparisonRun() {
+  if (!LiveStrideNativeTracker) return false;
+
+  try {
+    const result = await LiveStrideNativeTracker.stopNativeTestRun();
+    console.log("Native comparison tracker stopped:", result);
+    return true;
+  } catch (err) {
+    console.warn("Native comparison tracker failed to stop:", err);
+    return false;
+  }
+}
+
 async function forceFlushAll() {
   for (let i = 0; i < 5; i++) {
     await flushFirebaseFinish();
@@ -1120,6 +1153,7 @@ async function stopTracking() {
       .catch(err => console.warn("Failed to remove background watcher:", err));
     bgWatchId = null;
   }
+await stopNativeComparisonRun();
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -1163,7 +1197,7 @@ if (activeRunId) {
 queueFinishEvent(activeRunId, finishPayload);
 queueFirebaseFinish();
 
-await nativeFinishSync(finishPayload);
+// await nativeFinishSync(finishPayload);
 
 // Keep the JavaScript flush too as a backup when the WebView is still awake.
 await forceFlushAll();
@@ -1218,7 +1252,7 @@ broadcastBtn.onclick = async () => {
 
   activeRunId = newRun.id;
   pointSequence = 0;
-
+  await startNativeComparisonRun();
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
   broadcastRef = db.ref(`runners/${safeName}`);
 

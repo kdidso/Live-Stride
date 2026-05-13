@@ -238,6 +238,8 @@
     let viewerMarker = null;
     let activeListener = null;
     let activeSupabaseChannel = null;
+    let activeNativeSupabaseChannel = null;
+    let nativePathCoords = [];
     let viewerTimerId = null;
     let lastViewerData = null;
     let lastViewerElapsed = 0;
@@ -409,7 +411,41 @@ setTimeout(() => {
         map.getSource("run-path").setData(data);
       }
     }
+function addOrUpdateNativePath() {
+  const coords = nativePathCoords.map(pt => [pt.lon, pt.lat]);
 
+  const data = {
+    type: "Feature",
+    geometry: {
+      type: "LineString",
+      coordinates: coords
+    }
+  };
+
+  if (!map.getSource("native-run-path")) {
+    map.addSource("native-run-path", {
+      type: "geojson",
+      data
+    });
+
+    map.addLayer({
+      id: "native-run-line",
+      type: "line",
+      source: "native-run-path",
+      layout: {
+        "line-join": "round",
+        "line-cap": "round"
+      },
+      paint: {
+        "line-color": "#B000FF",
+        "line-width": 4,
+        "line-opacity": 0.9
+      }
+    });
+  } else {
+    map.getSource("native-run-path").setData(data);
+  }
+}
     function clearRunPathLayer() {
       if (map.getLayer("run-line")) {
         map.removeLayer("run-line");
@@ -418,6 +454,16 @@ setTimeout(() => {
         map.removeSource("run-path");
       }
     }
+
+function clearNativeRunPathLayer() {
+  if (map.getLayer("native-run-line")) {
+    map.removeLayer("native-run-line");
+  }
+
+  if (map.getSource("native-run-path")) {
+    map.removeSource("native-run-path");
+  }
+}
 
     function showConnectionStatus(message, type = "info") {
       if (!connectionStatusEl) {
@@ -555,7 +601,8 @@ setTimeout(() => {
 
     function resetRunDisplay() {
       pathCoords = [];
-      totalDistanceMeters = 0;
+      nativePathCoords = [];
+      totalDistanceMeters = 0;;
       latestRunnerDistance = 0;
       latestRunnerPace = 0;
       latestRunnerAvgPace = 0;
@@ -564,7 +611,7 @@ setTimeout(() => {
       lastViewerElapsed = 0;
 
       clearRunPathLayer();
-
+      clearNativeRunPathLayer();
       if (viewerMarker) {
         viewerMarker.remove();
         viewerMarker = null;
@@ -799,6 +846,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 
     function startTracking() {
       pathCoords = [];
+      nativePathCoords = [];
       totalDistanceMeters = 0;
       startTime = null;
       lastPointTime = null;
@@ -810,7 +858,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       pointSequence = 0;
 
       clearRunPathLayer();
-
+      clearNativeRunPathLayer();
       startBtn.disabled = true;
       stopBtn.disabled = false;
       statsBar.style.display = "block";
@@ -998,15 +1046,7 @@ li.onclick = () => {
   viewerFollowing = true;
   selectedRunner = run.id;
 
-  if (run.is_live) {
-    const firebaseKey = run.runner_name
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "-");
-
-    trackRunner(firebaseKey);
-  } else {
-    trackRunnerSupabase(run.id, false);
-  }
+  trackRunnerSupabase(run.id, run.is_live);
 
   suggestionsList.innerHTML = "";
   suggestionsList.style.display = "none";
@@ -1017,6 +1057,84 @@ li.onclick = () => {
       });
     };
 
+async function startNativePathComparison(runId) {
+  if (!runId) return;
+
+  if (activeNativeSupabaseChannel) {
+    supabaseClient.removeChannel(activeNativeSupabaseChannel);
+    activeNativeSupabaseChannel = null;
+  }
+
+  nativePathCoords = [];
+  clearNativeRunPathLayer();
+
+  const { data, error } = await supabaseClient
+    .from("run_points_native_test")
+    .select("*")
+    .eq("run_id", runId)
+    .order("sequence_num", { ascending: true });
+
+  if (error) {
+    console.error("Initial native path load error:", error);
+    return;
+  }
+
+  let lastNativeSequenceNum = data.length > 0
+    ? Math.max(...data.map(pt => pt.sequence_num ?? 0))
+    : -1;
+
+  nativePathCoords = data.map(pt => ({
+    lat: pt.lat,
+    lon: pt.lon,
+    timestamp: new Date(pt.recorded_at).getTime(),
+    time: pt.recorded_at,
+    elevation: pt.elevation_m,
+    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+    instPace: pt.inst_pace_min_per_mile ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? 0,
+    distanceM: pt.distance_m ?? null
+  }));
+
+  addOrUpdateNativePath();
+
+  activeNativeSupabaseChannel = supabaseClient
+    .channel(`native_run_${runId.replace(/-/g, "_")}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "run_points_native_test",
+        filter: `run_id=eq.${runId}`
+      },
+      payload => {
+        const pt = payload.new;
+
+        lastNativeSequenceNum = Math.max(
+          lastNativeSequenceNum,
+          pt.sequence_num ?? lastNativeSequenceNum
+        );
+
+        nativePathCoords.push({
+          lat: pt.lat,
+          lon: pt.lon,
+          timestamp: new Date(pt.recorded_at).getTime(),
+          time: pt.recorded_at,
+          elevation: pt.elevation_m,
+          elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+          instPace: pt.inst_pace_min_per_mile ?? 0,
+          avgPace: pt.avg_pace_min_per_mile ?? 0,
+          distanceM: pt.distance_m ?? null
+        });
+
+        addOrUpdateNativePath();
+      }
+    )
+    .subscribe();
+
+  return () => lastNativeSequenceNum;
+}
+    
     async function trackRunnerSupabase(runId, isLive = false) {
       if (activeListener) {
         activeListener.off();
@@ -1027,6 +1145,10 @@ li.onclick = () => {
         supabaseClient.removeChannel(activeSupabaseChannel);
         activeSupabaseChannel = null;
       }
+if (activeNativeSupabaseChannel) {
+  supabaseClient.removeChannel(activeNativeSupabaseChannel);
+  activeNativeSupabaseChannel = null;
+}
 
       if (viewerTimerId !== null) {
         clearInterval(viewerTimerId);
@@ -1039,7 +1161,9 @@ li.onclick = () => {
       }
 
       pathCoords = [];
+      nativePathCoords = [];
       clearRunPathLayer();
+      clearNativeRunPathLayer();
 
       const { data, error } = await supabaseClient
         .from("run_points")
@@ -1068,7 +1192,7 @@ let lastViewerSequenceNum = data.length > 0
   : -1;
       addOrUpdatePath();
       updateSupabaseViewerStats();
-
+      await startNativePathComparison(runId);
       if (pathCoords.length > 0) {
         const last = pathCoords[pathCoords.length - 1];
 
@@ -1298,7 +1422,10 @@ viewerConnectionWatchId = setInterval(async () => {
         supabaseClient.removeChannel(activeSupabaseChannel);
         activeSupabaseChannel = null;
       }
-
+if (activeNativeSupabaseChannel) {
+  supabaseClient.removeChannel(activeNativeSupabaseChannel);
+  activeNativeSupabaseChannel = null;
+}
       if (activeListener) {
         activeListener.off();
       }

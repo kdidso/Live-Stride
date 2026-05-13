@@ -88,7 +88,9 @@ let pointSequence = 0;
 let viewerMarker = null;
 let activeListener = null;
 let activeSupabaseChannel = null;
-let viewerTimerId = null;
+let activeNativeSupabaseChannel = null;
+let nativePathCoords = [];
+let viewerTimerId = null;;
 let lastViewerData = null;
 let lastViewerElapsed = 0;
 let selectedRunner = null;
@@ -106,6 +108,7 @@ let viewerConnectionLost = false;
 let viewerStatusEl = null;
 let viewerConnectionWatchId = null;
 let runnerSyncHadFailure = false;
+
 
 // → DOM references
 const startBtn = document.getElementById("startBtn");
@@ -444,12 +447,58 @@ function addOrUpdatePath() {
   }
 }
 
+function addOrUpdateNativePath() {
+  const coords = nativePathCoords.map(pt => [pt.lon, pt.lat]);
+
+  const data = {
+    type: "Feature",
+    geometry: {
+      type: "LineString",
+      coordinates: coords
+    }
+  };
+
+  if (!map.getSource("native-run-path")) {
+    map.addSource("native-run-path", {
+      type: "geojson",
+      data
+    });
+
+    map.addLayer({
+      id: "native-run-line",
+      type: "line",
+      source: "native-run-path",
+      layout: {
+        "line-join": "round",
+        "line-cap": "round"
+      },
+      paint: {
+        "line-color": "#B000FF",
+        "line-width": 4,
+        "line-opacity": 0.9
+      }
+    });
+  } else {
+    map.getSource("native-run-path").setData(data);
+  }
+}
+
 function clearRunPathLayer() {
   if (map.getLayer("run-line")) {
     map.removeLayer("run-line");
   }
   if (map.getSource("run-path")) {
     map.removeSource("run-path");
+  }
+}
+
+function clearNativeRunPathLayer() {
+  if (map.getLayer("native-run-line")) {
+    map.removeLayer("native-run-line");
+  }
+
+  if (map.getSource("native-run-path")) {
+    map.removeSource("native-run-path");
   }
 }
 
@@ -755,6 +804,7 @@ window.addEventListener("focus", flushSupabaseQueue);
 
 function resetRunDisplay() {
   pathCoords = [];
+  nativePathCoords = [];
   totalDistanceMeters = 0;
   latestRunnerDistance = 0;
   latestRunnerPace = 0;
@@ -764,6 +814,7 @@ function resetRunDisplay() {
   lastViewerElapsed = 0;
 
   clearRunPathLayer();
+  clearNativeRunPathLayer();
 
   if (viewerMarker) {
     viewerMarker.remove();
@@ -1059,6 +1110,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 }
 async function startTracking() {
   pathCoords = [];
+  nativePathCoords = [];
   totalDistanceMeters = 0;
   startTime = null;
   lastPointTime = null;
@@ -1070,7 +1122,7 @@ async function startTracking() {
   pointSequence = 0;
 
   clearRunPathLayer();
-
+  clearNativeRunPathLayer();
   startBtn.disabled = true;
   stopBtn.disabled = false;
   statsBar.style.display = "block";
@@ -1253,6 +1305,7 @@ broadcastBtn.onclick = async () => {
   activeRunId = newRun.id;
   pointSequence = 0;
   await startNativeComparisonRun();
+  await startNativePathComparison(activeRunId);
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
   broadcastRef = db.ref(`runners/${safeName}`);
 
@@ -1419,6 +1472,73 @@ searchInput.oninput = async () => {
   });
 };
 
+async function startNativePathComparison(runId) {
+  if (!runId) return;
+
+  if (activeNativeSupabaseChannel) {
+    supabaseClient.removeChannel(activeNativeSupabaseChannel);
+    activeNativeSupabaseChannel = null;
+  }
+
+  nativePathCoords = [];
+  clearNativeRunPathLayer();
+
+  const { data, error } = await supabaseClient
+    .from("run_points_native_test")
+    .select("*")
+    .eq("run_id", runId)
+    .order("sequence_num", { ascending: true });
+
+  if (error) {
+    console.error("Initial native path load error:", error);
+    return;
+  }
+
+  nativePathCoords = data.map(pt => ({
+    lat: pt.lat,
+    lon: pt.lon,
+    timestamp: new Date(pt.recorded_at).getTime(),
+    time: pt.recorded_at,
+    elevation: pt.elevation_m,
+    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+    instPace: pt.inst_pace_min_per_mile ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? 0,
+    distanceM: pt.distance_m ?? null
+  }));
+
+  addOrUpdateNativePath();
+
+  activeNativeSupabaseChannel = supabaseClient
+    .channel(`native_run_${runId.replace(/-/g, "_")}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "run_points_native_test",
+        filter: `run_id=eq.${runId}`
+      },
+      payload => {
+        const pt = payload.new;
+
+        nativePathCoords.push({
+          lat: pt.lat,
+          lon: pt.lon,
+          timestamp: new Date(pt.recorded_at).getTime(),
+          time: pt.recorded_at,
+          elevation: pt.elevation_m,
+          elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+          instPace: pt.inst_pace_min_per_mile ?? 0,
+          avgPace: pt.avg_pace_min_per_mile ?? 0,
+          distanceM: pt.distance_m ?? null
+        });
+
+        addOrUpdateNativePath();
+      }
+    )
+    .subscribe();
+}
+
 async function trackRunnerSupabase(runId, isLive = false) {
   if (activeListener) {
     activeListener.off();
@@ -1428,7 +1548,11 @@ async function trackRunnerSupabase(runId, isLive = false) {
   if (activeSupabaseChannel) {
     supabaseClient.removeChannel(activeSupabaseChannel);
     activeSupabaseChannel = null;
-  }
+  }  
+if (activeNativeSupabaseChannel) {
+  supabaseClient.removeChannel(activeNativeSupabaseChannel);
+  activeNativeSupabaseChannel = null;
+}
 
   if (viewerTimerId !== null) {
     clearInterval(viewerTimerId);
@@ -1439,8 +1563,10 @@ if (viewerConnectionWatchId !== null) {
   viewerConnectionWatchId = null;
 }
 
-  pathCoords = [];
-  clearRunPathLayer();
+pathCoords = [];
+nativePathCoords = [];
+clearRunPathLayer();
+clearNativeRunPathLayer();
 
   const { data, error } = await supabaseClient
     .from("run_points")
@@ -1467,7 +1593,7 @@ pathCoords = data.map(pt => ({
 
   addOrUpdatePath();
   updateSupabaseViewerStats();
-
+  await startNativePathComparison(runId);
   if (pathCoords.length > 0) {
     const last = pathCoords[pathCoords.length - 1];
 
@@ -1600,6 +1726,11 @@ function trackRunner(key) {
     supabaseClient.removeChannel(activeSupabaseChannel);
     activeSupabaseChannel = null;
   }
+
+ if (activeNativeSupabaseChannel) {
+  supabaseClient.removeChannel(activeNativeSupabaseChannel);
+  activeNativeSupabaseChannel = null;
+}
 
   if (activeListener) {
     activeListener.off();

@@ -322,6 +322,13 @@ private void uploadNativePoint(Location location) {
             if (code < 200 || code >= 300) {
                 System.out.println("LiveStride native point upload failed. HTTP " + code);
             }
+           updateRunSummary(
+                   lat,
+                   lon,
+                   recordedAt,
+                   finalDistanceMeters,
+                   false
+           );
 
             conn.disconnect();
 
@@ -354,7 +361,60 @@ private void uploadNativePoint(Location location) {
                 manager.createNotificationChannel(channel);
             }
         }
+    }  
+
+private void updateRunSummary(
+        double lat,
+        double lon,
+        String recordedAt,
+        double distanceMeters,
+        boolean finished
+) {
+    if (runId == null || runId.trim().isEmpty()) return;
+
+    HttpURLConnection conn = null;
+
+    try {
+        JSONObject body = new JSONObject();
+        body.put("total_distance_m", distanceMeters);
+        body.put("latest_lat", lat);
+        body.put("latest_lon", lon);
+        body.put("latest_timestamp", recordedAt);
+
+        if (finished) {
+            body.put("is_live", false);
+            body.put("finished_at", Instant.now().toString());
+        }
+
+        URL url = new URL(supabaseUrl + "/rest/v1/runs?id=eq." + runId);
+        conn = (HttpURLConnection) url.openConnection();
+
+        conn.setRequestMethod("PATCH");
+        conn.setRequestProperty("apikey", supabaseAnonKey);
+        conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setRequestProperty("Accept-Profile", "public");
+        conn.setRequestProperty("Content-Profile", "public");
+        conn.setRequestProperty("Prefer", "return=minimal");
+        conn.setDoOutput(true);
+
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(body.toString().getBytes("UTF-8"));
+        }
+
+        int code = conn.getResponseCode();
+
+        if (code < 200 || code >= 300) {
+            System.out.println("LiveStride native run summary update failed. HTTP " + code);
+        }
+
+    } catch (Exception e) {
+        System.out.println("LiveStride native run summary exception: " + e.getMessage());
+    } finally {
+        if (conn != null) conn.disconnect();
     }
+}
 
     @Nullable
     @Override

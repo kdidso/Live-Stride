@@ -932,10 +932,7 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     ? locationTime
     : new Date(locationTime).getTime();
     logGpsCallbackAudit(now);
-if (activeRunId && useNativeProductionTracking) {
-  // Native service owns production tracking, stats, path, and Supabase points.
-  return;
-}
+const nativeOwnsProduction = activeRunId && useNativeProductionTracking;
   if (lastPointTime && now <= lastPointTime) {
     console.warn("Ignoring out-of-order location point:", new Date(now).toISOString());
     return;
@@ -1050,14 +1047,16 @@ if (activeRunId) {
   };
 
 //await safeInsertRunPoint(pointPayload);
-await safeUpdateRunSummary({
-  total_distance_m: totalDistanceMeters,
-  latest_lat: coord[1],
-  latest_lon: coord[0],
-  latest_timestamp: recordedAt
-});
+if (!nativeOwnsProduction) {
+  await safeUpdateRunSummary({
+    total_distance_m: totalDistanceMeters,
+    latest_lat: coord[1],
+    latest_lon: coord[0],
+    latest_timestamp: recordedAt
+  });
 
-flushSupabaseQueue();
+  flushSupabaseQueue();
+}
 
 fetchElevation(coord[1], coord[0]).then(elev => {
   if (elev == null) return;
@@ -1193,7 +1192,6 @@ async function stopTracking() {
     bgWatchId = null;
   }
 await stopNativeComparisonRun();
-useNativeProductionTracking = false;
   startBtn.disabled = false;
   stopBtn.disabled = true;
 
@@ -1224,7 +1222,7 @@ if (activeRunId) {
     ? pathCoords[pathCoords.length - 1]
     : null;
 
-const finishPayload = useNativeProductionTracking
+const finishPayload = wasNativeProductionTracking
   ? {
       is_live: false,
       finished_at: new Date().toISOString()
@@ -1245,7 +1243,10 @@ queueFirebaseFinish();
 
 // Keep the JavaScript flush too as a backup when the WebView is still awake.
 await forceFlushAll();
-}
+useNativeProductionTracking = false;
+}  
+
+useNativeProductionTracking = false;
 
   if (isPrivateMode) {
     savePrivateRunToFile();

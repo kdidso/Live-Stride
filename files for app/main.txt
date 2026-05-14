@@ -1472,6 +1472,94 @@ searchInput.oninput = async () => {
   });
 };
 
+function normalizeRunPoint(pt) {
+  return {
+    sequenceNum: pt.sequence_num ?? null,
+    lat: pt.lat,
+    lon: pt.lon,
+    timestamp: new Date(pt.recorded_at).getTime(),
+    time: pt.recorded_at,
+    elevation: pt.elevation_m,
+    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+    instPace: pt.inst_pace_min_per_mile ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? 0,
+    distanceM: pt.distance_m ?? null
+  };
+}
+
+function sortRunPoints(points) {
+  return points.sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
+}
+
+function upsertSortedRunPoint(pt) {
+  const normalized = normalizeRunPoint(pt);
+
+  const existingIndex = pathCoords.findIndex(p =>
+    p.sequenceNum != null &&
+    normalized.sequenceNum != null &&
+    p.sequenceNum === normalized.sequenceNum
+  );
+
+  if (existingIndex >= 0) {
+    pathCoords[existingIndex] = {
+      ...pathCoords[existingIndex],
+      ...normalized
+    };
+  } else {
+    pathCoords.push(normalized);
+  }
+
+  sortRunPoints(pathCoords);
+}
+
+function normalizeNativeRunPoint(pt) {
+  return {
+    sequenceNum: pt.sequence_num ?? null,
+    lat: pt.lat,
+    lon: pt.lon,
+    timestamp: new Date(pt.recorded_at).getTime(),
+    time: pt.recorded_at,
+    elevation: pt.elevation_m,
+    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+    instPace: pt.inst_pace_min_per_mile ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? 0,
+    distanceM: pt.distance_m ?? null
+  };
+}
+
+function upsertSortedNativeRunPoint(pt) {
+  const normalized = normalizeNativeRunPoint(pt);
+
+  const existingIndex = nativePathCoords.findIndex(p =>
+    p.sequenceNum != null &&
+    normalized.sequenceNum != null &&
+    p.sequenceNum === normalized.sequenceNum
+  );
+
+  if (existingIndex >= 0) {
+    nativePathCoords[existingIndex] = {
+      ...nativePathCoords[existingIndex],
+      ...normalized
+    };
+  } else {
+    nativePathCoords.push(normalized);
+  }
+
+  nativePathCoords.sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
+}
+
 async function startNativePathComparison(runId) {
   if (!runId) return;
 
@@ -1494,17 +1582,15 @@ async function startNativePathComparison(runId) {
     return;
   }
 
-  nativePathCoords = data.map(pt => ({
-    lat: pt.lat,
-    lon: pt.lon,
-    timestamp: new Date(pt.recorded_at).getTime(),
-    time: pt.recorded_at,
-    elevation: pt.elevation_m,
-    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-    instPace: pt.inst_pace_min_per_mile ?? 0,
-    avgPace: pt.avg_pace_min_per_mile ?? 0,
-    distanceM: pt.distance_m ?? null
-  }));
+nativePathCoords = data
+  .map(normalizeNativeRunPoint)
+  .sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
 
   addOrUpdateNativePath();
 
@@ -1521,17 +1607,7 @@ async function startNativePathComparison(runId) {
       payload => {
         const pt = payload.new;
 
-        nativePathCoords.push({
-          lat: pt.lat,
-          lon: pt.lon,
-          timestamp: new Date(pt.recorded_at).getTime(),
-          time: pt.recorded_at,
-          elevation: pt.elevation_m,
-          elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-          instPace: pt.inst_pace_min_per_mile ?? 0,
-          avgPace: pt.avg_pace_min_per_mile ?? 0,
-          distanceM: pt.distance_m ?? null
-        });
+        upsertSortedNativeRunPoint(pt);
 
         addOrUpdateNativePath();
       }
@@ -1579,17 +1655,15 @@ clearNativeRunPathLayer();
     return;
   }
 
-pathCoords = data.map(pt => ({
-  lat: pt.lat,
-  lon: pt.lon,
-  timestamp: new Date(pt.recorded_at).getTime(),
-  time: pt.recorded_at,
-  elevation: pt.elevation_m,
-  elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-  instPace: pt.inst_pace_min_per_mile ?? 0,
-  avgPace: pt.avg_pace_min_per_mile ?? 0,
-  distanceM: pt.distance_m ?? null
-}));
+pathCoords = data
+  .map(normalizeRunPoint)
+  .sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
 
   addOrUpdatePath();
   updateSupabaseViewerStats();
@@ -1631,17 +1705,7 @@ activeSupabaseChannel = supabaseClient
         hideViewerStatusSoon();
       }
 
-      pathCoords.push({
-        lat: pt.lat,
-        lon: pt.lon,
-        timestamp: new Date(pt.recorded_at).getTime(),
-        time: pt.recorded_at,
-        elevation: pt.elevation_m,
-        elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-        instPace: pt.inst_pace_min_per_mile ?? 0,
-        avgPace: pt.avg_pace_min_per_mile ?? 0,
-        distanceM: pt.distance_m ?? null
-      });
+      upsertSortedRunPoint(pt);
 
       addOrUpdatePath();
       updateSupabaseViewerStats();
@@ -1671,8 +1735,12 @@ activeSupabaseChannel = supabaseClient
       const pt = payload.new;
       const ptTime = new Date(pt.recorded_at).getTime();
 
-      const existingPoint = pathCoords.find(p => p.timestamp === ptTime);
-      if (!existingPoint) return;
+      const existingPoint = pathCoords.find(p =>
+        (p.sequenceNum != null && pt.sequence_num != null && p.sequenceNum === pt.sequence_num) ||
+        p.timestamp === ptTime
+      );
+
+if (!existingPoint) return;
 
       existingPoint.elevation = pt.elevation_m;
       existingPoint.elevationFt = pt.elevation_m != null

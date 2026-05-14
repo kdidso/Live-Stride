@@ -1083,17 +1083,14 @@ async function startNativePathComparison(runId) {
     ? Math.max(...data.map(pt => pt.sequence_num ?? 0))
     : -1;
 
-  nativePathCoords = data.map(pt => ({
-    lat: pt.lat,
-    lon: pt.lon,
-    timestamp: new Date(pt.recorded_at).getTime(),
-    time: pt.recorded_at,
-    elevation: pt.elevation_m,
-    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-    instPace: pt.inst_pace_min_per_mile ?? 0,
-    avgPace: pt.avg_pace_min_per_mile ?? 0,
-    distanceM: pt.distance_m ?? null
-  }));
+nativePathCoords = data
+  .map(normalizeNativeRunPoint)
+  .sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
 
   addOrUpdateNativePath();
 
@@ -1115,17 +1112,7 @@ async function startNativePathComparison(runId) {
           pt.sequence_num ?? lastNativeSequenceNum
         );
 
-        nativePathCoords.push({
-          lat: pt.lat,
-          lon: pt.lon,
-          timestamp: new Date(pt.recorded_at).getTime(),
-          time: pt.recorded_at,
-          elevation: pt.elevation_m,
-          elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-          instPace: pt.inst_pace_min_per_mile ?? 0,
-          avgPace: pt.avg_pace_min_per_mile ?? 0,
-          distanceM: pt.distance_m ?? null
-        });
+        upsertSortedNativeRunPoint(pt);
 
         addOrUpdateNativePath();
       }
@@ -1134,6 +1121,88 @@ async function startNativePathComparison(runId) {
 
   return () => lastNativeSequenceNum;
 }
+function normalizeRunPoint(pt) {
+  return {
+    sequenceNum: pt.sequence_num ?? null,
+    lat: pt.lat,
+    lon: pt.lon,
+    timestamp: new Date(pt.recorded_at).getTime(),
+    time: pt.recorded_at,
+    elevation: pt.elevation_m,
+    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+    instPace: pt.inst_pace_min_per_mile ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? 0,
+    distanceM: pt.distance_m ?? null
+  };
+}
+
+function upsertSortedRunPoint(pt) {
+  const normalized = normalizeRunPoint(pt);
+
+  const existingIndex = pathCoords.findIndex(p =>
+    p.sequenceNum != null &&
+    normalized.sequenceNum != null &&
+    p.sequenceNum === normalized.sequenceNum
+  );
+
+  if (existingIndex >= 0) {
+    pathCoords[existingIndex] = {
+      ...pathCoords[existingIndex],
+      ...normalized
+    };
+  } else {
+    pathCoords.push(normalized);
+  }
+
+  pathCoords.sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
+}
+
+function normalizeNativeRunPoint(pt) {
+  return {
+    sequenceNum: pt.sequence_num ?? null,
+    lat: pt.lat,
+    lon: pt.lon,
+    timestamp: new Date(pt.recorded_at).getTime(),
+    time: pt.recorded_at,
+    elevation: pt.elevation_m,
+    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+    instPace: pt.inst_pace_min_per_mile ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? 0,
+    distanceM: pt.distance_m ?? null
+  };
+}
+
+function upsertSortedNativeRunPoint(pt) {
+  const normalized = normalizeNativeRunPoint(pt);
+
+  const existingIndex = nativePathCoords.findIndex(p =>
+    p.sequenceNum != null &&
+    normalized.sequenceNum != null &&
+    p.sequenceNum === normalized.sequenceNum
+  );
+
+  if (existingIndex >= 0) {
+    nativePathCoords[existingIndex] = {
+      ...nativePathCoords[existingIndex],
+      ...normalized
+    };
+  } else {
+    nativePathCoords.push(normalized);
+  }
+
+  nativePathCoords.sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
+}
+    
     
     async function trackRunnerSupabase(runId, isLive = false) {
       if (activeListener) {
@@ -1175,18 +1244,14 @@ if (activeNativeSupabaseChannel) {
         console.error("Initial Supabase run point load error:", error);
         return;
       }
-
-      pathCoords = data.map(pt => ({
-        lat: pt.lat,
-        lon: pt.lon,
-        timestamp: new Date(pt.recorded_at).getTime(),
-        time: pt.recorded_at,
-        elevation: pt.elevation_m,
-        elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-        instPace: pt.inst_pace_min_per_mile ?? 0,
-        avgPace: pt.avg_pace_min_per_mile ?? 0,
-        distanceM: pt.distance_m ?? null
-      }));
+pathCoords = data
+  .map(normalizeRunPoint)
+  .sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
 let lastViewerSequenceNum = data.length > 0
   ? Math.max(...data.map(pt => pt.sequence_num ?? 0))
   : -1;
@@ -1283,9 +1348,10 @@ payload => {
   }
 
   // 🔥 Find the existing point (DO NOT push a new one)
-  const existingPoint = pathCoords.find(p =>
-    p.timestamp === new Date(pt.recorded_at).getTime()
-  );
+const existingPoint = pathCoords.find(p =>
+  (p.sequenceNum != null && pt.sequence_num != null && p.sequenceNum === pt.sequence_num) ||
+  p.timestamp === new Date(pt.recorded_at).getTime()
+);
 
   if (!existingPoint) return;
 
@@ -1376,17 +1442,7 @@ viewerConnectionWatchId = setInterval(async () => {
         pt.sequence_num ?? lastViewerSequenceNum
       );
 
-      pathCoords.push({
-        lat: pt.lat,
-        lon: pt.lon,
-        timestamp: new Date(pt.recorded_at).getTime(),
-        time: pt.recorded_at,
-        elevation: pt.elevation_m,
-        elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-        instPace: pt.inst_pace_min_per_mile ?? 0,
-        avgPace: pt.avg_pace_min_per_mile ?? 0,
-        distanceM: pt.distance_m ?? null
-      });
+      upsertSortedRunPoint(pt)
     });
 
     addOrUpdatePath();

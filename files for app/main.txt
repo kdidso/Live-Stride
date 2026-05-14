@@ -1224,14 +1224,19 @@ if (activeRunId) {
     ? pathCoords[pathCoords.length - 1]
     : null;
 
-  const finishPayload = {
-    is_live: false,
-    finished_at: new Date().toISOString(),
-    total_distance_m: totalDistanceMeters,
-    latest_lat: lastPoint ? lastPoint.lat : null,
-    latest_lon: lastPoint ? lastPoint.lon : null,
-    latest_timestamp: lastPoint ? lastPoint.time : null
-  };
+const finishPayload = useNativeProductionTracking
+  ? {
+      is_live: false,
+      finished_at: new Date().toISOString()
+    }
+  : {
+      is_live: false,
+      finished_at: new Date().toISOString(),
+      total_distance_m: totalDistanceMeters,
+      latest_lat: lastPoint ? lastPoint.lat : null,
+      latest_lon: lastPoint ? lastPoint.lon : null,
+      latest_timestamp: lastPoint ? lastPoint.time : null
+    };
 
 queueFinishEvent(activeRunId, finishPayload);
 queueFirebaseFinish();

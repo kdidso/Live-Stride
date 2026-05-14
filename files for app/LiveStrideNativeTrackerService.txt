@@ -206,8 +206,6 @@ private Double fetchElevationMeters(double lat, double lon) {
 }
 
 private void uploadNativePoint(Location location) {
-    final int thisSequence = sequenceNum++;
-
     final double lat = location.getLatitude();
     final double lon = location.getLongitude();
     final float accuracy = location.hasAccuracy() ? location.getAccuracy() : -1f;
@@ -231,23 +229,33 @@ private void uploadNativePoint(Location location) {
         double speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0.0;
         double speedMph = speedMps * 2.23694;
 
-        boolean validMovement =
-                segmentMeters >= 1.0 &&
-                elapsedSeconds > 0 &&
-                speedMph >= 0.3 &&
-                speedMph <= 140.0;
+        if (segmentMeters < 1.0) {
+            System.out.println("LiveStride native ignored tiny GPS movement: " + segmentMeters + " m");
+            return;
+        }
 
-        if (validMovement) {
-            totalDistanceMeters += segmentMeters;
+        if (elapsedSeconds <= 0.0) {
+            System.out.println("LiveStride native ignored zero/negative time point: " + elapsedSeconds);
+            return;
+        }
 
-            double segmentMiles = segmentMeters / 1609.34;
-            double elapsedMinutes = elapsedSeconds / 60.0;
+        if (speedMph < 0.3) {
+            System.out.println("LiveStride native ignored low-speed GPS drift: " + speedMph + " mph");
+            return;
+        }
 
-            if (segmentMiles > 0) {
-                instPaceMinPerMile = elapsedMinutes / segmentMiles;
-            }
-        } else {
-            instPaceMinPerMile = 0.0;
+        if (speedMph > 140.0) {
+            System.out.println("LiveStride native ignored unrealistic GPS jump: " + speedMph + " mph");
+            return;
+        }
+
+        totalDistanceMeters += segmentMeters;
+
+        double segmentMiles = segmentMeters / 1609.34;
+        double elapsedMinutes = elapsedSeconds / 60.0;
+
+        if (segmentMiles > 0) {
+            instPaceMinPerMile = elapsedMinutes / segmentMiles;
         }
     }
 
@@ -261,6 +269,7 @@ private void uploadNativePoint(Location location) {
     previousLocation = new Location(location);
     previousPointTimeMs = pointTimeMs;
 
+    final int thisSequence = sequenceNum++;
     final double finalDistanceMeters = totalDistanceMeters;
     final double finalInstPaceMinPerMile = instPaceMinPerMile;
     final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
@@ -288,7 +297,7 @@ private void uploadNativePoint(Location location) {
             body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
             body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
             body.put("app_state", "foreground_service");
-            body.put("note", "Inserted from native Android GPS service with native distance/pace/elevation");
+            body.put("note", "Inserted from native Android GPS service with JS-matching GPS filtering");
 
             URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
 

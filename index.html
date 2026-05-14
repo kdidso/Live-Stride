@@ -1099,6 +1099,20 @@ nativePathCoords = data
   });
 
   addOrUpdateNativePath();
+if (nativePathCoords.length > 0) {
+  const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
+
+  updateViewerFromNativePoint({
+    sequence_num: lastNativePoint.sequenceNum,
+    lat: lastNativePoint.lat,
+    lon: lastNativePoint.lon,
+    recorded_at: lastNativePoint.time,
+    elevation_m: lastNativePoint.elevation,
+    inst_pace_min_per_mile: lastNativePoint.instPace,
+    avg_pace_min_per_mile: lastNativePoint.avgPace,
+    distance_m: lastNativePoint.distanceM
+  });
+}
 
   activeNativeSupabaseChannel = supabaseClient
     .channel(`native_run_${runId.replace(/-/g, "_")}`)
@@ -1121,6 +1135,15 @@ nativePathCoords = data
         upsertSortedNativeRunPoint(pt);
 
         addOrUpdateNativePath();
+        lastPointReceivedTime = Date.now();
+
+if (viewerConnectionLost) {
+  viewerConnectionLost = false;
+  showViewerStatus("Runner reconnected", "good");
+  hideViewerStatusSoon();
+}
+
+updateViewerFromNativePoint(pt);
       }
     )
     .subscribe();
@@ -1210,6 +1233,66 @@ function upsertSortedNativeRunPoint(pt) {
 }
     
     
+function updateViewerFromNativePoint(pt) {
+  const nativePoint = normalizeNativeRunPoint(pt);
+
+  const nativeStartTime = nativePathCoords.length > 0
+    ? nativePathCoords[0].timestamp
+    : nativePoint.timestamp;
+
+  const elapsedMs = Math.max(0, nativePoint.timestamp - nativeStartTime);
+
+  const distanceMi = nativePoint.distanceM != null
+    ? metersToMiles(nativePoint.distanceM)
+    : 0;
+
+  const elevationFt =
+    nativePoint.elevationFt ??
+    lastViewerData?.elevationFt ??
+    latestRunnerElevFt ??
+    null;
+
+  lastViewerData = {
+    distance: distanceMi,
+    pace: nativePoint.instPace ?? 0,
+    avgPace: nativePoint.avgPace ?? 0,
+    startTime: nativeStartTime,
+    current: [nativePoint.lon, nativePoint.lat],
+    elevationFt
+  };
+
+  lastViewerElapsed = elapsedMs;
+
+  updateStatsDisplay(
+    distanceMi,
+    nativePoint.instPace ?? 0,
+    nativePoint.avgPace ?? 0,
+    elapsedMs,
+    elevationFt
+  );
+
+  if (!viewerMarker) {
+    viewerMarker = new maplibregl.Marker({ color: "red" })
+      .setLngLat([nativePoint.lon, nativePoint.lat])
+      .addTo(map);
+  } else {
+    viewerMarker.setLngLat([nativePoint.lon, nativePoint.lat]);
+  }
+
+  if (viewerFollowing) {
+    programmaticViewerMove = true;
+
+    map.flyTo({
+      center: [nativePoint.lon, nativePoint.lat],
+      zoom: 16
+    });
+
+    setTimeout(() => {
+      programmaticViewerMove = false;
+    }, 1000);
+  }
+} 
+    
     async function trackRunnerSupabase(runId, isLive = false) {
       if (activeListener) {
         activeListener.off();
@@ -1264,7 +1347,7 @@ let lastViewerSequenceNum = data.length > 0
       addOrUpdatePath();
       updateSupabaseViewerStats();
       await startNativePathComparison(runId);
-      if (pathCoords.length > 0) {
+      /*if (pathCoords.length > 0) {
         const last = pathCoords[pathCoords.length - 1];
 
         if (!viewerMarker) {
@@ -1280,6 +1363,7 @@ let lastViewerSequenceNum = data.length > 0
           zoom: 16
         });
       }
+      */
 
       activeSupabaseChannel = supabaseClient
         .channel(`run_${runId.replace(/-/g, "_")}`)
@@ -1306,32 +1390,10 @@ let lastViewerSequenceNum = data.length > 0
               hideViewerStatusSoon();
             }
 
-            pathCoords.push({
-              lat: pt.lat,
-              lon: pt.lon,
-              timestamp: new Date(pt.recorded_at).getTime(),
-              time: pt.recorded_at,
-              elevation: pt.elevation_m,
-              elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-              instPace: pt.inst_pace_min_per_mile ?? 0,
-              avgPace: pt.avg_pace_min_per_mile ?? 0,
-              distanceM: pt.distance_m ?? null
-            });
-
+            upsertSortedRunPoint(pt);
             addOrUpdatePath();
-            updateSupabaseViewerStats();
 
-            if (!viewerMarker) {
-              viewerMarker = new maplibregl.Marker({ color: "red" })
-                .setLngLat([pt.lon, pt.lat])
-                .addTo(map);
-            } else {
-              viewerMarker.setLngLat([pt.lon, pt.lat]);
-            }
-
-            if (viewerFollowing) {
-              map.flyTo({ center: [pt.lon, pt.lat], zoom: 16 });
-            }
+// Native points now control viewer stats, marker, and following.
           }
         )
         .on(
@@ -1353,44 +1415,22 @@ payload => {
     hideViewerStatusSoon();
   }
 
-  // 🔥 Find the existing point (DO NOT push a new one)
-const existingPoint = pathCoords.find(p =>
-  (p.sequenceNum != null && pt.sequence_num != null && p.sequenceNum === pt.sequence_num) ||
-  p.timestamp === new Date(pt.recorded_at).getTime()
-);
+  const existingPoint = pathCoords.find(p =>
+    (p.sequenceNum != null && pt.sequence_num != null && p.sequenceNum === pt.sequence_num) ||
+    p.timestamp === new Date(pt.recorded_at).getTime()
+  );
 
   if (!existingPoint) return;
 
-  // 🔥 Update ONLY elevation + values
   existingPoint.elevation = pt.elevation_m;
   existingPoint.elevationFt = pt.elevation_m != null ? pt.elevation_m * 3.28084 : null;
-
   existingPoint.instPace = pt.inst_pace_min_per_mile ?? existingPoint.instPace;
   existingPoint.avgPace = pt.avg_pace_min_per_mile ?? existingPoint.avgPace;
   existingPoint.distanceM = pt.distance_m ?? existingPoint.distanceM;
 
   addOrUpdatePath();
-  updateSupabaseViewerStats();
-
-  // 🔥 Update stats display if it's the latest point
-  if (pathCoords.length > 0) {
-    const last = pathCoords[pathCoords.length - 1];
-
-    if (last && existingPoint.timestamp === last.timestamp && lastViewerData) {
-      lastViewerData.elevationFt =
-        existingPoint.elevationFt ?? lastViewerData.elevationFt;
-
-      updateStatsDisplay(
-        lastViewerData.distance,
-        lastViewerData.pace,
-        lastViewerData.avgPace,
-        lastViewerElapsed,
-        lastViewerData.elevationFt ?? null
-      );
-    }
-  }
-}  // <-- ONLY ONE closing brace for payload
-
+  // Native points now control viewer stats.
+}
 )  // <-- closes .on(...)
 .subscribe();
 
@@ -1417,59 +1457,6 @@ viewerConnectionWatchId = setInterval(async () => {
   if (!lastPointReceivedTime) return;
 
   const secondsSinceLastPoint = (Date.now() - lastPointReceivedTime) / 1000;
-
-  // Realtime is working, so do nothing.
-  if (secondsSinceLastPoint < 12) return;
-
-  const { data: newPoints, error } = await supabaseClient
-    .from("run_points")
-    .select("*")
-    .eq("run_id", runId)
-    .gt("sequence_num", lastViewerSequenceNum)
-    .order("sequence_num", { ascending: true });
-
-  if (error) {
-    console.warn("Viewer backup polling failed:", error);
-    return;
-  }
-
-  if (newPoints && newPoints.length > 0) {
-    lastPointReceivedTime = Date.now();
-
-    if (viewerConnectionLost) {
-      viewerConnectionLost = false;
-      showViewerStatus("Runner reconnected", "good");
-      hideViewerStatusSoon();
-    }
-
-    newPoints.forEach(pt => {
-      lastViewerSequenceNum = Math.max(
-        lastViewerSequenceNum,
-        pt.sequence_num ?? lastViewerSequenceNum
-      );
-
-      upsertSortedRunPoint(pt)
-    });
-
-    addOrUpdatePath();
-    updateSupabaseViewerStats();
-
-    const last = pathCoords[pathCoords.length - 1];
-
-    if (!viewerMarker) {
-      viewerMarker = new maplibregl.Marker({ color: "red" })
-        .setLngLat([last.lon, last.lat])
-        .addTo(map);
-    } else {
-      viewerMarker.setLngLat([last.lon, last.lat]);
-    }
-
-    if (viewerFollowing) {
-      map.jumpTo({ center: [last.lon, last.lat], zoom: 16 });
-    }
-
-    return;
-  }
 
   if (secondsSinceLastPoint > 45 && !viewerConnectionLost) {
     viewerConnectionLost = true;

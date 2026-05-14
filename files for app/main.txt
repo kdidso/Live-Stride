@@ -1044,7 +1044,7 @@ if (activeRunId) {
     distance_m: totalDistanceMeters
   };
 
-await safeInsertRunPoint(pointPayload);
+//await safeInsertRunPoint(pointPayload);
 await safeUpdateRunSummary({
   total_distance_m: totalDistanceMeters,
   latest_lat: coord[1],
@@ -1080,34 +1080,10 @@ fetchElevation(coord[1], coord[0]).then(elev => {
     });
   }
 
-  // Also update the queued/inserted payload object.
-  // This matters if the point was queued before elevation returned.
   pointPayload.elevation_m = elevMeters;
   updateQueuedPointElevation(activeRunId, thisSequenceNum, elevMeters);
 
-  supabaseClient
-    .from("run_points")
-    .update({ elevation_m: elevMeters })
-    .eq("run_id", activeRunId)
-    .eq("sequence_num", thisSequenceNum)
-    .select()
-    .then(({ data, error }) => {
-      if (error) {
-        console.error("Supabase elevation update failed:", error);
-        return;
-      }
-
-      if (!data || data.length === 0) {
-        console.warn("Supabase elevation update matched 0 rows", {
-          activeRunId,
-          thisSequenceNum,
-          elevMeters
-        });
-        return;
-      }
-
-      console.log("Supabase elevation update succeeded:", data);
-    });
+  // Native tracker now owns production run_points inserts + elevation.
 
 }).catch(err => {
   console.warn("Elevation update skipped:", err);
@@ -1643,11 +1619,12 @@ async function startNativePathComparison(runId) {
   nativePathCoords = [];
   clearNativeRunPathLayer();
 
-  const { data, error } = await supabaseClient
-    .from("run_points_native_test")
-    .select("*")
-    .eq("run_id", runId)
-    .order("sequence_num", { ascending: true });
+const { data, error } = await supabaseClient
+  .from("run_points")
+  .select("*")
+  .eq("run_id", runId)
+  .eq("source", "native")
+  .order("sequence_num", { ascending: true });
 
   if (error) {
     console.error("Initial native path load error:", error);
@@ -1688,12 +1665,12 @@ if (nativePathCoords.length > 0) {
       {
         event: "INSERT",
         schema: "public",
-        table: "run_points_native_test",
+        table: "run_points",
         filter: `run_id=eq.${runId}`
       },
       payload => {
         const pt = payload.new;
-
+        if (pt.source !== "native") return;
         upsertSortedNativeRunPoint(pt);
         addOrUpdateNativePath();
         lastPointReceivedTime = Date.now();
@@ -1761,8 +1738,8 @@ pathCoords = data
     return (a.timestamp || 0) - (b.timestamp || 0);
   });
 
-  addOrUpdatePath();
-  updateSupabaseViewerStats();
+  //addOrUpdatePath();
+  //updateSupabaseViewerStats();
   await startNativePathComparison(runId);
     /*
   if (pathCoords.length > 0) {
@@ -1806,7 +1783,7 @@ activeSupabaseChannel = supabaseClient
 
       upsertSortedRunPoint(pt);
 
-      addOrUpdatePath();
+      //addOrUpdatePath();
       //updateSupabaseViewerStats();
 
       /*if (!viewerMarker) {
@@ -1935,7 +1912,7 @@ function trackRunner(key) {
       elevationFt: pt.elevationFt ?? null
     }));
 
-    addOrUpdatePath();
+    //addOrUpdatePath();
 
     lastViewerData = {
       distance: data.distance || 0,

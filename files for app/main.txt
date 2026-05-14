@@ -1764,7 +1764,8 @@ pathCoords = data
   addOrUpdatePath();
   updateSupabaseViewerStats();
   await startNativePathComparison(runId);
-  /*if (pathCoords.length > 0) {
+    /*
+  if (pathCoords.length > 0) {
     const last = pathCoords[pathCoords.length - 1];
 
     if (!viewerMarker) {
@@ -1778,8 +1779,10 @@ pathCoords = data
     map.flyTo({
       center: [last.lon, last.lat],
       zoom: 16
-    });*/
+    });
   }
+  */
+
 activeSupabaseChannel = supabaseClient
   .channel(`run_${runId.replace(/-/g, "_")}`)
   .on(

@@ -640,14 +640,20 @@ function clearNativeRunPathLayer() {
       const lastPoint = pathCoords[pathCoords.length - 1];
       const instPace = lastPoint.instPace ?? 0;
 
+      const displayElevationFt =
+        lastPoint.elevationFt ??
+        lastViewerData?.elevationFt ??
+        latestRunnerElevFt ??
+        null;
+
       lastViewerData = {
         distance: distMiles,
         pace: instPace,
         avgPace,
         startTime: firstTime,
         current: [lastPoint.lon, lastPoint.lat],
-        elevationFt: lastPoint.elevationFt ?? null
-      };
+        elevationFt: displayElevationFt
+};
 
       lastViewerElapsed = elapsedMs;
 
@@ -656,7 +662,7 @@ function clearNativeRunPathLayer() {
         instPace,
         avgPace,
         elapsedMs,
-        lastPoint.elevationFt ?? null
+        displayElevationFt
       );
     }
 

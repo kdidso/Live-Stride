@@ -1566,6 +1566,72 @@ function upsertSortedNativeRunPoint(pt) {
   });
 }
 
+function updateViewerFromNativePoint(pt) {
+  const nativePoint = normalizeNativeRunPoint
+    ? normalizeNativeRunPoint(pt)
+    : {
+        sequenceNum: pt.sequence_num ?? null,
+        lat: pt.lat,
+        lon: pt.lon,
+        timestamp: new Date(pt.recorded_at).getTime(),
+        time: pt.recorded_at,
+        elevation: pt.elevation_m,
+        elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
+        instPace: pt.inst_pace_min_per_mile ?? 0,
+        avgPace: pt.avg_pace_min_per_mile ?? 0,
+        distanceM: pt.distance_m ?? null
+      };
+
+  const nativeStartTime = nativePathCoords.length > 0
+    ? nativePathCoords[0].timestamp
+    : nativePoint.timestamp;
+
+  const elapsedMs = Math.max(0, nativePoint.timestamp - nativeStartTime);
+  const distanceMi = nativePoint.distanceM != null
+    ? metersToMiles(nativePoint.distanceM)
+    : 0;
+
+  const elevationFt =
+    nativePoint.elevationFt ??
+    lastViewerData?.elevationFt ??
+    latestRunnerElevFt ??
+    null;
+
+  lastViewerData = {
+    distance: distanceMi,
+    pace: nativePoint.instPace ?? 0,
+    avgPace: nativePoint.avgPace ?? 0,
+    startTime: nativeStartTime,
+    current: [nativePoint.lon, nativePoint.lat],
+    elevationFt
+  };
+
+  lastViewerElapsed = elapsedMs;
+
+  updateStatsDisplay(
+    distanceMi,
+    nativePoint.instPace ?? 0,
+    nativePoint.avgPace ?? 0,
+    elapsedMs,
+    elevationFt
+  );
+
+  if (!viewerMarker) {
+    viewerMarker = new maplibregl.Marker({ color: "red" })
+      .setLngLat([nativePoint.lon, nativePoint.lat])
+      .addTo(map);
+  } else {
+    viewerMarker.setLngLat([nativePoint.lon, nativePoint.lat]);
+  }
+
+  if (viewerFollowing) {
+    map.flyTo({
+      center: [nativePoint.lon, nativePoint.lat],
+      zoom: 16
+    });
+  }
+}
+
 async function startNativePathComparison(runId) {
   if (!runId) return;
 
@@ -1600,6 +1666,21 @@ nativePathCoords = data
 
   addOrUpdateNativePath();
 
+if (nativePathCoords.length > 0) {
+  const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
+
+  updateViewerFromNativePoint({
+    sequence_num: lastNativePoint.sequenceNum,
+    lat: lastNativePoint.lat,
+    lon: lastNativePoint.lon,
+    recorded_at: lastNativePoint.time,
+    elevation_m: lastNativePoint.elevation,
+    inst_pace_min_per_mile: lastNativePoint.instPace,
+    avg_pace_min_per_mile: lastNativePoint.avgPace,
+    distance_m: lastNativePoint.distanceM
+  });
+}
+
   activeNativeSupabaseChannel = supabaseClient
     .channel(`native_run_${runId.replace(/-/g, "_")}`)
     .on(
@@ -1614,8 +1695,17 @@ nativePathCoords = data
         const pt = payload.new;
 
         upsertSortedNativeRunPoint(pt);
-
         addOrUpdateNativePath();
+        lastPointReceivedTime = Date.now();
+
+        if (viewerConnectionLost) {
+          viewerConnectionLost = false;
+          showViewerStatus("Runner reconnected", "good");
+          hideViewerStatusSoon();
+        }
+
+updateViewerFromNativePoint(pt);
+
       }
     )
     .subscribe();
@@ -1674,7 +1764,7 @@ pathCoords = data
   addOrUpdatePath();
   updateSupabaseViewerStats();
   await startNativePathComparison(runId);
-  if (pathCoords.length > 0) {
+  /*if (pathCoords.length > 0) {
     const last = pathCoords[pathCoords.length - 1];
 
     if (!viewerMarker) {
@@ -1688,7 +1778,7 @@ pathCoords = data
     map.flyTo({
       center: [last.lon, last.lat],
       zoom: 16
-    });
+    });*/
   }
 activeSupabaseChannel = supabaseClient
   .channel(`run_${runId.replace(/-/g, "_")}`)
@@ -1714,9 +1804,9 @@ activeSupabaseChannel = supabaseClient
       upsertSortedRunPoint(pt);
 
       addOrUpdatePath();
-      updateSupabaseViewerStats();
+      //updateSupabaseViewerStats();
 
-      if (!viewerMarker) {
+      /*if (!viewerMarker) {
         viewerMarker = new maplibregl.Marker({ color: "red" })
           .setLngLat([pt.lon, pt.lat])
           .addTo(map);
@@ -1727,6 +1817,7 @@ activeSupabaseChannel = supabaseClient
       if (viewerFollowing) {
         map.flyTo({ center: [pt.lon, pt.lat], zoom: 16 });
       }
+       */
     }
   )
   .on(
@@ -1757,7 +1848,9 @@ if (!existingPoint) return;
       existingPoint.avgPace = pt.avg_pace_min_per_mile ?? existingPoint.avgPace;
       existingPoint.distanceM = pt.distance_m ?? existingPoint.distanceM;
 
-      updateSupabaseViewerStats();
+      //updateSupabaseViewerStats();
+// Native points now control viewer stats.
+// Prevent delayed JS elevation/sync updates from overwriting native stats.
     }
   )
   .subscribe();

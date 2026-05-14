@@ -299,7 +299,7 @@ private void uploadNativePoint(Location location) {
             body.put("app_state", "foreground_service");
             body.put("note", "Inserted from native Android GPS service with JS-matching GPS filtering");
 
-            URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
+            URL url = new URL(supabaseUrl + "/rest/v1/run_points");
 
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 

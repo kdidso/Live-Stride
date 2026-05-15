@@ -28,6 +28,7 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.time.Instant;
 
 public class LiveStrideNativeTrackerService extends Service {
 
@@ -52,7 +53,6 @@ public class LiveStrideNativeTrackerService extends Service {
     private double totalDistanceMeters = 0.0;
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
-
     @Override
     public void onCreate() {
         super.onCreate();
@@ -79,22 +79,14 @@ public class LiveStrideNativeTrackerService extends Service {
 
             if (nativeSessionId == null || nativeSessionId.trim().isEmpty()) {
                 nativeSessionId = "native_" + System.currentTimeMillis();
-            }
+            }  
 
             sequenceNum = 0;
             previousLocation = null;
             totalDistanceMeters = 0.0;
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
-
-            uploadDebugLog(
-                    "native service received START",
-                    "runId=" + runId +
-                            ", runnerName=" + runnerName +
-                            ", hasUrl=" + (supabaseUrl != null) +
-                            ", hasKey=" + (supabaseAnonKey != null)
-            );
-
+            
             startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
             startLocationUpdates();
 
@@ -102,7 +94,6 @@ public class LiveStrideNativeTrackerService extends Service {
         }
 
         if (ACTION_STOP.equals(intent.getAction())) {
-            uploadDebugLog("native service received STOP", "runId=" + runId);
             stopLocationUpdates();
             stopForeground(true);
             stopSelf();
@@ -113,12 +104,9 @@ public class LiveStrideNativeTrackerService extends Service {
     }
 
     private void startLocationUpdates() {
-        uploadDebugLog("startLocationUpdates called", "isTracking=" + isTracking);
-
         if (isTracking) return;
 
         if (supabaseUrl == null || supabaseAnonKey == null) {
-            uploadDebugLog("startLocationUpdates stopped", "missing Supabase URL/key");
             stopSelf();
             return;
         }
@@ -127,7 +115,6 @@ public class LiveStrideNativeTrackerService extends Service {
                 != PackageManager.PERMISSION_GRANTED
                 && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
-            uploadDebugLog("startLocationUpdates stopped", "missing location permission");
             stopSelf();
             return;
         }
@@ -145,11 +132,6 @@ public class LiveStrideNativeTrackerService extends Service {
             public void onLocationResult(LocationResult locationResult) {
                 if (locationResult == null) return;
 
-                uploadDebugLog(
-                        "onLocationResult received",
-                        "count=" + locationResult.getLocations().size()
-                );
-
                 for (Location location : locationResult.getLocations()) {
                     if (location == null) continue;
                     uploadNativePoint(location);
@@ -164,7 +146,6 @@ public class LiveStrideNativeTrackerService extends Service {
         );
 
         isTracking = true;
-        uploadDebugLog("startLocationUpdates active", "native GPS callbacks requested");
     }
 
     private void stopLocationUpdates() {
@@ -176,222 +157,179 @@ public class LiveStrideNativeTrackerService extends Service {
         isTracking = false;
     }
 
-    private String formatIsoUtc(long timeMs) {
-        return new java.text.SimpleDateFormat(
-                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-                java.util.Locale.US
-        ).format(new java.util.Date(timeMs));
+private Double fetchElevationMeters(double lat, double lon) {
+    HttpURLConnection conn = null;
+
+    try {
+        String endpoint = "https://elevation.livestride.run/api/v1/lookup?locations="
+                + lat + "," + lon;
+
+        URL url = new URL(endpoint);
+        conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+        conn.setConnectTimeout(5000);
+        conn.setReadTimeout(5000);
+
+        int code = conn.getResponseCode();
+
+        if (code < 200 || code >= 300) {
+            System.out.println("LiveStride native elevation fetch failed. HTTP " + code);
+            return null;
+        }
+
+        java.io.InputStream is = conn.getInputStream();
+        java.util.Scanner scanner = new java.util.Scanner(is, "UTF-8").useDelimiter("\\A");
+        String response = scanner.hasNext() ? scanner.next() : "";
+        scanner.close();
+
+        JSONObject json = new JSONObject(response);
+
+        if (!json.has("results")) return null;
+
+        org.json.JSONArray results = json.getJSONArray("results");
+        if (results.length() == 0) return null;
+
+        JSONObject first = results.getJSONObject(0);
+
+        if (!first.has("elevation") || first.isNull("elevation")) {
+            return null;
+        }
+
+        return first.getDouble("elevation");
+
+    } catch (Exception e) {
+        System.out.println("LiveStride native elevation exception: " + e.getMessage());
+        return null;
+    } finally {
+        if (conn != null) conn.disconnect();
+    }
+}
+
+private void uploadNativePoint(Location location) {
+    final double lat = location.getLatitude();
+    final double lon = location.getLongitude();
+    final float accuracy = location.hasAccuracy() ? location.getAccuracy() : -1f;
+
+    final long pointTimeMs = location.getTime() > 0
+            ? location.getTime()
+            : System.currentTimeMillis();
+
+    double segmentMeters = 0.0;
+    double instPaceMinPerMile = 0.0;
+    double avgPaceMinPerMile = 0.0;
+
+    if (runStartTimeMs == 0L) {
+        runStartTimeMs = pointTimeMs;
     }
 
-    private Double fetchElevationMeters(double lat, double lon) {
-        HttpURLConnection conn = null;
+    if (previousLocation != null && previousPointTimeMs > 0L) {
+        segmentMeters = previousLocation.distanceTo(location);
 
+        double elapsedSeconds = (pointTimeMs - previousPointTimeMs) / 1000.0;
+        double speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0.0;
+        double speedMph = speedMps * 2.23694;
+
+        if (segmentMeters < 1.0) {
+            System.out.println("LiveStride native ignored tiny GPS movement: " + segmentMeters + " m");
+            return;
+        }
+
+        if (elapsedSeconds <= 0.0) {
+            System.out.println("LiveStride native ignored zero/negative time point: " + elapsedSeconds);
+            return;
+        }
+
+        if (speedMph < 0.3) {
+            System.out.println("LiveStride native ignored low-speed GPS drift: " + speedMph + " mph");
+            return;
+        }
+
+        if (speedMph > 140.0) {
+            System.out.println("LiveStride native ignored unrealistic GPS jump: " + speedMph + " mph");
+            return;
+        }
+
+        totalDistanceMeters += segmentMeters;
+
+        double segmentMiles = segmentMeters / 1609.34;
+        double elapsedMinutes = elapsedSeconds / 60.0;
+
+        if (segmentMiles > 0) {
+            instPaceMinPerMile = elapsedMinutes / segmentMiles;
+        }
+    }
+
+    double totalMiles = totalDistanceMeters / 1609.34;
+    double totalMinutes = (pointTimeMs - runStartTimeMs) / 60000.0;
+
+    if (totalMiles > 0) {
+        avgPaceMinPerMile = totalMinutes / totalMiles;
+    }
+
+    previousLocation = new Location(location);
+    previousPointTimeMs = pointTimeMs;
+
+    final int thisSequence = sequenceNum++;
+    final double finalDistanceMeters = totalDistanceMeters;
+    final double finalInstPaceMinPerMile = instPaceMinPerMile;
+    final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
+    final String recordedAt = Instant.ofEpochMilli(pointTimeMs).toString();
+
+    new Thread(() -> {
         try {
-            String endpoint = "https://elevation.livestride.run/api/v1/lookup?locations="
-                    + lat + "," + lon;
+            Double elevationMeters = fetchElevationMeters(lat, lon);
+            JSONObject body = new JSONObject();
 
-            URL url = new URL(endpoint);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
+            if (runId != null && !runId.trim().isEmpty()) {
+                body.put("run_id", runId);
+            }
+
+            body.put("runner_name", runnerName);
+            body.put("source", "native");
+            body.put("native_session_id", nativeSessionId);
+            body.put("sequence_num", thisSequence);
+            body.put("lat", lat);
+            body.put("lon", lon);
+            body.put("accuracy", accuracy >= 0 ? accuracy : JSONObject.NULL);
+            body.put("recorded_at", recordedAt);
+            body.put("distance_m", finalDistanceMeters);
+            body.put("inst_pace_min_per_mile", finalInstPaceMinPerMile);
+            body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
+            body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
+            body.put("app_state", "foreground_service");
+            body.put("note", "Inserted from native Android GPS service with JS-matching GPS filtering");
+
+            URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
+
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("apikey", supabaseAnonKey);
+            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("Accept-Profile", "public");
+            conn.setRequestProperty("Content-Profile", "public");
+            conn.setRequestProperty("Prefer", "return=minimal");
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toString().getBytes("UTF-8"));
+            }
 
             int code = conn.getResponseCode();
 
             if (code < 200 || code >= 300) {
-                return null;
+                System.out.println("LiveStride native point upload failed. HTTP " + code);
             }
 
-            java.io.InputStream is = conn.getInputStream();
-            java.util.Scanner scanner = new java.util.Scanner(is, "UTF-8").useDelimiter("\\A");
-            String response = scanner.hasNext() ? scanner.next() : "";
-            scanner.close();
-
-            JSONObject json = new JSONObject(response);
-
-            if (!json.has("results")) return null;
-
-            org.json.JSONArray results = json.getJSONArray("results");
-            if (results.length() == 0) return null;
-
-            JSONObject first = results.getJSONObject(0);
-
-            if (!first.has("elevation") || first.isNull("elevation")) {
-                return null;
-            }
-
-            return first.getDouble("elevation");
+            conn.disconnect();
 
         } catch (Exception e) {
-            System.out.println("LiveStride native elevation exception: " + e.getMessage());
-            return null;
-        } finally {
-            if (conn != null) conn.disconnect();
+            System.out.println("LiveStride native point upload exception: " + e.getMessage());
         }
-    }
-
-    private void uploadNativePoint(Location location) {
-        final double lat = location.getLatitude();
-        final double lon = location.getLongitude();
-
-        uploadDebugLog(
-                "uploadNativePoint called",
-                "lat=" + lat + ", lon=" + lon
-        );
-
-        final float accuracy = location.hasAccuracy() ? location.getAccuracy() : -1f;
-
-        final long pointTimeMs = location.getTime() > 0
-                ? location.getTime()
-                : System.currentTimeMillis();
-
-        double segmentMeters = 0.0;
-        double instPaceMinPerMile = 0.0;
-        double avgPaceMinPerMile = 0.0;
-
-        if (runStartTimeMs == 0L) {
-            runStartTimeMs = pointTimeMs;
-        }
-
-        if (previousLocation != null && previousPointTimeMs > 0L) {
-            segmentMeters = previousLocation.distanceTo(location);
-
-            double elapsedSeconds = (pointTimeMs - previousPointTimeMs) / 1000.0;
-            double speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0.0;
-            double speedMph = speedMps * 2.23694;
-
-            if (segmentMeters < 1.0) {
-                uploadDebugLog("native ignored tiny GPS movement", segmentMeters + " m");
-                return;
-            }
-
-            if (elapsedSeconds <= 0.0) {
-                uploadDebugLog("native ignored zero/negative time point", String.valueOf(elapsedSeconds));
-                return;
-            }
-
-            if (speedMph < 0.3) {
-                uploadDebugLog("native ignored low-speed GPS drift", speedMph + " mph");
-                return;
-            }
-
-            if (speedMph > 140.0) {
-                uploadDebugLog("native ignored unrealistic GPS jump", speedMph + " mph");
-                return;
-            }
-
-            totalDistanceMeters += segmentMeters;
-
-            double segmentMiles = segmentMeters / 1609.34;
-            double elapsedMinutes = elapsedSeconds / 60.0;
-
-            if (segmentMiles > 0) {
-                instPaceMinPerMile = elapsedMinutes / segmentMiles;
-            }
-        }
-
-        double totalMiles = totalDistanceMeters / 1609.34;
-        double totalMinutes = (pointTimeMs - runStartTimeMs) / 60000.0;
-
-        if (totalMiles > 0) {
-            avgPaceMinPerMile = totalMinutes / totalMiles;
-        }
-
-        previousLocation = new Location(location);
-        previousPointTimeMs = pointTimeMs;
-
-        final int thisSequence = sequenceNum++;
-        final double finalDistanceMeters = totalDistanceMeters;
-        final double finalInstPaceMinPerMile = instPaceMinPerMile;
-        final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
-        final String recordedAt = formatIsoUtc(pointTimeMs);
-
-        new Thread(() -> {
-            HttpURLConnection conn = null;
-
-            try {
-                Double elevationMeters = fetchElevationMeters(lat, lon);
-                JSONObject body = new JSONObject();
-
-                if (runId != null && !runId.trim().isEmpty()) {
-                    body.put("run_id", runId);
-                }
-
-                body.put("runner_name", runnerName);
-                body.put("source", "native");
-                body.put("native_session_id", nativeSessionId);
-                body.put("sequence_num", thisSequence);
-                body.put("lat", lat);
-                body.put("lon", lon);
-                body.put("accuracy", accuracy >= 0 ? accuracy : JSONObject.NULL);
-                body.put("recorded_at", recordedAt);
-                body.put("distance_m", finalDistanceMeters);
-                body.put("inst_pace_min_per_mile", finalInstPaceMinPerMile);
-                body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
-                body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
-                body.put("app_state", "foreground_service");
-                body.put("note", "Inserted from native Android GPS service with JS-matching GPS filtering");
-
-                URL url = new URL(supabaseUrl + "/rest/v1/run_points");
-                conn = (HttpURLConnection) url.openConnection();
-
-                conn.setRequestMethod("POST");
-                conn.setRequestProperty("apikey", supabaseAnonKey);
-                conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setRequestProperty("Accept", "application/json");
-                conn.setRequestProperty("Accept-Profile", "public");
-                conn.setRequestProperty("Content-Profile", "public");
-                conn.setRequestProperty("Prefer", "return=minimal");
-                conn.setDoOutput(true);
-
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(body.toString().getBytes("UTF-8"));
-                }
-
-                int code = conn.getResponseCode();
-
-                if (code < 200 || code >= 300) {
-                    String errorBody = "";
-
-                    try {
-                        java.io.InputStream es = conn.getErrorStream();
-                        if (es != null) {
-                            java.util.Scanner scanner = new java.util.Scanner(es, "UTF-8").useDelimiter("\\A");
-                            errorBody = scanner.hasNext() ? scanner.next() : "";
-                            scanner.close();
-                        }
-                    } catch (Exception readErr) {
-                        errorBody = "Could not read error body: " + readErr.getMessage();
-                    }
-
-                    uploadDebugLog(
-                            "native point upload failed",
-                            "HTTP " + code + " Body: " + errorBody
-                    );
-                } else {
-                    uploadDebugLog(
-                            "native point upload succeeded",
-                            "HTTP " + code
-                    );
-
-                    updateRunSummary(
-                            lat,
-                            lon,
-                            recordedAt,
-                            finalDistanceMeters,
-                            false
-                    );
-                }
-
-            } catch (Exception e) {
-                uploadDebugLog("native point upload exception", e.getMessage());
-                System.out.println("LiveStride native point upload exception: " + e.getMessage());
-            } finally {
-                if (conn != null) conn.disconnect();
-            }
-        }).start();
-    }
+    }).start();
+}
 
     private Notification buildNotification(String text) {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
@@ -415,100 +353,6 @@ public class LiveStrideNativeTrackerService extends Service {
             if (manager != null) {
                 manager.createNotificationChannel(channel);
             }
-        }
-    }
-
-    private void uploadDebugLog(String message, String details) {
-        if (supabaseUrl == null || supabaseAnonKey == null) return;
-
-        new Thread(() -> {
-            HttpURLConnection conn = null;
-
-            try {
-                JSONObject body = new JSONObject();
-
-                if (runId != null && !runId.trim().isEmpty()) {
-                    body.put("run_id", runId);
-                }
-
-                body.put("message", message);
-                body.put("details", details != null ? details : JSONObject.NULL);
-
-                URL url = new URL(supabaseUrl + "/rest/v1/native_debug_logs");
-                conn = (HttpURLConnection) url.openConnection();
-
-                conn.setRequestMethod("POST");
-                conn.setRequestProperty("apikey", supabaseAnonKey);
-                conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setRequestProperty("Accept", "application/json");
-                conn.setRequestProperty("Prefer", "return=minimal");
-                conn.setDoOutput(true);
-
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(body.toString().getBytes("UTF-8"));
-                }
-
-                conn.getResponseCode();
-            } catch (Exception e) {
-                System.out.println("LiveStride debug log upload failed: " + e.getMessage());
-            } finally {
-                if (conn != null) conn.disconnect();
-            }
-        }).start();
-    }
-
-    private void updateRunSummary(
-            double lat,
-            double lon,
-            String recordedAt,
-            double distanceMeters,
-            boolean finished
-    ) {
-        if (runId == null || runId.trim().isEmpty()) return;
-
-        HttpURLConnection conn = null;
-
-        try {
-            JSONObject body = new JSONObject();
-            body.put("total_distance_m", distanceMeters);
-            body.put("latest_lat", lat);
-            body.put("latest_lon", lon);
-            body.put("latest_timestamp", recordedAt);
-
-            if (finished) {
-                body.put("is_live", false);
-                body.put("finished_at", formatIsoUtc(System.currentTimeMillis()));
-            }
-
-            URL url = new URL(supabaseUrl + "/rest/v1/runs?id=eq." + runId);
-            conn = (HttpURLConnection) url.openConnection();
-
-            conn.setRequestMethod("PATCH");
-            conn.setRequestProperty("apikey", supabaseAnonKey);
-            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("Accept", "application/json");
-            conn.setRequestProperty("Accept-Profile", "public");
-            conn.setRequestProperty("Content-Profile", "public");
-            conn.setRequestProperty("Prefer", "return=minimal");
-            conn.setDoOutput(true);
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(body.toString().getBytes("UTF-8"));
-            }
-
-            int code = conn.getResponseCode();
-
-            if (code < 200 || code >= 300) {
-                uploadDebugLog("native run summary update failed", "HTTP " + code);
-            }
-
-        } catch (Exception e) {
-            uploadDebugLog("native run summary exception", e.getMessage());
-            System.out.println("LiveStride native run summary exception: " + e.getMessage());
-        } finally {
-            if (conn != null) conn.disconnect();
         }
     }
 

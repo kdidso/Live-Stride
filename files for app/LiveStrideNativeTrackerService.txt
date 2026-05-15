@@ -173,21 +173,8 @@ private Double fetchElevationMeters(double lat, double lon) {
         int code = conn.getResponseCode();
 
 if (code < 200 || code >= 300) {
-    String errorBody = "";
-
-    try {
-        java.io.InputStream es = conn.getErrorStream();
-        if (es != null) {
-            java.util.Scanner scanner = new java.util.Scanner(es, "UTF-8").useDelimiter("\\A");
-            errorBody = scanner.hasNext() ? scanner.next() : "";
-            scanner.close();
+            return null;
         }
-    } catch (Exception readErr) {
-        errorBody = "Could not read error body: " + readErr.getMessage();
-    }
-
-    System.out.println("LiveStride native point upload failed. HTTP " + code + " Body: " + errorBody);
-}
 
         java.io.InputStream is = conn.getInputStream();
         java.util.Scanner scanner = new java.util.Scanner(is, "UTF-8").useDelimiter("\\A");
@@ -220,6 +207,12 @@ if (code < 200 || code >= 300) {
 private void uploadNativePoint(Location location) {
     final double lat = location.getLatitude();
     final double lon = location.getLongitude();
+
+    uploadDebugLog(
+            "uploadNativePoint called",
+            "lat=" + lat + ", lon=" + lon
+    );
+
     final float accuracy = location.hasAccuracy() ? location.getAccuracy() : -1f;
 
     final long pointTimeMs = location.getTime() > 0
@@ -332,15 +325,37 @@ private void uploadNativePoint(Location location) {
             int code = conn.getResponseCode();
 
             if (code < 200 || code >= 300) {
-                System.out.println("LiveStride native point upload failed. HTTP " + code);
+                String errorBody = "";
+
+                try {
+                    java.io.InputStream es = conn.getErrorStream();
+                    if (es != null) {
+                        java.util.Scanner scanner = new java.util.Scanner(es, "UTF-8").useDelimiter("\\A");
+                        errorBody = scanner.hasNext() ? scanner.next() : "";
+                        scanner.close();
+                    }
+                } catch (Exception readErr) {
+                    errorBody = "Could not read error body: " + readErr.getMessage();
+                }
+
+                uploadDebugLog(
+                        "native point upload failed",
+                        "HTTP " + code + " Body: " + errorBody
+                );
+            } else {
+                uploadDebugLog(
+                        "native point upload succeeded",
+                        "HTTP " + code
+                );
+
+                updateRunSummary(
+                        lat,
+                        lon,
+                        recordedAt,
+                        finalDistanceMeters,
+                        false
+                );
             }
-           updateRunSummary(
-                   lat,
-                   lon,
-                   recordedAt,
-                   finalDistanceMeters,
-                   false
-           );
 
             conn.disconnect();
 
@@ -374,6 +389,46 @@ private void uploadNativePoint(Location location) {
             }
         }
     }  
+
+private void uploadDebugLog(String message, String details) {
+    if (supabaseUrl == null || supabaseAnonKey == null) return;
+
+    new Thread(() -> {
+        HttpURLConnection conn = null;
+
+        try {
+            JSONObject body = new JSONObject();
+
+            if (runId != null && !runId.trim().isEmpty()) {
+                body.put("run_id", runId);
+            }
+
+            body.put("message", message);
+            body.put("details", details != null ? details : JSONObject.NULL);
+
+            URL url = new URL(supabaseUrl + "/rest/v1/native_debug_logs");
+            conn = (HttpURLConnection) url.openConnection();
+
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("apikey", supabaseAnonKey);
+            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("Prefer", "return=minimal");
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toString().getBytes("UTF-8"));
+            }
+
+            conn.getResponseCode();
+        } catch (Exception e) {
+            System.out.println("LiveStride debug log upload failed: " + e.getMessage());
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }).start();
+}
 
 private void updateRunSummary(
         double lat,

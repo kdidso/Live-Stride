@@ -108,7 +108,6 @@ let viewerConnectionLost = false;
 let viewerStatusEl = null;
 let viewerConnectionWatchId = null;
 let runnerSyncHadFailure = false;
-let useNativeProductionTracking = false;
 
 
 // → DOM references
@@ -813,7 +812,7 @@ function resetRunDisplay() {
   latestRunnerElevFt = null;
   lastViewerData = null;
   lastViewerElapsed = 0;
-  useNativeProductionTracking = false;
+
   clearRunPathLayer();
   clearNativeRunPathLayer();
 
@@ -932,7 +931,6 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     ? locationTime
     : new Date(locationTime).getTime();
     logGpsCallbackAudit(now);
-const nativeOwnsProduction = activeRunId && useNativeProductionTracking;
   if (lastPointTime && now <= lastPointTime) {
     console.warn("Ignoring out-of-order location point:", new Date(now).toISOString());
     return;
@@ -1046,17 +1044,15 @@ if (activeRunId) {
     distance_m: totalDistanceMeters
   };
 
-//await safeInsertRunPoint(pointPayload);
-if (!nativeOwnsProduction) {
-  await safeUpdateRunSummary({
-    total_distance_m: totalDistanceMeters,
-    latest_lat: coord[1],
-    latest_lon: coord[0],
-    latest_timestamp: recordedAt
-  });
+await safeInsertRunPoint(pointPayload);
+await safeUpdateRunSummary({
+  total_distance_m: totalDistanceMeters,
+  latest_lat: coord[1],
+  latest_lon: coord[0],
+  latest_timestamp: recordedAt
+});
 
-  flushSupabaseQueue();
-}
+flushSupabaseQueue();
 
 fetchElevation(coord[1], coord[0]).then(elev => {
   if (elev == null) return;
@@ -1084,10 +1080,34 @@ fetchElevation(coord[1], coord[0]).then(elev => {
     });
   }
 
+  // Also update the queued/inserted payload object.
+  // This matters if the point was queued before elevation returned.
   pointPayload.elevation_m = elevMeters;
   updateQueuedPointElevation(activeRunId, thisSequenceNum, elevMeters);
 
-  // Native tracker now owns production run_points inserts + elevation.
+  supabaseClient
+    .from("run_points")
+    .update({ elevation_m: elevMeters })
+    .eq("run_id", activeRunId)
+    .eq("sequence_num", thisSequenceNum)
+    .select()
+    .then(({ data, error }) => {
+      if (error) {
+        console.error("Supabase elevation update failed:", error);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        console.warn("Supabase elevation update matched 0 rows", {
+          activeRunId,
+          thisSequenceNum,
+          elevMeters
+        });
+        return;
+      }
+
+      console.log("Supabase elevation update succeeded:", data);
+    });
 
 }).catch(err => {
   console.warn("Elevation update skipped:", err);
@@ -1192,6 +1212,7 @@ async function stopTracking() {
     bgWatchId = null;
   }
 await stopNativeComparisonRun();
+
   startBtn.disabled = false;
   stopBtn.disabled = true;
 
@@ -1218,32 +1239,26 @@ if (broadcasting && broadcastRef) {
 }
 
 if (activeRunId) {
-  const wasNativeProductionTracking = useNativeProductionTracking;
-
   const lastPoint = pathCoords.length > 0
     ? pathCoords[pathCoords.length - 1]
     : null;
 
-  const finishPayload = wasNativeProductionTracking
-    ? {
-        is_live: false,
-        finished_at: new Date().toISOString()
-      }
-    : {
-        is_live: false,
-        finished_at: new Date().toISOString(),
-        total_distance_m: totalDistanceMeters,
-        latest_lat: lastPoint ? lastPoint.lat : null,
-        latest_lon: lastPoint ? lastPoint.lon : null,
-        latest_timestamp: lastPoint ? lastPoint.time : null
-      };
+  const finishPayload = {
+    is_live: false,
+    finished_at: new Date().toISOString(),
+    total_distance_m: totalDistanceMeters,
+    latest_lat: lastPoint ? lastPoint.lat : null,
+    latest_lon: lastPoint ? lastPoint.lon : null,
+    latest_timestamp: lastPoint ? lastPoint.time : null
+  };
 
-  queueFinishEvent(activeRunId, finishPayload);
-  queueFirebaseFinish();
+queueFinishEvent(activeRunId, finishPayload);
+queueFirebaseFinish();
 
-  await forceFlushAll();
+// await nativeFinishSync(finishPayload);
 
-  useNativeProductionTracking = false;
+// Keep the JavaScript flush too as a backup when the WebView is still awake.
+await forceFlushAll();
 }
 
   if (isPrivateMode) {
@@ -1295,14 +1310,7 @@ broadcastBtn.onclick = async () => {
 
   activeRunId = newRun.id;
   pointSequence = 0;
-  const nativeStarted = await startNativeComparisonRun();
-  useNativeProductionTracking = nativeStarted;
-
-  if (nativeStarted) {
-    pathCoords = [];
-    clearRunPathLayer();
-  }
-
+  await startNativeComparisonRun();
   await startNativePathComparison(activeRunId);
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
   broadcastRef = db.ref(`runners/${safeName}`);
@@ -1635,12 +1643,11 @@ async function startNativePathComparison(runId) {
   nativePathCoords = [];
   clearNativeRunPathLayer();
 
-const { data, error } = await supabaseClient
-  .from("run_points")
-  .select("*")
-  .eq("run_id", runId)
-  .eq("source", "native")
-  .order("sequence_num", { ascending: true });
+  const { data, error } = await supabaseClient
+    .from("run_points_native_test")
+    .select("*")
+    .eq("run_id", runId)
+    .order("sequence_num", { ascending: true });
 
   if (error) {
     console.error("Initial native path load error:", error);
@@ -1681,12 +1688,12 @@ if (nativePathCoords.length > 0) {
       {
         event: "INSERT",
         schema: "public",
-        table: "run_points",
+        table: "run_points_native_test",
         filter: `run_id=eq.${runId}`
       },
       payload => {
         const pt = payload.new;
-        if (pt.source !== "native") return;
+
         upsertSortedNativeRunPoint(pt);
         addOrUpdateNativePath();
         lastPointReceivedTime = Date.now();
@@ -1754,8 +1761,8 @@ pathCoords = data
     return (a.timestamp || 0) - (b.timestamp || 0);
   });
 
-  //addOrUpdatePath();
-  //updateSupabaseViewerStats();
+  addOrUpdatePath();
+  updateSupabaseViewerStats();
   await startNativePathComparison(runId);
     /*
   if (pathCoords.length > 0) {
@@ -1799,7 +1806,7 @@ activeSupabaseChannel = supabaseClient
 
       upsertSortedRunPoint(pt);
 
-      //addOrUpdatePath();
+      addOrUpdatePath();
       //updateSupabaseViewerStats();
 
       /*if (!viewerMarker) {
@@ -1928,7 +1935,7 @@ function trackRunner(key) {
       elevationFt: pt.elevationFt ?? null
     }));
 
-    //addOrUpdatePath();
+    addOrUpdatePath();
 
     lastViewerData = {
       distance: data.distance || 0,

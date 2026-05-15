@@ -1670,9 +1670,6 @@ nativePathCoords = data
 if (nativePathCoords.length > 0) {
   const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
 
-if (nativePathCoords.length > 0) {
-  const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
-
   if (document.body.classList.contains("viewer-mode")) {
     updateViewerFromNativePoint({
       sequence_num: lastNativePoint.sequenceNum,
@@ -1686,6 +1683,8 @@ if (nativePathCoords.length > 0) {
     });
   }
 }
+
+activeNativeSupabaseChannel = supabaseClient
 
 activeNativeSupabaseChannel = supabaseClient
   activeNativeSupabaseChannel = supabaseClient

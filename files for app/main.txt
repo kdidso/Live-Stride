@@ -762,6 +762,12 @@ async function stopNativeComparisonRun() {
   }
 }
 
+function clearLegacyQueuedRunPoints() {
+  const queue = loadSyncQueue();
+  queue.points = [];
+  saveSyncQueue(queue);
+}
+
 async function forceFlushAll() {
   for (let i = 0; i < 5; i++) {
     await flushFirebaseFinish();
@@ -1045,7 +1051,7 @@ if (activeRunId) {
     distance_m: totalDistanceMeters
   };
 
-await safeInsertRunPoint(pointPayload);
+//await safeInsertRunPoint(pointPayload);
 await safeUpdateRunSummary({
   total_distance_m: totalDistanceMeters,
   latest_lat: coord[1],
@@ -1084,31 +1090,9 @@ fetchElevation(coord[1], coord[0]).then(elev => {
   // Also update the queued/inserted payload object.
   // This matters if the point was queued before elevation returned.
   pointPayload.elevation_m = elevMeters;
-  updateQueuedPointElevation(activeRunId, thisSequenceNum, elevMeters);
+updateQueuedPointElevation(activeRunId, thisSequenceNum, elevMeters);
 
-  supabaseClient
-    .from("run_points")
-    .update({ elevation_m: elevMeters })
-    .eq("run_id", activeRunId)
-    .eq("sequence_num", thisSequenceNum)
-    .select()
-    .then(({ data, error }) => {
-      if (error) {
-        console.error("Supabase elevation update failed:", error);
-        return;
-      }
-
-      if (!data || data.length === 0) {
-        console.warn("Supabase elevation update matched 0 rows", {
-          activeRunId,
-          thisSequenceNum,
-          elevMeters
-        });
-        return;
-      }
-
-      console.log("Supabase elevation update succeeded:", data);
-    });
+// run_points elevation update disabled.
 
 }).catch(err => {
   console.warn("Elevation update skipped:", err);
@@ -1127,7 +1111,7 @@ async function startTracking() {
   latestRunnerAvgPace = 0;
   latestRunnerElevFt = null;
   pointSequence = 0;
-
+  clearLegacyQueuedRunPoints();
   clearRunPathLayer();
   clearNativeRunPathLayer();
   startBtn.disabled = true;

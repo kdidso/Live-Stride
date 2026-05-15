@@ -239,6 +239,7 @@
     let activeListener = null;
     let activeSupabaseChannel = null;
     let activeNativeSupabaseChannel = null;
+    let activeRunStatusChannel = null;
     let nativePathCoords = [];
     let viewerTimerId = null;
     let lastViewerData = null;
@@ -1308,6 +1309,11 @@ if (activeNativeSupabaseChannel) {
   activeNativeSupabaseChannel = null;
 }
 
+if (activeRunStatusChannel) {
+  supabaseClient.removeChannel(activeRunStatusChannel);
+  activeRunStatusChannel = null;
+}
+
       if (viewerTimerId !== null) {
         clearInterval(viewerTimerId);
         viewerTimerId = null;
@@ -1344,9 +1350,9 @@ pathCoords = data
 let lastViewerSequenceNum = data.length > 0
   ? Math.max(...data.map(pt => pt.sequence_num ?? 0))
   : -1;
-      addOrUpdatePath();
-      updateSupabaseViewerStats();
-      await startNativePathComparison(runId);
+      // Blue JS path hidden in viewer mode.
+// Native purple path now controls viewer display/stats.
+await startNativePathComparison(runId);
       /*if (pathCoords.length > 0) {
         const last = pathCoords[pathCoords.length - 1];
 
@@ -1364,7 +1370,37 @@ let lastViewerSequenceNum = data.length > 0
         });
       }
       */
+activeRunStatusChannel = supabaseClient
+  .channel(`run_status_${runId.replace(/-/g, "_")}`)
+  .on(
+    "postgres_changes",
+    {
+      event: "UPDATE",
+      schema: "public",
+      table: "runs",
+      filter: `id=eq.${runId}`
+    },
+    payload => {
+      const run = payload.new;
 
+      if (run && run.is_live === false) {
+        if (viewerTimerId !== null) {
+          clearInterval(viewerTimerId);
+          viewerTimerId = null;
+        }
+
+        if (viewerConnectionWatchId !== null) {
+          clearInterval(viewerConnectionWatchId);
+          viewerConnectionWatchId = null;
+        }
+
+        viewerConnectionLost = false;
+        showViewerStatus("Run finished", "good");
+        hideViewerStatusSoon();
+      }
+    }
+  )
+  .subscribe();
       activeSupabaseChannel = supabaseClient
         .channel(`run_${runId.replace(/-/g, "_")}`)
         .on(
@@ -1391,7 +1427,7 @@ let lastViewerSequenceNum = data.length > 0
             }
 
             upsertSortedRunPoint(pt);
-            addOrUpdatePath();
+            //addOrUpdatePath();
 
 // Native points now control viewer stats, marker, and following.
           }
@@ -1428,7 +1464,7 @@ payload => {
   existingPoint.avgPace = pt.avg_pace_min_per_mile ?? existingPoint.avgPace;
   existingPoint.distanceM = pt.distance_m ?? existingPoint.distanceM;
 
-  addOrUpdatePath();
+  //addOrUpdatePath();
   // Native points now control viewer stats.
 }
 )  // <-- closes .on(...)

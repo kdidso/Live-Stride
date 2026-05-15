@@ -1075,16 +1075,19 @@ async function startNativePathComparison(runId) {
   clearNativeRunPathLayer();
 
   const { data, error } = await supabaseClient
-    .from("run_points")
+    .from("run_points_native_test")
     .select("*")
     .eq("run_id", runId)
-    .eq("source", "native")
     .order("sequence_num", { ascending: true });
 
   if (error) {
     console.error("Initial native path load error:", error);
     return;
   }
+
+  let lastNativeSequenceNum = data.length > 0
+    ? Math.max(...data.map(pt => pt.sequence_num ?? 0))
+    : -1;
 
 nativePathCoords = data
   .map(normalizeNativeRunPoint)
@@ -1118,12 +1121,16 @@ if (nativePathCoords.length > 0) {
       {
         event: "INSERT",
         schema: "public",
-        table: "run_points",
+        table: "run_points_native_test",
         filter: `run_id=eq.${runId}`
       },
       payload => {
         const pt = payload.new;
-        if (pt.source !== "native") return;
+
+        lastNativeSequenceNum = Math.max(
+          lastNativeSequenceNum,
+          pt.sequence_num ?? lastNativeSequenceNum
+        );
 
         upsertSortedNativeRunPoint(pt);
 
@@ -1337,9 +1344,8 @@ pathCoords = data
 let lastViewerSequenceNum = data.length > 0
   ? Math.max(...data.map(pt => pt.sequence_num ?? 0))
   : -1;
-      // Native production points now control viewer path, marker, and stats.
-      // addOrUpdatePath();
-      // updateSupabaseViewerStats();
+      addOrUpdatePath();
+      updateSupabaseViewerStats();
       await startNativePathComparison(runId);
       /*if (pathCoords.length > 0) {
         const last = pathCoords[pathCoords.length - 1];
@@ -1385,9 +1391,9 @@ let lastViewerSequenceNum = data.length > 0
             }
 
             upsertSortedRunPoint(pt);
-            // addOrUpdatePath();
+            addOrUpdatePath();
 
-// Native production points now control viewer stats, marker, and following.
+// Native points now control viewer stats, marker, and following.
           }
         )
         .on(
@@ -1422,8 +1428,8 @@ payload => {
   existingPoint.avgPace = pt.avg_pace_min_per_mile ?? existingPoint.avgPace;
   existingPoint.distanceM = pt.distance_m ?? existingPoint.distanceM;
 
-  // addOrUpdatePath();
-  // Native production points now control viewer stats.
+  addOrUpdatePath();
+  // Native points now control viewer stats.
 }
 )  // <-- closes .on(...)
 .subscribe();

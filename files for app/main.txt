@@ -1218,35 +1218,33 @@ if (broadcasting && broadcastRef) {
 }
 
 if (activeRunId) {
+  const wasNativeProductionTracking = useNativeProductionTracking;
+
   const lastPoint = pathCoords.length > 0
     ? pathCoords[pathCoords.length - 1]
     : null;
 
-const finishPayload = wasNativeProductionTracking
-  ? {
-      is_live: false,
-      finished_at: new Date().toISOString()
-    }
-  : {
-      is_live: false,
-      finished_at: new Date().toISOString(),
-      total_distance_m: totalDistanceMeters,
-      latest_lat: lastPoint ? lastPoint.lat : null,
-      latest_lon: lastPoint ? lastPoint.lon : null,
-      latest_timestamp: lastPoint ? lastPoint.time : null
-    };
+  const finishPayload = wasNativeProductionTracking
+    ? {
+        is_live: false,
+        finished_at: new Date().toISOString()
+      }
+    : {
+        is_live: false,
+        finished_at: new Date().toISOString(),
+        total_distance_m: totalDistanceMeters,
+        latest_lat: lastPoint ? lastPoint.lat : null,
+        latest_lon: lastPoint ? lastPoint.lon : null,
+        latest_timestamp: lastPoint ? lastPoint.time : null
+      };
 
-queueFinishEvent(activeRunId, finishPayload);
-queueFirebaseFinish();
+  queueFinishEvent(activeRunId, finishPayload);
+  queueFirebaseFinish();
 
-// await nativeFinishSync(finishPayload);
+  await forceFlushAll();
 
-// Keep the JavaScript flush too as a backup when the WebView is still awake.
-await forceFlushAll();
-useNativeProductionTracking = false;
-}  
-
-useNativeProductionTracking = false;
+  useNativeProductionTracking = false;
+}
 
   if (isPrivateMode) {
     savePrivateRunToFile();

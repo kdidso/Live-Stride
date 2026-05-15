@@ -1642,7 +1642,11 @@ async function startNativePathComparison(runId) {
   }
 
   nativePathCoords = [];
-  clearNativeRunPathLayer();
+
+  // Only show the native purple path in viewer mode.
+  if (document.body.classList.contains("viewer-mode")) {
+    clearNativeRunPathLayer();
+  }
 
   const { data, error } = await supabaseClient
     .from("run_points_native_test")
@@ -1655,38 +1659,34 @@ async function startNativePathComparison(runId) {
     return;
   }
 
-nativePathCoords = data
-  .map(normalizeNativeRunPoint)
-  .sort((a, b) => {
-    if (a.sequenceNum != null && b.sequenceNum != null) {
-      return a.sequenceNum - b.sequenceNum;
-    }
-
-    return (a.timestamp || 0) - (b.timestamp || 0);
-  });
-
-  addOrUpdateNativePath();
-
-if (nativePathCoords.length > 0) {
-  const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
+  nativePathCoords = data
+    .map(normalizeNativeRunPoint)
+    .sort((a, b) => {
+      if (a.sequenceNum != null && b.sequenceNum != null) {
+        return a.sequenceNum - b.sequenceNum;
+      }
+      return (a.timestamp || 0) - (b.timestamp || 0);
+    });
 
   if (document.body.classList.contains("viewer-mode")) {
-    updateViewerFromNativePoint({
-      sequence_num: lastNativePoint.sequenceNum,
-      lat: lastNativePoint.lat,
-      lon: lastNativePoint.lon,
-      recorded_at: lastNativePoint.time,
-      elevation_m: lastNativePoint.elevation,
-      inst_pace_min_per_mile: lastNativePoint.instPace,
-      avg_pace_min_per_mile: lastNativePoint.avgPace,
-      distance_m: lastNativePoint.distanceM
-    });
+    addOrUpdateNativePath();
+
+    if (nativePathCoords.length > 0) {
+      const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
+
+      updateViewerFromNativePoint({
+        sequence_num: lastNativePoint.sequenceNum,
+        lat: lastNativePoint.lat,
+        lon: lastNativePoint.lon,
+        recorded_at: lastNativePoint.time,
+        elevation_m: lastNativePoint.elevation,
+        inst_pace_min_per_mile: lastNativePoint.instPace,
+        avg_pace_min_per_mile: lastNativePoint.avgPace,
+        distance_m: lastNativePoint.distanceM
+      });
+    }
   }
-}
 
-activeNativeSupabaseChannel = supabaseClient
-
-activeNativeSupabaseChannel = supabaseClient
   activeNativeSupabaseChannel = supabaseClient
     .channel(`native_run_${runId.replace(/-/g, "_")}`)
     .on(
@@ -1701,7 +1701,6 @@ activeNativeSupabaseChannel = supabaseClient
         const pt = payload.new;
 
         upsertSortedNativeRunPoint(pt);
-        addOrUpdateNativePath();
         lastPointReceivedTime = Date.now();
 
         if (viewerConnectionLost) {
@@ -1710,10 +1709,11 @@ activeNativeSupabaseChannel = supabaseClient
           hideViewerStatusSoon();
         }
 
-if (document.body.classList.contains("viewer-mode")) {
-  updateViewerFromNativePoint(pt);
-}
-
+        // Only render purple native path and red marker in viewer mode.
+        if (document.body.classList.contains("viewer-mode")) {
+          addOrUpdateNativePath();
+          updateViewerFromNativePoint(pt);
+        }
       }
     )
     .subscribe();

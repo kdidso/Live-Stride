@@ -264,6 +264,7 @@
     let viewerConnectionWatchId = null;
     let runnerSyncHadFailure = false;
     let programmaticViewerMove = false;
+    let viewerWakeLock = null;
 
     // → DOM
     const startBtn = document.getElementById("startBtn");
@@ -302,6 +303,7 @@
 
       isFollowing = true;
       viewerFollowing = true;
+      updateViewerWakeLock();
       map.resize();
     }
 
@@ -313,6 +315,7 @@ map.on("dragstart", () => {
 
   isFollowing = false;
   viewerFollowing = false;
+  releaseViewerWakeLock();
 });
 
 map.on("zoomstart", () => {
@@ -320,11 +323,13 @@ map.on("zoomstart", () => {
 
   isFollowing = false;
   viewerFollowing = false;
+  releaseViewerWakeLock();
 });
 
     recenterBtn.onclick = () => {
       if (viewerMarker) {
         viewerFollowing = true;
+        updateViewerWakeLock();
 programmaticViewerMove = true;
 
 map.flyTo({ center: viewerMarker.getLngLat(), zoom: 16 });
@@ -532,6 +537,51 @@ function clearNativeRunPathLayer() {
         if (viewerStatusEl) viewerStatusEl.style.display = "none";
       }, 3000);
     }
+
+    async function requestViewerWakeLock() {
+      if (!("wakeLock" in navigator)) return;
+      if (!document.body.classList.contains("viewer-mode")) return;
+      if (!viewerFollowing) return;
+      if (viewerWakeLock) return;
+
+      try {
+        viewerWakeLock = await navigator.wakeLock.request("screen");
+        viewerWakeLock.addEventListener("release", () => {
+          viewerWakeLock = null;
+        });
+      } catch (err) {
+        console.warn("Viewer wake lock request failed:", err);
+      }
+    }
+
+    async function releaseViewerWakeLock() {
+      if (!viewerWakeLock) return;
+
+      const lock = viewerWakeLock;
+      viewerWakeLock = null;
+
+      try {
+        await lock.release();
+      } catch (err) {
+        console.warn("Viewer wake lock release failed:", err);
+      }
+    }
+
+    function updateViewerWakeLock() {
+      if (document.body.classList.contains("viewer-mode") && viewerFollowing) {
+        requestViewerWakeLock();
+      } else {
+        releaseViewerWakeLock();
+      }
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        updateViewerWakeLock();
+      } else {
+        releaseViewerWakeLock();
+      }
+    });
 
     async function safeInsertRunPoint(pointPayload) {
       const { error } = await supabaseClient.from("run_points").insert(pointPayload);
@@ -1095,6 +1145,7 @@ li.onclick = () => {
   searchInput.value = run.runner_name;
   viewerFollowing = true;
   selectedRunner = run.id;
+  updateViewerWakeLock();
 
   trackRunnerSupabase(run.id, run.is_live);
 
@@ -1323,6 +1374,7 @@ function updateViewerFromNativePoint(pt) {
   }
 
   if (viewerFollowing) {
+    updateViewerWakeLock();
     programmaticViewerMove = true;
 
     map.flyTo({

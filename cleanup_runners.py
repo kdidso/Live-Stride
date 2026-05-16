@@ -101,20 +101,21 @@ def cleanup_old_supabase_runs():
 
     # 2. Delete run_points first
     for run_id in run_ids:
-        points_url = f"{SUPABASE_URL}/rest/v1/run_points"
-        delete_points_params = {
-            "run_id": f"eq.{run_id}"
-        }
+        for table_name in ["run_points", "run_points_native_test"]:
+            points_url = f"{SUPABASE_URL}/rest/v1/{table_name}"
+            delete_points_params = {
+                "run_id": f"eq.{run_id}"
+            }
 
-        points_response = requests.delete(
-            points_url,
-            headers=SUPABASE_HEADERS,
-            params=delete_points_params,
-            timeout=30
-        )
-        points_response.raise_for_status()
+            points_response = requests.delete(
+                points_url,
+                headers=SUPABASE_HEADERS,
+                params=delete_points_params,
+                timeout=30
+            )
+            points_response.raise_for_status()
 
-        print(f"Deleted Supabase run_points for run {run_id}")
+            print(f"Deleted Supabase {table_name} rows for run {run_id}")
 
     # 3. Delete runs
     for run_id in run_ids:

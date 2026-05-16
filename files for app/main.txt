@@ -109,6 +109,8 @@ let viewerStatusEl = null;
 let viewerConnectionWatchId = null;
 let runnerSyncHadFailure = false;
 let activeRunStatusChannel = null;
+let runnerHeartbeatId = null;
+let lastRunnerHeartbeatTime = null;
 
 
 // → DOM references
@@ -564,6 +566,33 @@ if (error) {
   return true;
 }
 
+async function sendRunnerHeartbeat() {
+  if (!activeRunId) return;
+
+  const heartbeatIso = new Date().toISOString();
+  lastRunnerHeartbeatTime = Date.now();
+
+  if (broadcasting && broadcastRef) {
+    broadcastRef.update({
+      runner_heartbeat_at: heartbeatIso,
+      timestamp: Date.now()
+    }).catch(err => {
+      console.warn("Firebase heartbeat failed:", err);
+    });
+  }
+
+  if (!navigator.onLine) return;
+
+  const { error } = await supabaseClient
+    .from("runs")
+    .update({ runner_heartbeat_at: heartbeatIso })
+    .eq("id", activeRunId);
+
+  if (error) {
+    console.warn("Supabase heartbeat failed:", error);
+  }
+}
+
 async function safeUpdateRunSummary(updatePayload) {
   if (!activeRunId) return false;
 
@@ -973,7 +1002,7 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   }
 
   // Ignore very slow drift that is probably GPS wobble, not running/walking
-  if (speedMph < 0.3) {
+  if (speedMph < 1) {
     console.warn("Ignoring low-speed GPS drift:", speedMph.toFixed(2), "mph");
     return;
   }
@@ -1138,6 +1167,15 @@ async function startTracking() {
     );
   }, 1000);
 
+if (runnerHeartbeatId !== null) {
+  clearInterval(runnerHeartbeatId);
+}
+
+runnerHeartbeatId = setInterval(() => {
+  sendRunnerHeartbeat();
+}, 10000);
+
+
   if (isPrivateMode) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     localRunFilename = `run_${timestamp}.json`;
@@ -1184,6 +1222,11 @@ async function stopTracking() {
     clearInterval(runnerTimerId);
     runnerTimerId = null;
   }
+
+if (runnerHeartbeatId !== null) {
+  clearInterval(runnerHeartbeatId);
+  runnerHeartbeatId = null;
+}
 
   if (privateSaveIntervalId !== null) {
     clearInterval(privateSaveIntervalId);

@@ -239,7 +239,7 @@ private void uploadNativePoint(Location location) {
             return;
         }
 
-        if (speedMph < 0.3) {
+        if (speedMph < 1) {
             System.out.println("LiveStride native ignored low-speed GPS drift: " + speedMph + " mph");
             return;
         }

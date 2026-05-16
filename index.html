@@ -138,6 +138,7 @@
     <button id="broadcastBtn" style="display: none;">Broadcast</button>
     <button id="exportGpxBtn" style="display: none;">Convert to GPX</button>
     <button id="uploadStravaBtn" style="display: none;">Upload to Strava</button>
+    <button id="viewerGpxBtn" style="display: none;">Get GPX File</button>
   </div>
 
   <div id="searchBar">
@@ -224,6 +225,8 @@
     let lastComputeTime = 0;
 
     let runnerTimerId = null;
+    let runnerHeartbeatId = null;
+    let lastRunnerHeartbeatTime = null;
     let latestRunnerDistance = 0;
     let latestRunnerPace = 0;
     let latestRunnerAvgPace = 0;
@@ -266,6 +269,7 @@
     const broadcastBtn = document.getElementById("broadcastBtn");
     const exportGpxBtn = document.getElementById("exportGpxBtn");
     const uploadStravaBtn = document.getElementById("uploadStravaBtn");
+    const viewerGpxBtn = document.getElementById("viewerGpxBtn");
     const statsBar = document.getElementById("statsBar");
     const searchInput = document.getElementById("searchInput");
     const suggestionsList = document.getElementById("suggestionsList");
@@ -292,6 +296,7 @@
 
       exportGpxBtn.style.display = "none";
       uploadStravaBtn.style.display = "none";
+      viewerGpxBtn.style.display = mode === "viewer" ? "inline-block" : "none";
 
       isFollowing = true;
       viewerFollowing = true;
@@ -559,6 +564,33 @@ function clearNativeRunPathLayer() {
       return true;
     }
 
+    async function sendRunnerHeartbeat() {
+      if (!activeRunId) return;
+
+      const heartbeatIso = new Date().toISOString();
+      lastRunnerHeartbeatTime = Date.now();
+
+      if (broadcasting && broadcastRef) {
+        broadcastRef.update({
+          runner_heartbeat_at: heartbeatIso,
+          timestamp: Date.now()
+        }).catch(err => {
+          console.warn("Firebase heartbeat failed:", err);
+        });
+      }
+
+      if (!navigator.onLine) return;
+
+      const { error } = await supabaseClient
+        .from("runs")
+        .update({ runner_heartbeat_at: heartbeatIso })
+        .eq("id", activeRunId);
+
+      if (error) {
+        console.warn("Supabase heartbeat failed:", error);
+      }
+    }
+
     async function flushSupabaseQueue() {
       if (isFlushingSupabase || !activeRunId) return;
       if (!navigator.onLine) return;
@@ -711,8 +743,8 @@ function clearNativeRunPathLayer() {
           return;
         }
 
-        if (speedMph < 0.3) {
-          console.warn("Ignoring low-speed GPS drift:", speedMph.toFixed(2), "mph");
+        if (speedMph < 1.0) {
+          console.warn("Ignoring stopped/very slow GPS drift:", speedMph.toFixed(2), "mph");
           return;
         }
 
@@ -796,7 +828,8 @@ function clearNativeRunPathLayer() {
           total_distance_m: totalDistanceMeters,
           latest_lat: coord[1],
           latest_lon: coord[0],
-          latest_timestamp: recordedAt
+          latest_timestamp: recordedAt,
+          runner_heartbeat_at: new Date().toISOString()
         }).then(() => flushSupabaseQueue());
 
 fetchElevation(coord[1], coord[0]).then(elev => {
@@ -858,6 +891,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       statsBar.style.display = "block";
       exportGpxBtn.style.display = "none";
       uploadStravaBtn.style.display = "none";
+      viewerGpxBtn.style.display = mode === "viewer" ? "inline-block" : "none";
 
       if (runnerTimerId !== null) {
         clearInterval(runnerTimerId);
@@ -875,6 +909,14 @@ fetchElevation(coord[1], coord[0]).then(elev => {
           latestRunnerElevFt
         );
       }, 1000);
+
+      if (runnerHeartbeatId !== null) {
+        clearInterval(runnerHeartbeatId);
+      }
+
+      runnerHeartbeatId = setInterval(() => {
+        sendRunnerHeartbeat();
+      }, 10000);
 
       watchId = navigator.geolocation.watchPosition(
         pos => {
@@ -897,6 +939,11 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       if (runnerTimerId !== null) {
         clearInterval(runnerTimerId);
         runnerTimerId = null;
+      }
+
+      if (runnerHeartbeatId !== null) {
+        clearInterval(runnerHeartbeatId);
+        runnerHeartbeatId = null;
       }
 
       if (watchId !== null) {
@@ -955,7 +1002,8 @@ fetchElevation(coord[1], coord[0]).then(elev => {
         .from("runs")
         .insert({
           runner_name: runnerName,
-          is_live: true
+          is_live: true,
+          runner_heartbeat_at: new Date().toISOString()
         })
         .select()
         .single();
@@ -972,7 +1020,10 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
       broadcastRef = db.ref(`runners/${safeName}`);
 
-      await broadcastRef.update({ finished: false });
+      await broadcastRef.update({
+        finished: false,
+        runner_heartbeat_at: new Date().toISOString()
+      });
 
       broadcasting = true;
       broadcastBtn.style.display = "none";
@@ -1369,6 +1420,16 @@ activeRunStatusChannel = supabaseClient
     payload => {
       const run = payload.new;
 
+      if (run && run.runner_heartbeat_at) {
+        lastRunnerHeartbeatTime = new Date(run.runner_heartbeat_at).getTime();
+
+        if (viewerConnectionLost) {
+          viewerConnectionLost = false;
+          showViewerStatus("Runner reconnected", "good");
+          hideViewerStatusSoon();
+        }
+      }
+
       if (run && run.is_live === false) {
         if (run.final_time_ms != null && lastViewerData) {
           lastViewerElapsed = run.final_time_ms;
@@ -1486,17 +1547,17 @@ payload => {
 
       lastPointReceivedTime = Date.now();
 
-viewerConnectionWatchId = setInterval(async () => {
+viewerConnectionWatchId = setInterval(() => {
   if (!isLive) return;
-  if (!lastPointReceivedTime) return;
+  if (!lastRunnerHeartbeatTime) return;
 
-  const secondsSinceLastPoint = (Date.now() - lastPointReceivedTime) / 1000;
+  const secondsSinceHeartbeat = (Date.now() - lastRunnerHeartbeatTime) / 1000;
 
-  if (secondsSinceLastPoint > 45 && !viewerConnectionLost) {
+  if (secondsSinceHeartbeat > 45 && !viewerConnectionLost) {
     viewerConnectionLost = true;
     showViewerStatus("Signal lost — waiting for runner", "bad");
   }
-}, 15000);
+}, 5000);
     }
 
     // → Firebase legacy fallback viewer function kept for older Firebase-only runs
@@ -1674,6 +1735,9 @@ if (viewerFollowing) {
 
     exportGpxBtn.onclick = convertToGPX;
     uploadStravaBtn.onclick = uploadToStrava;
+    viewerGpxBtn.onclick = () => {
+      window.open("https://kdidso.github.io/livestride-export/", "_blank");
+    };
 
     map.on("load", () => setMode("runner"));
   </script>

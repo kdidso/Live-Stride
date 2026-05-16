@@ -111,6 +111,8 @@ let runnerSyncHadFailure = false;
 let activeRunStatusChannel = null;
 let runnerHeartbeatId = null;
 let lastRunnerHeartbeatTime = null;
+let viewerFreshHeartbeatCount = 0;
+let lastViewerStatusMessage = null;
 
 
 // → DOM references
@@ -1170,7 +1172,7 @@ async function startTracking() {
 if (runnerHeartbeatId !== null) {
   clearInterval(runnerHeartbeatId);
 }
-
+sendRunnerHeartbeat();
 runnerHeartbeatId = setInterval(() => {
   sendRunnerHeartbeat();
 }, 10000);
@@ -1731,12 +1733,12 @@ async function startNativePathComparison(runId) {
         upsertSortedNativeRunPoint(pt);
         lastPointReceivedTime = Date.now();
 
-        if (viewerConnectionLost) {
+        /*if (viewerConnectionLost) {
           viewerConnectionLost = false;
           showViewerStatus("Runner reconnected", "good");
           hideViewerStatusSoon();
         }
-
+        */
         // Only render purple native path and red marker in viewer mode.
         if (document.body.classList.contains("viewer-mode")) {
           addOrUpdateNativePath();
@@ -1822,6 +1824,8 @@ await startNativePathComparison(runId);
     });
   }
   */  
+
+
 activeRunStatusChannel = supabaseClient
   .channel(`run_status_${runId.replace(/-/g, "_")}`)
   .on(
@@ -1834,6 +1838,27 @@ activeRunStatusChannel = supabaseClient
     },
     payload => {
       const run = payload.new;
+if (run.runner_heartbeat_at) {
+  const heartbeatMs = new Date(run.runner_heartbeat_at).getTime();
+  const heartbeatAgeSeconds = (Date.now() - heartbeatMs) / 1000;
+
+  lastRunnerHeartbeatTime = heartbeatMs;
+
+  if (heartbeatAgeSeconds < 20) {
+    viewerFreshHeartbeatCount += 1;
+  }
+
+  if (
+    viewerConnectionLost &&
+    viewerFreshHeartbeatCount >= 2 &&
+    lastViewerStatusMessage !== "reconnected"
+  ) {
+    viewerConnectionLost = false;
+    lastViewerStatusMessage = "reconnected";
+    showViewerStatus("Runner reconnected", "good");
+    hideViewerStatusSoon();
+  }
+}
 
       if (run && run.is_live === false) {
       
@@ -1881,11 +1906,13 @@ activeSupabaseChannel = supabaseClient
 
       lastPointReceivedTime = Date.now();
 
-      if (viewerConnectionLost) {
-        viewerConnectionLost = false;
-        showViewerStatus("Runner reconnected", "good");
-        hideViewerStatusSoon();
-      }
+/*
+if (viewerConnectionLost) {
+  viewerConnectionLost = false;
+  showViewerStatus("Runner reconnected", "good");
+  hideViewerStatusSoon();
+}
+*/
 
       upsertSortedRunPoint(pt);
 
@@ -1960,16 +1987,17 @@ lastPointReceivedTime = Date.now();
 
 viewerConnectionWatchId = setInterval(() => {
   if (!isLive) return;
-  if (!lastPointReceivedTime) return;
+  if (!lastRunnerHeartbeatTime) return;
 
-  const now = Date.now();
-  const secondsSinceLastPoint = (now - lastPointReceivedTime) / 1000;
+  const secondsSinceHeartbeat = (Date.now() - lastRunnerHeartbeatTime) / 1000;
 
-  if (secondsSinceLastPoint > 15 && !viewerConnectionLost) {
+  if (secondsSinceHeartbeat > 60 && !viewerConnectionLost) {
     viewerConnectionLost = true;
+    viewerFreshHeartbeatCount = 0;
+    lastViewerStatusMessage = "lost";
     showViewerStatus("Signal lost — waiting for runner", "bad");
   }
-}, 3000);
+}, 5000);
 
 }
 

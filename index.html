@@ -258,6 +258,8 @@
     let connectionStatusEl = null;
     let lastPointReceivedTime = null;
     let viewerConnectionLost = false;
+    let viewerFreshHeartbeatCount = 0;
+    let lastViewerStatusMessage = null;
     let viewerStatusEl = null;
     let viewerConnectionWatchId = null;
     let runnerSyncHadFailure = false;
@@ -296,7 +298,7 @@
 
       exportGpxBtn.style.display = "none";
       uploadStravaBtn.style.display = "none";
-      viewerGpxBtn.style.display = mode === "viewer" ? "inline-block" : "none";
+      viewerGpxBtn.style.display = document.body.classList.contains("viewer-mode") ? "inline-block" : "none";
 
       isFollowing = true;
       viewerFollowing = true;
@@ -891,7 +893,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       statsBar.style.display = "block";
       exportGpxBtn.style.display = "none";
       uploadStravaBtn.style.display = "none";
-      viewerGpxBtn.style.display = mode === "viewer" ? "inline-block" : "none";
+      viewerGpxBtn.style.display = document.body.classList.contains("viewer-mode") ? "inline-block" : "none";
 
       if (runnerTimerId !== null) {
         clearInterval(runnerTimerId);
@@ -913,6 +915,8 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       if (runnerHeartbeatId !== null) {
         clearInterval(runnerHeartbeatId);
       }
+
+      sendRunnerHeartbeat();
 
       runnerHeartbeatId = setInterval(() => {
         sendRunnerHeartbeat();
@@ -1056,7 +1060,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 
       const { data, error } = await supabaseClient
         .from("runs")
-        .select("id, runner_name, started_at, is_live")
+        .select("id, runner_name, started_at, is_live, runner_heartbeat_at")
         .ilike("runner_name", `%${q}%`)
         .order("started_at", { ascending: false })
         .limit(10);
@@ -1173,11 +1177,7 @@ async function startNativePathComparison(runId) {
         upsertSortedNativeRunPoint(pt);
         lastPointReceivedTime = Date.now();
 
-        if (viewerConnectionLost) {
-          viewerConnectionLost = false;
-          showViewerStatus("Runner reconnected", "good");
-          hideViewerStatusSoon();
-        }
+        // Heartbeat controls lost/reconnected status, not intermittent point inserts.
 
         // Only render purple native path and red marker in viewer mode.
         if (document.body.classList.contains("viewer-mode")) {
@@ -1363,6 +1363,9 @@ if (activeRunStatusChannel) {
 
       pathCoords = [];
       nativePathCoords = [];
+      viewerFreshHeartbeatCount = 0;
+      lastViewerStatusMessage = null;
+      lastRunnerHeartbeatTime = null;
       clearRunPathLayer();
       clearNativeRunPathLayer();
 
@@ -1421,10 +1424,22 @@ activeRunStatusChannel = supabaseClient
       const run = payload.new;
 
       if (run && run.runner_heartbeat_at) {
-        lastRunnerHeartbeatTime = new Date(run.runner_heartbeat_at).getTime();
+        const heartbeatMs = new Date(run.runner_heartbeat_at).getTime();
+        const heartbeatAgeSeconds = (Date.now() - heartbeatMs) / 1000;
 
-        if (viewerConnectionLost) {
+        lastRunnerHeartbeatTime = heartbeatMs;
+
+        if (heartbeatAgeSeconds < 20) {
+          viewerFreshHeartbeatCount += 1;
+        }
+
+        if (
+          viewerConnectionLost &&
+          viewerFreshHeartbeatCount >= 2 &&
+          lastViewerStatusMessage !== "reconnected"
+        ) {
           viewerConnectionLost = false;
+          lastViewerStatusMessage = "reconnected";
           showViewerStatus("Runner reconnected", "good");
           hideViewerStatusSoon();
         }
@@ -1479,11 +1494,7 @@ activeRunStatusChannel = supabaseClient
 
             lastPointReceivedTime = Date.now();
 
-            if (viewerConnectionLost) {
-              viewerConnectionLost = false;
-              showViewerStatus("Runner reconnected", "good");
-              hideViewerStatusSoon();
-            }
+            // Heartbeat controls lost/reconnected status, not run_points inserts.
 
             upsertSortedRunPoint(pt);
             //addOrUpdatePath();
@@ -1504,11 +1515,7 @@ payload => {
 
   lastPointReceivedTime = Date.now();
 
-  if (viewerConnectionLost) {
-    viewerConnectionLost = false;
-    showViewerStatus("Runner reconnected", "good");
-    hideViewerStatusSoon();
-  }
+  // Heartbeat controls lost/reconnected status, not run_points updates.
 
   const existingPoint = pathCoords.find(p =>
     (p.sequenceNum != null && pt.sequence_num != null && p.sequenceNum === pt.sequence_num) ||
@@ -1553,8 +1560,10 @@ viewerConnectionWatchId = setInterval(() => {
 
   const secondsSinceHeartbeat = (Date.now() - lastRunnerHeartbeatTime) / 1000;
 
-  if (secondsSinceHeartbeat > 45 && !viewerConnectionLost) {
+  if (secondsSinceHeartbeat > 60 && !viewerConnectionLost) {
     viewerConnectionLost = true;
+    viewerFreshHeartbeatCount = 0;
+    lastViewerStatusMessage = "lost";
     showViewerStatus("Signal lost — waiting for runner", "bad");
   }
 }, 5000);

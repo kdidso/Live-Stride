@@ -1177,7 +1177,12 @@ async function startNativePathComparison(runId) {
         upsertSortedNativeRunPoint(pt);
         lastPointReceivedTime = Date.now();
 
-        // Heartbeat controls lost/reconnected status, not intermittent point inserts.
+        if (viewerConnectionLost && lastViewerStatusMessage !== "native-reconnected") {
+          viewerConnectionLost = false;
+          viewerFreshHeartbeatCount = 0;
+          lastViewerStatusMessage = "native-reconnected";
+          hideViewerStatusSoon();
+        }
 
         // Only render purple native path and red marker in viewer mode.
         if (document.body.classList.contains("viewer-mode")) {
@@ -1556,11 +1561,22 @@ payload => {
 
 viewerConnectionWatchId = setInterval(() => {
   if (!isLive) return;
-  if (!lastRunnerHeartbeatTime) return;
 
-  const secondsSinceHeartbeat = (Date.now() - lastRunnerHeartbeatTime) / 1000;
+  const secondsSinceHeartbeat =
+    lastRunnerHeartbeatTime
+      ? (Date.now() - lastRunnerHeartbeatTime) / 1000
+      : Infinity;
 
-  if (secondsSinceHeartbeat > 60 && !viewerConnectionLost) {
+  const secondsSinceNativePoint =
+    lastPointReceivedTime
+      ? (Date.now() - lastPointReceivedTime) / 1000
+      : Infinity;
+
+  if (
+    secondsSinceHeartbeat > 60 &&
+    secondsSinceNativePoint > 60 &&
+    !viewerConnectionLost
+  ) {
     viewerConnectionLost = true;
     viewerFreshHeartbeatCount = 0;
     lastViewerStatusMessage = "lost";

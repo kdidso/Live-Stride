@@ -28,10 +28,7 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
+import java.time.Instant;
 
 public class LiveStrideNativeTrackerService extends Service {
 
@@ -56,10 +53,6 @@ public class LiveStrideNativeTrackerService extends Service {
     private double totalDistanceMeters = 0.0;
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
-
-    private final Object nativeQueueLock = new Object();
-    private final List<JSONObject> pendingNativePoints = new ArrayList<>();
-    private boolean isFlushingNativeQueue = false;
     @Override
     public void onCreate() {
         super.onCreate();
@@ -93,11 +86,7 @@ public class LiveStrideNativeTrackerService extends Service {
             totalDistanceMeters = 0.0;
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
-            synchronized (nativeQueueLock) {
-                pendingNativePoints.clear();
-                isFlushingNativeQueue = false;
-            }
-
+            
             startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
             startLocationUpdates();
 
@@ -106,7 +95,6 @@ public class LiveStrideNativeTrackerService extends Service {
 
         if (ACTION_STOP.equals(intent.getAction())) {
             stopLocationUpdates();
-            flushNativePointQueue();
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
@@ -217,150 +205,6 @@ private Double fetchElevationMeters(double lat, double lon) {
     }
 }
 
-
-private void enqueueNativePoint(JSONObject body) {
-    synchronized (nativeQueueLock) {
-        pendingNativePoints.add(body);
-        Collections.sort(pendingNativePoints, new Comparator<JSONObject>() {
-            @Override
-            public int compare(JSONObject a, JSONObject b) {
-                return Integer.compare(
-                        a.optInt("sequence_num", Integer.MAX_VALUE),
-                        b.optInt("sequence_num", Integer.MAX_VALUE)
-                );
-            }
-        });
-    }
-
-    flushNativePointQueue();
-}
-
-private void flushNativePointQueue() {
-    synchronized (nativeQueueLock) {
-        if (isFlushingNativeQueue) return;
-        if (pendingNativePoints.isEmpty()) return;
-        isFlushingNativeQueue = true;
-    }
-
-    new Thread(() -> {
-        try {
-            while (true) {
-                JSONObject nextPoint;
-
-                synchronized (nativeQueueLock) {
-                    if (pendingNativePoints.isEmpty()) {
-                        break;
-                    }
-
-                    Collections.sort(pendingNativePoints, new Comparator<JSONObject>() {
-                        @Override
-                        public int compare(JSONObject a, JSONObject b) {
-                            return Integer.compare(
-                                    a.optInt("sequence_num", Integer.MAX_VALUE),
-                                    b.optInt("sequence_num", Integer.MAX_VALUE)
-                            );
-                        }
-                    });
-
-                    nextPoint = pendingNativePoints.get(0);
-                }
-
-                boolean uploaded = uploadNativePointBody(nextPoint);
-
-                if (!uploaded) {
-                    break;
-                }
-
-                synchronized (nativeQueueLock) {
-                    if (!pendingNativePoints.isEmpty()) {
-                        int uploadedSequence = nextPoint.optInt("sequence_num", -1);
-                        int firstSequence = pendingNativePoints.get(0).optInt("sequence_num", -2);
-
-                        if (uploadedSequence == firstSequence) {
-                            pendingNativePoints.remove(0);
-                        } else {
-                            for (int i = 0; i < pendingNativePoints.size(); i++) {
-                                if (pendingNativePoints.get(i).optInt("sequence_num", -2) == uploadedSequence) {
-                                    pendingNativePoints.remove(i);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                try {
-                    Thread.sleep(75);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-        } finally {
-            synchronized (nativeQueueLock) {
-                isFlushingNativeQueue = false;
-
-                if (!pendingNativePoints.isEmpty() && isTracking) {
-                    new Thread(() -> {
-                        try {
-                            Thread.sleep(5000);
-                        } catch (InterruptedException ignored) {
-                            Thread.currentThread().interrupt();
-                        }
-                        flushNativePointQueue();
-                    }).start();
-                }
-            }
-        }
-    }).start();
-}
-
-private boolean uploadNativePointBody(JSONObject body) {
-    HttpURLConnection conn = null;
-
-    try {
-        URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test?on_conflict=run_id,sequence_num");
-
-        conn = (HttpURLConnection) url.openConnection();
-
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("apikey", supabaseAnonKey);
-        conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("Accept-Profile", "public");
-        conn.setRequestProperty("Content-Profile", "public");
-        conn.setRequestProperty("Prefer", "resolution=merge-duplicates,return=minimal");
-        conn.setConnectTimeout(8000);
-        conn.setReadTimeout(8000);
-        conn.setDoOutput(true);
-
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(body.toString().getBytes("UTF-8"));
-        }
-
-        int code = conn.getResponseCode();
-
-        if (code < 200 || code >= 300) {
-            System.out.println("LiveStride native queued point upload failed. HTTP "
-                    + code + " seq=" + body.optInt("sequence_num", -1));
-            return false;
-        }
-
-        System.out.println("LiveStride native queued point uploaded seq="
-                + body.optInt("sequence_num", -1));
-
-        return true;
-
-    } catch (Exception e) {
-        System.out.println("LiveStride native queued point upload exception: " + e.getMessage());
-        return false;
-    } finally {
-        if (conn != null) conn.disconnect();
-    }
-}
-
-
 private void uploadNativePoint(Location location) {
     final double lat = location.getLatitude();
     final double lon = location.getLongitude();
@@ -429,10 +273,7 @@ private void uploadNativePoint(Location location) {
     final double finalDistanceMeters = totalDistanceMeters;
     final double finalInstPaceMinPerMile = instPaceMinPerMile;
     final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
-    final String recordedAt =
-            new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-                    java.util.Locale.US)
-                    .format(new java.util.Date(pointTimeMs));
+    final String recordedAt = Instant.ofEpochMilli(pointTimeMs).toString();
 
     new Thread(() -> {
         try {
@@ -456,12 +297,36 @@ private void uploadNativePoint(Location location) {
             body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
             body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
             body.put("app_state", "foreground_service");
-            body.put("note", "Inserted from native Android GPS service with queued oldest-first upload recovery");
+            body.put("note", "Inserted from native Android GPS service with JS-matching GPS filtering");
 
-            enqueueNativePoint(body);
+            URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
+
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("apikey", supabaseAnonKey);
+            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("Accept-Profile", "public");
+            conn.setRequestProperty("Content-Profile", "public");
+            conn.setRequestProperty("Prefer", "return=minimal");
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toString().getBytes("UTF-8"));
+            }
+
+            int code = conn.getResponseCode();
+
+            if (code < 200 || code >= 300) {
+                System.out.println("LiveStride native point upload failed. HTTP " + code);
+            }
+
+            conn.disconnect();
 
         } catch (Exception e) {
-            System.out.println("LiveStride native point queue exception: " + e.getMessage());
+            System.out.println("LiveStride native point upload exception: " + e.getMessage());
         }
     }).start();
 }

@@ -29,6 +29,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
@@ -220,7 +221,7 @@ private Double fetchElevationMeters(double lat, double lon) {
 private void enqueueNativePoint(JSONObject body) {
     synchronized (nativeQueueLock) {
         pendingNativePoints.add(body);
-        pendingNativePoints.sort(new Comparator<JSONObject>() {
+        Collections.sort(pendingNativePoints, new Comparator<JSONObject>() {
             @Override
             public int compare(JSONObject a, JSONObject b) {
                 return Integer.compare(
@@ -251,7 +252,7 @@ private void flushNativePointQueue() {
                         break;
                     }
 
-                    pendingNativePoints.sort(new Comparator<JSONObject>() {
+                    Collections.sort(pendingNativePoints, new Comparator<JSONObject>() {
                         @Override
                         public int compare(JSONObject a, JSONObject b) {
                             return Integer.compare(

@@ -265,6 +265,9 @@
     let runnerSyncHadFailure = false;
     let programmaticViewerMove = false;
     let viewerWakeLock = null;
+    let viewerLastNativeSequenceNum = null;
+    let pendingNativeGapRanges = [];
+    let isRepairingNativeGaps = false;
 
     // → DOM
     const startBtn = document.getElementById("startBtn");
@@ -431,14 +434,49 @@ setTimeout(() => {
       }
     }
 function addOrUpdateNativePath() {
-  const coords = nativePathCoords.map(pt => [pt.lon, pt.lat]);
+  const sorted = [...nativePathCoords].sort((a, b) => {
+    if (a.sequenceNum != null && b.sequenceNum != null) {
+      return a.sequenceNum - b.sequenceNum;
+    }
+    return (a.timestamp || 0) - (b.timestamp || 0);
+  });
+
+  const segments = [];
+  let currentSegment = [];
+
+  sorted.forEach((pt, index) => {
+    const coord = [pt.lon, pt.lat];
+    const prev = sorted[index - 1];
+
+    const hasSequenceGap =
+      prev &&
+      prev.sequenceNum != null &&
+      pt.sequenceNum != null &&
+      pt.sequenceNum > prev.sequenceNum + 1;
+
+    if (hasSequenceGap && currentSegment.length > 0) {
+      segments.push(currentSegment);
+      currentSegment = [];
+    }
+
+    currentSegment.push(coord);
+  });
+
+  if (currentSegment.length > 0) {
+    segments.push(currentSegment);
+  }
 
   const data = {
     type: "Feature",
-    geometry: {
-      type: "LineString",
-      coordinates: coords
-    }
+    geometry: segments.length <= 1
+      ? {
+          type: "LineString",
+          coordinates: segments[0] || []
+        }
+      : {
+          type: "MultiLineString",
+          coordinates: segments
+        }
   };
 
   if (!map.getSource("native-run-path")) {
@@ -526,9 +564,12 @@ function clearNativeRunPathLayer() {
       }
 
       viewerStatusEl.textContent = message;
-      viewerStatusEl.style.background = type === "bad"
-        ? "rgba(200,0,0,0.85)"
-        : "rgba(0,120,0,0.85)";
+      viewerStatusEl.style.background =
+        type === "bad"
+          ? "rgba(200,0,0,0.85)"
+          : type === "warning"
+            ? "rgba(180,135,0,0.88)"
+            : "rgba(0,120,0,0.85)";
       viewerStatusEl.style.display = "block";
     }
 
@@ -1193,6 +1234,10 @@ async function startNativePathComparison(runId) {
       return (a.timestamp || 0) - (b.timestamp || 0);
     });
 
+  viewerLastNativeSequenceNum = nativePathCoords.length > 0
+    ? Math.max(...nativePathCoords.map(pt => pt.sequenceNum ?? -1))
+    : null;
+
   if (document.body.classList.contains("viewer-mode")) {
     addOrUpdateNativePath();
 
@@ -1225,6 +1270,7 @@ async function startNativePathComparison(runId) {
       payload => {
         const pt = payload.new;
 
+        handleNativeSequenceArrival(pt, runId);
         upsertSortedNativeRunPoint(pt);
         lastPointReceivedTime = Date.now();
 
@@ -1327,6 +1373,127 @@ function upsertSortedNativeRunPoint(pt) {
 }
     
     
+
+function mergeNativeRunPointRows(rows) {
+  rows.forEach(row => {
+    upsertSortedNativeRunPoint(row);
+  });
+
+  addOrUpdateNativePath();
+
+  if (nativePathCoords.length > 0) {
+    const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
+
+    updateViewerFromNativePoint({
+      sequence_num: lastNativePoint.sequenceNum,
+      lat: lastNativePoint.lat,
+      lon: lastNativePoint.lon,
+      recorded_at: lastNativePoint.time,
+      elevation_m: lastNativePoint.elevation,
+      inst_pace_min_per_mile: lastNativePoint.instPace,
+      avg_pace_min_per_mile: lastNativePoint.avgPace,
+      distance_m: lastNativePoint.distanceM
+    });
+  }
+}
+
+function addPendingNativeGap(startSeq, endSeq) {
+  if (startSeq == null || endSeq == null || endSeq < startSeq) return;
+
+  const alreadyExists = pendingNativeGapRanges.some(range =>
+    range.startSeq === startSeq && range.endSeq === endSeq
+  );
+
+  if (!alreadyExists) {
+    pendingNativeGapRanges.push({ startSeq, endSeq });
+  }
+}
+
+async function fetchNativeGapRange(runId, startSeq, endSeq) {
+  const { data, error } = await supabaseClient
+    .from("run_points_native_test")
+    .select("*")
+    .eq("run_id", runId)
+    .gte("sequence_num", startSeq)
+    .lte("sequence_num", endSeq)
+    .order("sequence_num", { ascending: true });
+
+  if (error) {
+    console.warn("Native gap fetch failed:", error);
+    return false;
+  }
+
+  if (!data || data.length === 0) {
+    return false;
+  }
+
+  mergeNativeRunPointRows(data);
+
+  const foundSeqs = new Set(data.map(row => row.sequence_num));
+  return Array.from({ length: endSeq - startSeq + 1 }, (_, i) => startSeq + i)
+    .every(seq => foundSeqs.has(seq));
+}
+
+async function repairPendingNativeGaps(runId) {
+  if (isRepairingNativeGaps || !runId || pendingNativeGapRanges.length === 0) return;
+
+  isRepairingNativeGaps = true;
+
+  try {
+    showViewerStatus("Runner signal restored — rebuilding missing path", "warning");
+
+    const remaining = [];
+
+    for (const range of pendingNativeGapRanges) {
+      const complete = await fetchNativeGapRange(runId, range.startSeq, range.endSeq);
+
+      if (!complete) {
+        remaining.push(range);
+      }
+    }
+
+    pendingNativeGapRanges = remaining;
+
+    if (pendingNativeGapRanges.length === 0) {
+      lastViewerStatusMessage = "caught-up";
+      showViewerStatus("Runner path caught up", "good");
+      hideViewerStatusSoon();
+    } else {
+      lastViewerStatusMessage = "catching-up";
+      showViewerStatus("Signal restored — waiting for missing points", "warning");
+    }
+  } finally {
+    isRepairingNativeGaps = false;
+  }
+}
+
+function handleNativeSequenceArrival(pt, runId) {
+  const incomingSeq = pt.sequence_num ?? null;
+
+  if (incomingSeq == null) {
+    return;
+  }
+
+  if (
+    viewerLastNativeSequenceNum != null &&
+    incomingSeq > viewerLastNativeSequenceNum + 1
+  ) {
+    addPendingNativeGap(viewerLastNativeSequenceNum + 1, incomingSeq - 1);
+
+    showViewerStatus("Runner signal restored — attempting to restore full path", "warning");
+    repairPendingNativeGaps(runId);
+  }
+
+  viewerLastNativeSequenceNum = Math.max(
+    viewerLastNativeSequenceNum ?? incomingSeq,
+    incomingSeq
+  );
+
+  if (pendingNativeGapRanges.length > 0) {
+    repairPendingNativeGaps(runId);
+  }
+}
+
 function updateViewerFromNativePoint(pt) {
   const nativePoint = normalizeNativeRunPoint(pt);
 
@@ -1420,6 +1587,9 @@ if (activeRunStatusChannel) {
 
       pathCoords = [];
       nativePathCoords = [];
+      viewerLastNativeSequenceNum = null;
+      pendingNativeGapRanges = [];
+      isRepairingNativeGaps = false;
       viewerFreshHeartbeatCount = 0;
       lastViewerStatusMessage = null;
       lastRunnerHeartbeatTime = null;

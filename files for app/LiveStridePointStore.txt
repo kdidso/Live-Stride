@@ -1,0 +1,285 @@
+package com.kdidso.livestride;
+
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
+import android.util.Log;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Local persistent storage for native LiveStride GPS points.
+ *
+ * Purpose:
+ * - Save every native GPS point immediately on the phone.
+ * - Mark points uploaded only after Supabase confirms success.
+ * - Leave failed/offline points pending for a later flush phase.
+ *
+ * No external storage permission is needed. Android stores this database in:
+ * /data/user/0/com.kdidso.livestride/databases/livestride_native_points.db
+ */
+public class LiveStridePointStore extends SQLiteOpenHelper {
+
+    private static final String TAG = "LiveStrideSQLite";
+    private static final String DATABASE_NAME = "livestride_native_points.db";
+    private static final int DATABASE_VERSION = 1;
+
+    public static final String TABLE_NATIVE_POINTS = "native_run_points";
+
+    public LiveStridePointStore(Context context) {
+        super(context, DATABASE_NAME, null, DATABASE_VERSION);
+    }
+
+    @Override
+    public void onCreate(SQLiteDatabase db) {
+        db.execSQL(
+                "CREATE TABLE IF NOT EXISTS " + TABLE_NATIVE_POINTS + " (" +
+                        "local_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "run_id TEXT, " +
+                        "runner_name TEXT, " +
+                        "source TEXT, " +
+                        "native_session_id TEXT, " +
+                        "sequence_num INTEGER, " +
+                        "lat REAL NOT NULL, " +
+                        "lon REAL NOT NULL, " +
+                        "accuracy REAL, " +
+                        "recorded_at TEXT NOT NULL, " +
+                        "distance_m REAL, " +
+                        "inst_pace_min_per_mile REAL, " +
+                        "avg_pace_min_per_mile REAL, " +
+                        "elevation_m REAL, " +
+                        "app_state TEXT, " +
+                        "note TEXT, " +
+                        "uploaded INTEGER NOT NULL DEFAULT 0, " +
+                        "uploaded_at TEXT, " +
+                        "created_at_ms INTEGER NOT NULL" +
+                        ")"
+        );
+
+        db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_native_points_run_sequence " +
+                        "ON " + TABLE_NATIVE_POINTS + " (run_id, sequence_num)"
+        );
+
+        db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_native_points_uploaded " +
+                        "ON " + TABLE_NATIVE_POINTS + " (uploaded, created_at_ms)"
+        );
+    }
+
+    @Override
+    public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        // Future migrations will go here.
+    }
+
+    public synchronized long insertNativePoint(JSONObject body) throws JSONException {
+        ContentValues values = new ContentValues();
+
+        putString(values, "run_id", body, "run_id");
+        putString(values, "runner_name", body, "runner_name");
+        putString(values, "source", body, "source");
+        putString(values, "native_session_id", body, "native_session_id");
+        putInteger(values, "sequence_num", body, "sequence_num");
+        putDouble(values, "lat", body, "lat");
+        putDouble(values, "lon", body, "lon");
+        putDouble(values, "accuracy", body, "accuracy");
+        putString(values, "recorded_at", body, "recorded_at");
+        putDouble(values, "distance_m", body, "distance_m");
+        putDouble(values, "inst_pace_min_per_mile", body, "inst_pace_min_per_mile");
+        putDouble(values, "avg_pace_min_per_mile", body, "avg_pace_min_per_mile");
+        putDouble(values, "elevation_m", body, "elevation_m");
+        putString(values, "app_state", body, "app_state");
+        putString(values, "note", body, "note");
+
+        values.put("uploaded", 0);
+        values.put("created_at_ms", System.currentTimeMillis());
+
+        SQLiteDatabase db = getWritableDatabase();
+        long localId = db.insertOrThrow(TABLE_NATIVE_POINTS, null, values);
+
+        Log.i(TAG, "Saved native point local_id=" + localId
+                + " seq=" + body.optInt("sequence_num", -1)
+                + " pendingCount=" + countPending());
+
+        return localId;
+    }
+
+    public synchronized void markUploaded(long localId) {
+        ContentValues values = new ContentValues();
+        values.put("uploaded", 1);
+        values.put("uploaded_at", isoNow());
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ?",
+                new String[]{String.valueOf(localId)}
+        );
+
+        Log.i(TAG, "Marked native point uploaded local_id=" + localId
+                + " pendingCount=" + countPending());
+    }
+
+    public synchronized int countPending() {
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM " + TABLE_NATIVE_POINTS + " WHERE uploaded = 0",
+                null
+        );
+
+        try {
+            if (cursor.moveToFirst()) {
+                return cursor.getInt(0);
+            }
+            return 0;
+        } finally {
+            cursor.close();
+        }
+    }
+
+    public synchronized int countPendingForRun(String runId) {
+        if (runId == null) return 0;
+
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM " + TABLE_NATIVE_POINTS + " WHERE uploaded = 0 AND run_id = ?",
+                new String[]{runId}
+        );
+
+        try {
+            if (cursor.moveToFirst()) {
+                return cursor.getInt(0);
+            }
+            return 0;
+        } finally {
+            cursor.close();
+        }
+    }
+
+    public synchronized List<JSONObject> getPendingUploadBodies(int limit) {
+        List<JSONObject> rows = new ArrayList<>();
+
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.query(
+                TABLE_NATIVE_POINTS,
+                null,
+                "uploaded = 0",
+                null,
+                null,
+                null,
+                "created_at_ms ASC, local_id ASC",
+                String.valueOf(limit)
+        );
+
+        try {
+            while (cursor.moveToNext()) {
+                rows.add(cursorToJson(cursor));
+            }
+        } finally {
+            cursor.close();
+        }
+
+        return rows;
+    }
+
+    private JSONObject cursorToJson(Cursor cursor) {
+        JSONObject json = new JSONObject();
+
+        try {
+            putJsonLong(json, "local_id", cursor);
+            putJsonString(json, "run_id", cursor);
+            putJsonString(json, "runner_name", cursor);
+            putJsonString(json, "source", cursor);
+            putJsonString(json, "native_session_id", cursor);
+            putJsonInt(json, "sequence_num", cursor);
+            putJsonDouble(json, "lat", cursor);
+            putJsonDouble(json, "lon", cursor);
+            putJsonDouble(json, "accuracy", cursor);
+            putJsonString(json, "recorded_at", cursor);
+            putJsonDouble(json, "distance_m", cursor);
+            putJsonDouble(json, "inst_pace_min_per_mile", cursor);
+            putJsonDouble(json, "avg_pace_min_per_mile", cursor);
+            putJsonDouble(json, "elevation_m", cursor);
+            putJsonString(json, "app_state", cursor);
+            putJsonString(json, "note", cursor);
+        } catch (JSONException e) {
+            Log.w(TAG, "Could not build pending point JSON: " + e.getMessage());
+        }
+
+        return json;
+    }
+
+    private static void putString(ContentValues values, String column, JSONObject body, String key) {
+        if (!body.has(key) || body.isNull(key)) {
+            values.putNull(column);
+        } else {
+            values.put(column, body.optString(key, null));
+        }
+    }
+
+    private static void putInteger(ContentValues values, String column, JSONObject body, String key) {
+        if (!body.has(key) || body.isNull(key)) {
+            values.putNull(column);
+        } else {
+            values.put(column, body.optInt(key));
+        }
+    }
+
+    private static void putDouble(ContentValues values, String column, JSONObject body, String key) {
+        if (!body.has(key) || body.isNull(key)) {
+            values.putNull(column);
+        } else {
+            values.put(column, body.optDouble(key));
+        }
+    }
+
+    private static void putJsonString(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getString(idx));
+        }
+    }
+
+    private static void putJsonInt(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getInt(idx));
+        }
+    }
+
+    private static void putJsonLong(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getLong(idx));
+        }
+    }
+
+    private static void putJsonDouble(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getDouble(idx));
+        }
+    }
+
+    private static String isoNow() {
+        return new java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                java.util.Locale.US
+        ).format(new java.util.Date());
+    }
+}

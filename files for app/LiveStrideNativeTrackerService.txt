@@ -11,6 +11,7 @@ import android.location.Location;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
@@ -28,8 +29,6 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.List;
 
 public class LiveStrideNativeTrackerService extends Service {
 
@@ -54,16 +53,12 @@ public class LiveStrideNativeTrackerService extends Service {
     private double totalDistanceMeters = 0.0;
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
-
-    // Phase 1A: store only failed native uploads in memory so we can verify
-    // whether failed Supabase POSTs are being captured for later retry logic.
-    private final Object failedNativeQueueLock = new Object();
-    private final List<JSONObject> failedNativeUploadQueue = new ArrayList<>();
-
+    private LiveStridePointStore pointStore;
     @Override
     public void onCreate() {
         super.onCreate();
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        pointStore = new LiveStridePointStore(this);
         createNotificationChannel();
     }
 
@@ -79,7 +74,6 @@ public class LiveStrideNativeTrackerService extends Service {
             runId = intent.getStringExtra("runId");
             runnerName = intent.getStringExtra("runnerName");
             nativeSessionId = intent.getStringExtra("nativeSessionId");
-            android.util.Log.i("LiveStrideNative", "PHASE 1A SERVICE STARTED");
 
             if (runnerName == null || runnerName.trim().isEmpty()) {
                 runnerName = "Native Test Runner";
@@ -89,16 +83,13 @@ public class LiveStrideNativeTrackerService extends Service {
                 nativeSessionId = "native_" + System.currentTimeMillis();
             }  
 
+            Log.i("LiveStrideNative", "SQLite native point storage active. Pending before run=" + pointStore.countPending());
+
             sequenceNum = 0;
             previousLocation = null;
             totalDistanceMeters = 0.0;
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
-
-            synchronized (failedNativeQueueLock) {
-                failedNativeUploadQueue.clear();
-            }
-            System.out.println("LiveStride native failed-upload queue cleared for new run");
             
             startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
             startLocationUpdates();
@@ -108,7 +99,6 @@ public class LiveStrideNativeTrackerService extends Service {
 
         if (ACTION_STOP.equals(intent.getAction())) {
             stopLocationUpdates();
-            System.out.println("LiveStride native failed-upload queue final size=" + getFailedNativeQueueSize());
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
@@ -219,32 +209,6 @@ private Double fetchElevationMeters(double lat, double lon) {
     }
 }
 
-private void queueFailedNativePoint(JSONObject body, String reason) {
-    if (body == null) {
-        System.out.println("LiveStride native failed-upload queue skipped null body. reason=" + reason);
-        return;
-    }
-
-    int queueSize;
-    synchronized (failedNativeQueueLock) {
-        failedNativeUploadQueue.add(body);
-        queueSize = failedNativeUploadQueue.size();
-    }
-
-    System.out.println(
-            "LiveStride native failed-upload queue added seq="
-                    + body.optInt("sequence_num", -1)
-                    + " reason=" + reason
-                    + " queueSize=" + queueSize
-    );
-}
-
-private int getFailedNativeQueueSize() {
-    synchronized (failedNativeQueueLock) {
-        return failedNativeUploadQueue.size();
-    }
-}
-
 private void uploadNativePoint(Location location) {
     final double lat = location.getLatitude();
     final double lon = location.getLongitude();
@@ -320,11 +284,9 @@ private void uploadNativePoint(Location location) {
         ).format(new java.util.Date(pointTimeMs));
 
     new Thread(() -> {
-        JSONObject body = null;
-
         try {
             Double elevationMeters = fetchElevationMeters(lat, lon);
-            body = new JSONObject();
+            JSONObject body = new JSONObject();
 
             if (runId != null && !runId.trim().isEmpty()) {
                 body.put("run_id", runId);
@@ -343,42 +305,68 @@ private void uploadNativePoint(Location location) {
             body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
             body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
             body.put("app_state", "foreground_service");
-            body.put("note", "Inserted from native Android GPS service with JS-matching GPS filtering");
+            body.put("note", "Inserted from native Android GPS service with SQLite-backed local storage");
 
-            URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
+            // Phase SQLite-1:
+            // Save every native point locally first. This makes the phone-side record durable
+            // before any Supabase network attempt is made.
+            long localId = pointStore.insertNativePoint(body);
 
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            boolean uploaded = uploadNativePointBody(body);
 
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("apikey", supabaseAnonKey);
-            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("Accept", "application/json");
-            conn.setRequestProperty("Accept-Profile", "public");
-            conn.setRequestProperty("Content-Profile", "public");
-            conn.setRequestProperty("Prefer", "return=minimal");
-            conn.setDoOutput(true);
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(body.toString().getBytes("UTF-8"));
-            }
-
-            int code = conn.getResponseCode();
-
-            if (code < 200 || code >= 300) {
-                System.out.println("LiveStride native point upload failed. HTTP " + code);
-                queueFailedNativePoint(body, "HTTP " + code);
+            if (uploaded) {
+                pointStore.markUploaded(localId);
+                Log.i("LiveStrideNative", "SQLite point uploaded seq=" + thisSequence + " local_id=" + localId);
             } else {
-                System.out.println("LiveStride native point uploaded seq=" + thisSequence);
+                Log.w("LiveStrideNative", "SQLite point left pending seq=" + thisSequence
+                        + " local_id=" + localId
+                        + " pendingForRun=" + pointStore.countPendingForRun(runId));
             }
-
-            conn.disconnect();
 
         } catch (Exception e) {
-            System.out.println("LiveStride native point upload exception: " + e.getMessage());
-            queueFailedNativePoint(body, "exception " + e.getMessage());
+            System.out.println("LiveStride native point SQLite/upload exception: " + e.getMessage());
         }
     }).start();
+}
+
+private boolean uploadNativePointBody(JSONObject body) {
+    HttpURLConnection conn = null;
+
+    try {
+        URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
+
+        conn = (HttpURLConnection) url.openConnection();
+
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("apikey", supabaseAnonKey);
+        conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setRequestProperty("Accept-Profile", "public");
+        conn.setRequestProperty("Content-Profile", "public");
+        conn.setRequestProperty("Prefer", "return=minimal");
+        conn.setDoOutput(true);
+
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(body.toString().getBytes("UTF-8"));
+        }
+
+        int code = conn.getResponseCode();
+
+        if (code < 200 || code >= 300) {
+            System.out.println("LiveStride native point upload failed. HTTP "
+                    + code + " seq=" + body.optInt("sequence_num", -1));
+            return false;
+        }
+
+        return true;
+
+    } catch (Exception e) {
+        System.out.println("LiveStride native point upload exception: " + e.getMessage());
+        return false;
+    } finally {
+        if (conn != null) conn.disconnect();
+    }
 }
 
     private Notification buildNotification(String text) {

@@ -28,7 +28,8 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 public class LiveStrideNativeTrackerService extends Service {
 
@@ -53,6 +54,12 @@ public class LiveStrideNativeTrackerService extends Service {
     private double totalDistanceMeters = 0.0;
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
+
+    // Phase 1A: store only failed native uploads in memory so we can verify
+    // whether failed Supabase POSTs are being captured for later retry logic.
+    private final Object failedNativeQueueLock = new Object();
+    private final List<JSONObject> failedNativeUploadQueue = new ArrayList<>();
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -86,6 +93,11 @@ public class LiveStrideNativeTrackerService extends Service {
             totalDistanceMeters = 0.0;
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
+
+            synchronized (failedNativeQueueLock) {
+                failedNativeUploadQueue.clear();
+            }
+            System.out.println("LiveStride native failed-upload queue cleared for new run");
             
             startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
             startLocationUpdates();
@@ -95,6 +107,7 @@ public class LiveStrideNativeTrackerService extends Service {
 
         if (ACTION_STOP.equals(intent.getAction())) {
             stopLocationUpdates();
+            System.out.println("LiveStride native failed-upload queue final size=" + getFailedNativeQueueSize());
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
@@ -205,6 +218,32 @@ private Double fetchElevationMeters(double lat, double lon) {
     }
 }
 
+private void queueFailedNativePoint(JSONObject body, String reason) {
+    if (body == null) {
+        System.out.println("LiveStride native failed-upload queue skipped null body. reason=" + reason);
+        return;
+    }
+
+    int queueSize;
+    synchronized (failedNativeQueueLock) {
+        failedNativeUploadQueue.add(body);
+        queueSize = failedNativeUploadQueue.size();
+    }
+
+    System.out.println(
+            "LiveStride native failed-upload queue added seq="
+                    + body.optInt("sequence_num", -1)
+                    + " reason=" + reason
+                    + " queueSize=" + queueSize
+    );
+}
+
+private int getFailedNativeQueueSize() {
+    synchronized (failedNativeQueueLock) {
+        return failedNativeUploadQueue.size();
+    }
+}
+
 private void uploadNativePoint(Location location) {
     final double lat = location.getLatitude();
     final double lon = location.getLongitude();
@@ -280,9 +319,11 @@ private void uploadNativePoint(Location location) {
         ).format(new java.util.Date(pointTimeMs));
 
     new Thread(() -> {
+        JSONObject body = null;
+
         try {
             Double elevationMeters = fetchElevationMeters(lat, lon);
-            JSONObject body = new JSONObject();
+            body = new JSONObject();
 
             if (runId != null && !runId.trim().isEmpty()) {
                 body.put("run_id", runId);
@@ -325,12 +366,16 @@ private void uploadNativePoint(Location location) {
 
             if (code < 200 || code >= 300) {
                 System.out.println("LiveStride native point upload failed. HTTP " + code);
+                queueFailedNativePoint(body, "HTTP " + code);
+            } else {
+                System.out.println("LiveStride native point uploaded seq=" + thisSequence);
             }
 
             conn.disconnect();
 
         } catch (Exception e) {
             System.out.println("LiveStride native point upload exception: " + e.getMessage());
+            queueFailedNativePoint(body, "exception " + e.getMessage());
         }
     }).start();
 }

@@ -79,6 +79,7 @@ public class LiveStrideNativeTrackerService extends Service {
             runId = intent.getStringExtra("runId");
             runnerName = intent.getStringExtra("runnerName");
             nativeSessionId = intent.getStringExtra("nativeSessionId");
+            android.util.Log.i("LiveStrideNative", "PHASE 1A SERVICE STARTED");
 
             if (runnerName == null || runnerName.trim().isEmpty()) {
                 runnerName = "Native Test Runner";

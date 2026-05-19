@@ -264,6 +264,8 @@
     let lastViewerStatusMessage = null;
     let viewerStatusEl = null;
     let viewerConnectionWatchId = null;
+    let nativeGapPollId = null;
+    let nativeGapPollRunId = null;
     let runnerSyncHadFailure = false;
     let programmaticViewerMove = false;
     let viewerWakeLock = null;
@@ -691,6 +693,28 @@ function clearNativeRunPathLayer() {
       return true;
     }
 
+    async function syncFinishNow(runId, finishPayload) {
+      if (!runId || !navigator.onLine) return false;
+
+      try {
+        const { error } = await supabaseClient
+          .from("runs")
+          .update(finishPayload)
+          .eq("id", runId);
+
+        if (error) {
+          console.warn("Immediate Supabase finish failed:", error);
+          return false;
+        }
+
+        pendingRunUpdate = null;
+        return true;
+      } catch (err) {
+        console.warn("Immediate Supabase finish exception:", err);
+        return false;
+      }
+    }
+
     async function sendRunnerHeartbeat() {
       if (!activeRunId) return;
 
@@ -1064,7 +1088,10 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       );
     }
 
-    function stopTracking() {
+    async function stopTracking() {
+      const stoppedAtMs = Date.now();
+      const stoppedElapsedMs = startTime ? stoppedAtMs - startTime : null;
+
       if (runnerTimerId !== null) {
         clearInterval(runnerTimerId);
         runnerTimerId = null;
@@ -1089,7 +1116,10 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       }
 
       if (broadcasting && broadcastRef) {
-        broadcastRef.update({ finished: true });
+        broadcastRef.update({
+          finished: true,
+          timestamp: stoppedAtMs
+        });
         broadcasting = false;
       }
 
@@ -1098,17 +1128,22 @@ fetchElevation(coord[1], coord[0]).then(elev => {
           ? pathCoords[pathCoords.length - 1]
           : null;
 
-        safeUpdateRunSummary({
+        const finishPayload = {
           is_live: false,
-          finished_at: new Date().toISOString(),
-          final_time_ms: startTime ? Date.now() - startTime : null,
+          finished_at: new Date(stoppedAtMs).toISOString(),
+          final_time_ms: stoppedElapsedMs,
           total_distance_m: totalDistanceMeters,
           latest_lat: lastPoint ? lastPoint.lat : null,
           latest_lon: lastPoint ? lastPoint.lon : null,
           latest_timestamp: lastPoint ? lastPoint.time : null
-        });
+        };
 
-        flushSupabaseQueue();
+        const finishSynced = await syncFinishNow(activeRunId, finishPayload);
+        if (!finishSynced) {
+          await safeUpdateRunSummary(finishPayload);
+        }
+
+        await flushSupabaseQueue();
       }
 
       exportGpxBtn.style.display = "inline-block";
@@ -1268,6 +1303,9 @@ async function startNativePathComparison(runId) {
       return (a.timestamp || 0) - (b.timestamp || 0);
     });
   nativeRouteGapActive = hasSequenceGap(nativePathCoords);
+  if (nativeRouteGapActive && isLive) {
+    startNativeGapPolling(runId);
+  }
 
   if (document.body.classList.contains("viewer-mode")) {
     addOrUpdateNativePath();
@@ -1309,6 +1347,11 @@ async function startNativePathComparison(runId) {
         const hadGap = nativeRouteGapActive;
         const hasGap = hasSequenceGap(nativePathCoords);
         nativeRouteGapActive = hasGap;
+        if (hasGap && isLive) {
+          startNativeGapPolling(runId);
+        } else if (!hasGap) {
+          stopNativeGapPolling();
+        }
 
         if (
           incomingSequence != null &&
@@ -1482,6 +1525,67 @@ function updateViewerFromNativePoint(pt) {
     }, 1000);
   }
 } 
+
+function stopNativeGapPolling() {
+  if (nativeGapPollId !== null) {
+    clearInterval(nativeGapPollId);
+    nativeGapPollId = null;
+  }
+
+  nativeGapPollRunId = null;
+}
+
+async function pollNativeGapRepair(runId) {
+  if (!runId || !nativeRouteGapActive) return;
+
+  const { data, error } = await supabaseClient
+    .from("run_points_native_test")
+    .select("*")
+    .eq("run_id", runId)
+    .order("sequence_num", { ascending: true });
+
+  if (error) {
+    console.warn("Native gap repair poll failed:", error);
+    return;
+  }
+
+  const hadGap = nativeRouteGapActive;
+
+  data.forEach(pt => {
+    upsertSortedNativeRunPoint(pt);
+  });
+
+  const hasGap = hasSequenceGap(nativePathCoords);
+  nativeRouteGapActive = hasGap;
+
+  if (document.body.classList.contains("viewer-mode")) {
+    addOrUpdateNativePath();
+
+    const latestNativePoint = getLatestSequencePoint(nativePathCoords);
+    if (latestNativePoint) {
+      updateViewerFromNativePoint(latestNativePoint);
+    }
+  }
+
+  if (hadGap && !hasGap) {
+    showViewerStatus("Route restored", "good");
+    hideViewerStatusSoon();
+    stopNativeGapPolling();
+  }
+}
+
+function startNativeGapPolling(runId) {
+  if (!runId || nativeGapPollRunId === runId) return;
+
+  stopNativeGapPolling();
+  nativeGapPollRunId = runId;
+
+  nativeGapPollId = setInterval(() => {
+    pollNativeGapRepair(runId);
+  }, 3000);
+
+  pollNativeGapRepair(runId);
+}
     
     async function trackRunnerSupabase(runId, isLive = false) {
   if (activeListener) {
@@ -1497,10 +1601,11 @@ if (activeNativeSupabaseChannel) {
   supabaseClient.removeChannel(activeNativeSupabaseChannel);
   activeNativeSupabaseChannel = null;
 }  
-if (activeRunStatusChannel) {
+  if (activeRunStatusChannel) {
   supabaseClient.removeChannel(activeRunStatusChannel);
   activeRunStatusChannel = null;
 }
+stopNativeGapPolling();
 
   if (viewerTimerId !== null) {
     clearInterval(viewerTimerId);
@@ -1600,6 +1705,7 @@ if (run.final_time_ms != null && lastViewerData) {
         viewerConnectionWarning = false;
         viewerConnectionLost = false;
         nativeRouteGapActive = false;
+        stopNativeGapPolling();
         showViewerStatus("Run finished", "good");
         hideViewerStatusSoon();
       }

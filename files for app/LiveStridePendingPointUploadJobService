@@ -1,299 +1,497 @@
 package com.kdidso.livestride;
 
-import android.app.job.JobInfo;
-import android.app.job.JobParameters;
-import android.app.job.JobScheduler;
-import android.app.job.JobService;
-import android.content.ComponentName;
+import android.content.ContentValues;
 import android.content.Context;
-import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
 import android.util.Log;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
-public class LiveStridePendingPointUploadJobService extends JobService {
+/**
+ * Local persistent storage for native LiveStride GPS points.
+ *
+ * Purpose:
+ * - Save every native GPS point immediately on the phone.
+ * - Mark points uploaded only after Supabase confirms success.
+ * - Leave failed/offline points pending for a later flush phase.
+ *
+ * No external storage permission is needed. Android stores this database in:
+ * /data/user/0/com.kdidso.livestride/databases/livestride_native_points.db
+ */
+public class LiveStridePointStore extends SQLiteOpenHelper {
 
-    private static final String TAG = "LiveStridePendingUpload";
-    private static final int JOB_ID = 44222;
-    private static final String PREFS_NAME = "livestride_native_point_upload";
-    private static final String PREF_SUPABASE_URL = "supabase_url";
-    private static final String PREF_SUPABASE_ANON_KEY = "supabase_anon_key";
-    private static final int BATCH_LIMIT = 100;
-    private static final long STALE_UPLOAD_MS = 10 * 60 * 1000L;
-    private static boolean isFlushing = false;
+    private static final String TAG = "LiveStrideSQLite";
+    private static final String DATABASE_NAME = "livestride_native_points.db";
+    private static final int DATABASE_VERSION = 2;
 
-    @Override
-    public boolean onStartJob(JobParameters params) {
-        new Thread(() -> {
-            boolean allUploaded = flushPendingPoints(getApplicationContext());
-            jobFinished(params, !allUploaded);
+    public static final String TABLE_NATIVE_POINTS = "native_run_points";
 
-            if (!allUploaded) {
-                schedule(getApplicationContext());
-            }
-        }).start();
+    private final Context appContext;
 
-        return true;
+    public LiveStridePointStore(Context context) {
+        super(context, DATABASE_NAME, null, DATABASE_VERSION);
+        this.appContext = context.getApplicationContext();
+
+        File dbFile = this.appContext.getDatabasePath(DATABASE_NAME);
+        File debugDir = getDebugExportDir();
+
+        Log.i(TAG, "LiveStride SQLite store initialized. Internal db="
+                + dbFile.getAbsolutePath()
+                + " debugExportDir=" + debugDir.getAbsolutePath());
     }
 
     @Override
-    public boolean onStopJob(JobParameters params) {
-        return true;
-    }
-
-    public static void saveSupabaseConfig(Context context, String supabaseUrl, String supabaseAnonKey) {
-        if (supabaseUrl == null || supabaseUrl.trim().isEmpty()
-                || supabaseAnonKey == null || supabaseAnonKey.trim().isEmpty()) {
-            return;
-        }
-
-        context.getApplicationContext()
-                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(PREF_SUPABASE_URL, supabaseUrl)
-                .putString(PREF_SUPABASE_ANON_KEY, supabaseAnonKey)
-                .apply();
-    }
-
-    public static void schedule(Context context) {
-        Context appContext = context.getApplicationContext();
-        JobScheduler scheduler = (JobScheduler) appContext.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-
-        if (scheduler == null) {
-            Log.w(TAG, "Could not schedule pending point upload: JobScheduler unavailable");
-            return;
-        }
-
-        ComponentName componentName = new ComponentName(
-                appContext,
-                LiveStridePendingPointUploadJobService.class
+    public void onCreate(SQLiteDatabase db) {
+        db.execSQL(
+                "CREATE TABLE IF NOT EXISTS " + TABLE_NATIVE_POINTS + " (" +
+                        "local_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "run_id TEXT, " +
+                        "runner_name TEXT, " +
+                        "source TEXT, " +
+                        "native_session_id TEXT, " +
+                        "sequence_num INTEGER, " +
+                        "lat REAL NOT NULL, " +
+                        "lon REAL NOT NULL, " +
+                        "accuracy REAL, " +
+                        "recorded_at TEXT NOT NULL, " +
+                        "distance_m REAL, " +
+                        "inst_pace_min_per_mile REAL, " +
+                        "avg_pace_min_per_mile REAL, " +
+                        "elevation_m REAL, " +
+                        "app_state TEXT, " +
+                        "note TEXT, " +
+                        "uploaded INTEGER NOT NULL DEFAULT 0, " +
+                        "upload_status TEXT NOT NULL DEFAULT 'pending', " +
+                        "upload_attempts INTEGER NOT NULL DEFAULT 0, " +
+                        "last_upload_error TEXT, " +
+                        "last_attempt_at TEXT, " +
+                        "last_attempt_at_ms INTEGER, " +
+                        "uploaded_at TEXT, " +
+                        "created_at_ms INTEGER NOT NULL" +
+                        ")"
         );
 
-        JobInfo jobInfo = new JobInfo.Builder(JOB_ID, componentName)
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
-                .setPersisted(true)
-                .build();
+        db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_native_points_run_sequence " +
+                        "ON " + TABLE_NATIVE_POINTS + " (run_id, sequence_num)"
+        );
 
-        int result = scheduler.schedule(jobInfo);
-        Log.i(TAG, "Scheduled pending native point upload job result=" + result);
+        db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_native_points_uploaded " +
+                        "ON " + TABLE_NATIVE_POINTS + " (uploaded, created_at_ms)"
+        );
     }
 
-    public static boolean flushPendingPoints(Context context) {
-        synchronized (LiveStridePendingPointUploadJobService.class) {
-            if (isFlushing) {
-                Log.i(TAG, "Pending native point flush already running");
-                return false;
-            }
-
-            isFlushing = true;
+    @Override
+    public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion < 2) {
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "upload_status", "TEXT NOT NULL DEFAULT 'pending'");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "upload_attempts", "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "last_upload_error", "TEXT");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "last_attempt_at", "TEXT");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "last_attempt_at_ms", "INTEGER");
+            db.execSQL("UPDATE " + TABLE_NATIVE_POINTS
+                    + " SET upload_status = CASE WHEN uploaded = 1 THEN 'uploaded' ELSE 'pending' END"
+                    + " WHERE upload_status IS NULL OR upload_status = ''");
         }
+    }
+
+    public synchronized long insertNativePoint(JSONObject body) throws JSONException {
+        ContentValues values = new ContentValues();
+
+        putString(values, "run_id", body, "run_id");
+        putString(values, "runner_name", body, "runner_name");
+        putString(values, "source", body, "source");
+        putString(values, "native_session_id", body, "native_session_id");
+        putInteger(values, "sequence_num", body, "sequence_num");
+        putDouble(values, "lat", body, "lat");
+        putDouble(values, "lon", body, "lon");
+        putDouble(values, "accuracy", body, "accuracy");
+        putString(values, "recorded_at", body, "recorded_at");
+        putDouble(values, "distance_m", body, "distance_m");
+        putDouble(values, "inst_pace_min_per_mile", body, "inst_pace_min_per_mile");
+        putDouble(values, "avg_pace_min_per_mile", body, "avg_pace_min_per_mile");
+        putDouble(values, "elevation_m", body, "elevation_m");
+        putString(values, "app_state", body, "app_state");
+        putString(values, "note", body, "note");
+
+        values.put("uploaded", 0);
+        values.put("upload_status", "pending");
+        values.put("created_at_ms", System.currentTimeMillis());
+
+        SQLiteDatabase db = getWritableDatabase();
+        long localId = db.insertOrThrow(TABLE_NATIVE_POINTS, null, values);
+
+        Log.i(TAG, "Saved native point local_id=" + localId
+                + " seq=" + body.optInt("sequence_num", -1)
+                + " pendingCount=" + countPending());
+
+        exportDebugCopy();
+
+        return localId;
+    }
+
+    public synchronized void markUploaded(long localId) {
+        ContentValues values = new ContentValues();
+        values.put("uploaded", 1);
+        values.put("upload_status", "uploaded");
+        values.put("uploaded_at", isoNow());
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ?",
+                new String[]{String.valueOf(localId)}
+        );
+
+        Log.i(TAG, "Marked native point uploaded local_id=" + localId
+                + " pendingCount=" + countPending());
+
+        exportDebugCopy();
+    }
+
+    public synchronized void markUploadInProgress(long localId) {
+        ContentValues values = new ContentValues();
+        values.put("upload_status", "uploading");
+        values.put("last_attempt_at", isoNow());
+        values.put("last_attempt_at_ms", System.currentTimeMillis());
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ? AND uploaded = 0",
+                new String[]{String.valueOf(localId)}
+        );
+    }
+
+    public synchronized void updateElevation(long localId, double elevationMeters) {
+        ContentValues values = new ContentValues();
+        values.put("elevation_m", elevationMeters);
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ?",
+                new String[]{String.valueOf(localId)}
+        );
+
+        Log.i(TAG, "Updated native point elevation local_id=" + localId
+                + " elevation_m=" + elevationMeters);
+
+        exportDebugCopy();
+    }
+
+    public synchronized void markUploadFailed(long localId, String error) {
+        ContentValues values = new ContentValues();
+        values.put("uploaded", 0);
+        values.put("upload_status", "pending");
+        values.put("last_upload_error", error == null ? "Upload failed" : error);
+        values.put("last_attempt_at", isoNow());
+        values.put("last_attempt_at_ms", System.currentTimeMillis());
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ?",
+                new String[]{String.valueOf(localId)}
+        );
+
+        db.execSQL(
+                "UPDATE " + TABLE_NATIVE_POINTS
+                        + " SET upload_attempts = upload_attempts + 1 WHERE local_id = ?",
+                new Object[]{localId}
+        );
+
+        Log.w(TAG, "Marked native point pending local_id=" + localId
+                + " error=" + values.getAsString("last_upload_error")
+                + " pendingCount=" + countPending());
+
+        exportDebugCopy();
+    }
+
+    public synchronized int resetStaleUploadAttempts(long staleBeforeMs) {
+        ContentValues values = new ContentValues();
+        values.put("upload_status", "pending");
+
+        SQLiteDatabase db = getWritableDatabase();
+        int rows = db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "uploaded = 0 AND upload_status = ? AND last_attempt_at_ms < ?",
+                new String[]{"uploading", String.valueOf(staleBeforeMs)}
+        );
+
+        if (rows > 0) {
+            Log.w(TAG, "Reset stale native point uploads rows=" + rows);
+            exportDebugCopy();
+        }
+
+        return rows;
+    }
+
+    public synchronized int countPending() {
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM " + TABLE_NATIVE_POINTS + " WHERE uploaded = 0",
+                null
+        );
 
         try {
-            return flushPendingPointsLocked(context);
-        } finally {
-            synchronized (LiveStridePendingPointUploadJobService.class) {
-                isFlushing = false;
+            if (cursor.moveToFirst()) {
+                return cursor.getInt(0);
             }
+            return 0;
+        } finally {
+            cursor.close();
         }
     }
 
-    private static boolean flushPendingPointsLocked(Context context) {
-        Context appContext = context.getApplicationContext();
-        SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String supabaseUrl = prefs.getString(PREF_SUPABASE_URL, null);
-        String supabaseAnonKey = prefs.getString(PREF_SUPABASE_ANON_KEY, null);
+    public synchronized int countPendingForRun(String runId) {
+        if (runId == null) return 0;
 
-        if (supabaseUrl == null || supabaseAnonKey == null) {
-            Log.w(TAG, "Cannot flush pending native points without saved Supabase config");
-            return false;
-        }
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM " + TABLE_NATIVE_POINTS + " WHERE uploaded = 0 AND run_id = ?",
+                new String[]{runId}
+        );
 
-        LiveStridePointStore pointStore = new LiveStridePointStore(appContext);
-        pointStore.resetStaleUploadAttempts(System.currentTimeMillis() - STALE_UPLOAD_MS);
-
-        List<JSONObject> pending = pointStore.getPendingUploadBodies(BATCH_LIMIT);
-
-        if (pending.isEmpty()) {
-            Log.i(TAG, "No pending native points to upload");
-            return true;
-        }
-
-        Log.i(TAG, "Flushing pending native points count=" + pending.size());
-
-        boolean allUploaded = true;
-
-        for (JSONObject row : pending) {
-            long localId = row.optLong("local_id", -1L);
-            JSONObject uploadBody;
-
-            try {
-                uploadBody = new JSONObject(row.toString());
-                uploadBody.remove("local_id");
-            } catch (Exception e) {
-                allUploaded = false;
-                pointStore.markUploadFailed(localId, "Could not prepare pending point JSON");
-                break;
+        try {
+            if (cursor.moveToFirst()) {
+                return cursor.getInt(0);
             }
+            return 0;
+        } finally {
+            cursor.close();
+        }
+    }
 
-            if (uploadBody.isNull("elevation_m")) {
-                Double elevationMeters = fetchElevationMeters(
-                        uploadBody.optDouble("lat"),
-                        uploadBody.optDouble("lon")
-                );
+    public synchronized List<JSONObject> getPendingUploadBodies(int limit) {
+        List<JSONObject> rows = new ArrayList<>();
 
-                if (elevationMeters != null) {
-                    try {
-                        uploadBody.put("elevation_m", elevationMeters);
-                        pointStore.updateElevation(localId, elevationMeters);
-                    } catch (Exception e) {
-                        Log.w(TAG, "Could not attach elevation before retry: " + e.getMessage());
-                    }
-                } else {
-                    Log.w(TAG, "Elevation unavailable before retry; uploading point without elevation local_id="
-                            + localId);
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.query(
+                TABLE_NATIVE_POINTS,
+                null,
+                "uploaded = 0 AND upload_status = ?",
+                new String[]{"pending"},
+                null,
+                null,
+                "created_at_ms ASC, local_id ASC",
+                String.valueOf(limit)
+        );
+
+        try {
+            while (cursor.moveToNext()) {
+                rows.add(cursorToJson(cursor));
+            }
+        } finally {
+            cursor.close();
+        }
+
+        return rows;
+    }
+
+    private JSONObject cursorToJson(Cursor cursor) {
+        JSONObject json = new JSONObject();
+
+        try {
+            putJsonLong(json, "local_id", cursor);
+            putJsonString(json, "run_id", cursor);
+            putJsonString(json, "runner_name", cursor);
+            putJsonString(json, "source", cursor);
+            putJsonString(json, "native_session_id", cursor);
+            putJsonInt(json, "sequence_num", cursor);
+            putJsonDouble(json, "lat", cursor);
+            putJsonDouble(json, "lon", cursor);
+            putJsonDouble(json, "accuracy", cursor);
+            putJsonString(json, "recorded_at", cursor);
+            putJsonDouble(json, "distance_m", cursor);
+            putJsonDouble(json, "inst_pace_min_per_mile", cursor);
+            putJsonDouble(json, "avg_pace_min_per_mile", cursor);
+            putJsonDouble(json, "elevation_m", cursor);
+            putJsonString(json, "app_state", cursor);
+            putJsonString(json, "note", cursor);
+        } catch (JSONException e) {
+            Log.w(TAG, "Could not build pending point JSON: " + e.getMessage());
+        }
+
+        return json;
+    }
+
+    private static void putString(ContentValues values, String column, JSONObject body, String key) {
+        if (!body.has(key) || body.isNull(key)) {
+            values.putNull(column);
+        } else {
+            values.put(column, body.optString(key, null));
+        }
+    }
+
+    private static void putInteger(ContentValues values, String column, JSONObject body, String key) {
+        if (!body.has(key) || body.isNull(key)) {
+            values.putNull(column);
+        } else {
+            values.put(column, body.optInt(key));
+        }
+    }
+
+    private static void putDouble(ContentValues values, String column, JSONObject body, String key) {
+        if (!body.has(key) || body.isNull(key)) {
+            values.putNull(column);
+        } else {
+            values.put(column, body.optDouble(key));
+        }
+    }
+
+    private static void putJsonString(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getString(idx));
+        }
+    }
+
+    private static void putJsonInt(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getInt(idx));
+        }
+    }
+
+    private static void putJsonLong(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getLong(idx));
+        }
+    }
+
+    private static void putJsonDouble(JSONObject json, String key, Cursor cursor) throws JSONException {
+        int idx = cursor.getColumnIndex(key);
+        if (idx < 0 || cursor.isNull(idx)) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, cursor.getDouble(idx));
+        }
+    }
+
+    private static void addColumnIfMissing(
+            SQLiteDatabase db,
+            String table,
+            String column,
+            String definition
+    ) {
+        Cursor cursor = db.rawQuery("PRAGMA table_info(" + table + ")", null);
+
+        try {
+            while (cursor.moveToNext()) {
+                int nameIndex = cursor.getColumnIndex("name");
+                if (nameIndex >= 0 && column.equals(cursor.getString(nameIndex))) {
+                    return;
                 }
             }
-
-            pointStore.markUploadInProgress(localId);
-
-            UploadResult result = uploadNativePointBody(supabaseUrl, supabaseAnonKey, uploadBody);
-
-            if (result.success) {
-                pointStore.markUploaded(localId);
-            } else {
-                allUploaded = false;
-                pointStore.markUploadFailed(localId, result.error);
-                break;
-            }
-        }
-
-        return allUploaded && pointStore.countPending() == 0;
-    }
-
-    public static UploadResult uploadNativePointBody(
-            String supabaseUrl,
-            String supabaseAnonKey,
-            JSONObject body
-    ) {
-        HttpURLConnection conn = null;
-
-        try {
-            URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
-
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("apikey", supabaseAnonKey);
-            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("Accept", "application/json");
-            conn.setRequestProperty("Accept-Profile", "public");
-            conn.setRequestProperty("Content-Profile", "public");
-            conn.setRequestProperty("Prefer", "return=minimal");
-            conn.setConnectTimeout(10_000);
-            conn.setReadTimeout(10_000);
-            conn.setDoOutput(true);
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(body.toString().getBytes("UTF-8"));
-            }
-
-            int code = conn.getResponseCode();
-
-            if (code < 200 || code >= 300) {
-                String error = "Supabase HTTP " + code + " seq=" + body.optInt("sequence_num", -1);
-                Log.w(TAG, error);
-                return UploadResult.failure(error);
-            }
-
-            return UploadResult.success();
-
-        } catch (Exception e) {
-            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            Log.w(TAG, "Native point upload exception: " + message);
-            return UploadResult.failure(message);
         } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
+            cursor.close();
         }
+
+        db.execSQL("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
     }
 
-    private static Double fetchElevationMeters(double lat, double lon) {
-        HttpURLConnection conn = null;
-
+    public synchronized String exportDebugCopy() {
         try {
-            String endpoint = "https://elevation.livestride.run/api/v1/lookup?locations="
-                    + lat + "," + lon;
+            // Make sure the database file has been created/opened.
+            getReadableDatabase();
 
-            URL url = new URL(endpoint);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(5_000);
-            conn.setReadTimeout(5_000);
+            File dbFile = appContext.getDatabasePath(DATABASE_NAME);
+            File debugDir = getDebugExportDir();
 
-            int code = conn.getResponseCode();
-
-            if (code < 200 || code >= 300) {
-                Log.w(TAG, "Elevation fetch failed. HTTP " + code);
+            if (!debugDir.exists() && !debugDir.mkdirs()) {
+                Log.w(TAG, "Could not create SQLite debug export directory: "
+                        + debugDir.getAbsolutePath());
                 return null;
             }
 
-            java.io.InputStream is = conn.getInputStream();
-            java.util.Scanner scanner = new java.util.Scanner(is, "UTF-8").useDelimiter("\\A");
-            String response = scanner.hasNext() ? scanner.next() : "";
-            scanner.close();
+            File copiedDb = new File(debugDir, DATABASE_NAME);
+            copyFileIfExists(dbFile, copiedDb);
 
-            JSONObject json = new JSONObject(response);
+            // Copy common companion files if Android creates them.
+            copyFileIfExists(
+                    new File(dbFile.getAbsolutePath() + "-journal"),
+                    new File(debugDir, DATABASE_NAME + "-journal")
+            );
+            copyFileIfExists(
+                    new File(dbFile.getAbsolutePath() + "-wal"),
+                    new File(debugDir, DATABASE_NAME + "-wal")
+            );
+            copyFileIfExists(
+                    new File(dbFile.getAbsolutePath() + "-shm"),
+                    new File(debugDir, DATABASE_NAME + "-shm")
+            );
 
-            if (!json.has("results")) {
-                return null;
-            }
+            Log.i(TAG, "SQLite debug copy exported to "
+                    + copiedDb.getAbsolutePath()
+                    + " pendingCount=" + countPending());
 
-            org.json.JSONArray results = json.getJSONArray("results");
-            if (results.length() == 0) {
-                return null;
-            }
-
-            JSONObject first = results.getJSONObject(0);
-
-            if (!first.has("elevation") || first.isNull("elevation")) {
-                return null;
-            }
-
-            return first.getDouble("elevation");
+            return copiedDb.getAbsolutePath();
 
         } catch (Exception e) {
-            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            Log.w(TAG, "Elevation fetch exception: " + message);
+            Log.w(TAG, "SQLite debug export failed: " + e.getMessage());
             return null;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
         }
     }
 
-    public static class UploadResult {
-        public final boolean success;
-        public final String error;
+    private File getDebugExportDir() {
+        File externalFiles = appContext.getExternalFilesDir(null);
 
-        private UploadResult(boolean success, String error) {
-            this.success = success;
-            this.error = error;
+        if (externalFiles != null) {
+            return new File(externalFiles, "livestride_sqlite_debug");
         }
 
-        public static UploadResult success() {
-            return new UploadResult(true, null);
+        return new File(appContext.getFilesDir(), "livestride_sqlite_debug");
+    }
+
+    private static void copyFileIfExists(File source, File destination) throws IOException {
+        if (source == null || !source.exists()) {
+            return;
         }
 
-        public static UploadResult failure(String error) {
-            return new UploadResult(false, error);
+        try (FileInputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(destination)) {
+
+            byte[] buffer = new byte[8192];
+            int read;
+
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+
+            out.flush();
         }
+    }
+
+    private static String isoNow() {
+        java.text.SimpleDateFormat formatter = new java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                java.util.Locale.US
+        );
+        formatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return formatter.format(new java.util.Date());
     }
 }

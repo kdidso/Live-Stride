@@ -53,6 +53,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
     private LiveStridePointStore pointStore;
+    private long lastPendingFlushKickMs = 0L;
     @Override
     public void onCreate() {
         super.onCreate();
@@ -345,6 +346,7 @@ private void uploadNativePoint(Location location) {
             if (uploadResult.success) {
                 pointStore.markUploaded(localId);
                 Log.i("LiveStrideNative", "SQLite point uploaded seq=" + thisSequence + " local_id=" + localId);
+                kickPendingFlushIfNeeded();
             } else {
                 pointStore.markUploadFailed(localId, uploadResult.error);
                 LiveStridePendingPointUploadJobService.schedule(this);
@@ -356,6 +358,23 @@ private void uploadNativePoint(Location location) {
         } catch (Exception e) {
             System.out.println("LiveStride native point SQLite/upload exception: " + e.getMessage());
         }
+    }).start();
+}
+
+private void kickPendingFlushIfNeeded() {
+    if (pointStore.countPendingForRun(runId) <= 0) {
+        return;
+    }
+
+    long now = System.currentTimeMillis();
+    if (now - lastPendingFlushKickMs < 15_000L) {
+        return;
+    }
+
+    lastPendingFlushKickMs = now;
+    new Thread(() -> {
+        Log.i("LiveStrideNative", "Immediate pending native point flush kicked after reconnect");
+        LiveStridePendingPointUploadJobService.flushPendingPoints(this);
     }).start();
 }
 

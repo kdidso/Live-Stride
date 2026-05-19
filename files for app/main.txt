@@ -105,6 +105,8 @@ let isFlushingSupabase = false;
 let connectionStatusEl = null;
 let lastPointReceivedTime = null;
 let viewerConnectionLost = false;
+let viewerConnectionWarning = false;
+let nativeRouteGapActive = false;
 let viewerStatusEl = null;
 let viewerConnectionWatchId = null;
 let runnerSyncHadFailure = false;
@@ -406,7 +408,11 @@ function showViewerStatus(message, type = "info") {
 
   viewerStatusEl.textContent = message;
   viewerStatusEl.style.background =
-    type === "bad" ? "rgba(200,0,0,0.85)" : "rgba(0,120,0,0.85)";
+    type === "bad"
+      ? "rgba(200,0,0,0.85)"
+      : type === "warn"
+        ? "rgba(190,135,0,0.9)"
+        : "rgba(0,120,0,0.85)";
   viewerStatusEl.style.display = "block";
 }
 
@@ -450,14 +456,78 @@ function addOrUpdatePath() {
   }
 }
 
+function buildSequenceLineSegments(points) {
+  const segments = [];
+  let currentSegment = [];
+  let previousSequence = null;
+
+  points.forEach(point => {
+    const pointCoords = [point.lon, point.lat];
+    const sequence = point.sequenceNum;
+
+    if (
+      currentSegment.length > 0 &&
+      previousSequence != null &&
+      sequence != null &&
+      sequence - previousSequence > 1
+    ) {
+      if (currentSegment.length > 1) {
+        segments.push(currentSegment);
+      }
+
+      currentSegment = [];
+    }
+
+    currentSegment.push(pointCoords);
+    previousSequence = sequence;
+  });
+
+  if (currentSegment.length > 1) {
+    segments.push(currentSegment);
+  }
+
+  return segments;
+}
+
+function hasSequenceGap(points) {
+  for (let i = 1; i < points.length; i++) {
+    const previousSequence = points[i - 1].sequenceNum;
+    const currentSequence = points[i].sequenceNum;
+
+    if (
+      previousSequence != null &&
+      currentSequence != null &&
+      currentSequence - previousSequence > 1
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getLatestSequencePoint(points) {
+  if (!points.length) return null;
+
+  return points.reduce((latest, point) => {
+    if (!latest) return point;
+
+    if (point.sequenceNum != null && latest.sequenceNum != null) {
+      return point.sequenceNum > latest.sequenceNum ? point : latest;
+    }
+
+    return (point.timestamp || 0) > (latest.timestamp || 0) ? point : latest;
+  }, null);
+}
+
 function addOrUpdateNativePath() {
-  const coords = nativePathCoords.map(pt => [pt.lon, pt.lat]);
+  const segments = buildSequenceLineSegments(nativePathCoords);
 
   const data = {
     type: "Feature",
     geometry: {
-      type: "LineString",
-      coordinates: coords
+      type: "MultiLineString",
+      coordinates: segments
     }
   };
 
@@ -1516,9 +1586,9 @@ function normalizeRunPoint(pt) {
     time: pt.recorded_at,
     elevation: pt.elevation_m,
     elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-    instPace: pt.inst_pace_min_per_mile ?? 0,
-    avgPace: pt.avg_pace_min_per_mile ?? 0,
-    distanceM: pt.distance_m ?? null
+    instPace: pt.inst_pace_min_per_mile ?? pt.instPace ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? pt.avgPace ?? 0,
+    distanceM: pt.distance_m ?? pt.distanceM ?? null
   };
 }
 
@@ -1554,17 +1624,20 @@ function upsertSortedRunPoint(pt) {
 }
 
 function normalizeNativeRunPoint(pt) {
+  const elevationM = pt.elevation_m ?? pt.elevation ?? null;
+  const recordedAt = pt.recorded_at ?? pt.time;
+
   return {
-    sequenceNum: pt.sequence_num ?? null,
+    sequenceNum: pt.sequence_num ?? pt.sequenceNum ?? null,
     lat: pt.lat,
     lon: pt.lon,
-    timestamp: new Date(pt.recorded_at).getTime(),
-    time: pt.recorded_at,
-    elevation: pt.elevation_m,
-    elevationFt: pt.elevation_m != null ? pt.elevation_m * 3.28084 : null,
-    instPace: pt.inst_pace_min_per_mile ?? 0,
-    avgPace: pt.avg_pace_min_per_mile ?? 0,
-    distanceM: pt.distance_m ?? null
+    timestamp: recordedAt ? new Date(recordedAt).getTime() : pt.timestamp,
+    time: recordedAt,
+    elevation: elevationM,
+    elevationFt: elevationM != null ? elevationM * 3.28084 : null,
+    instPace: pt.inst_pace_min_per_mile ?? pt.instPace ?? 0,
+    avgPace: pt.avg_pace_min_per_mile ?? pt.avgPace ?? 0,
+    distanceM: pt.distance_m ?? pt.distanceM ?? null
   };
 }
 
@@ -1695,23 +1768,15 @@ async function startNativePathComparison(runId) {
       }
       return (a.timestamp || 0) - (b.timestamp || 0);
     });
+  nativeRouteGapActive = hasSequenceGap(nativePathCoords);
 
   if (document.body.classList.contains("viewer-mode")) {
     addOrUpdateNativePath();
 
     if (nativePathCoords.length > 0) {
-      const lastNativePoint = nativePathCoords[nativePathCoords.length - 1];
+      const lastNativePoint = getLatestSequencePoint(nativePathCoords);
 
-      updateViewerFromNativePoint({
-        sequence_num: lastNativePoint.sequenceNum,
-        lat: lastNativePoint.lat,
-        lon: lastNativePoint.lon,
-        recorded_at: lastNativePoint.time,
-        elevation_m: lastNativePoint.elevation,
-        inst_pace_min_per_mile: lastNativePoint.instPace,
-        avg_pace_min_per_mile: lastNativePoint.avgPace,
-        distance_m: lastNativePoint.distanceM
-      });
+      updateViewerFromNativePoint(lastNativePoint);
     }
   }
 
@@ -1727,12 +1792,35 @@ async function startNativePathComparison(runId) {
       },
       payload => {
         const pt = payload.new;
+        const previousLatestPoint = getLatestSequencePoint(nativePathCoords);
+        const incomingPoint = normalizeNativeRunPoint(pt);
+        const incomingSequence = incomingPoint.sequenceNum;
+        const previousLatestSequence = previousLatestPoint?.sequenceNum ?? null;
+        const wasConnectionLost = viewerConnectionLost;
+        const wasConnectionWarning = viewerConnectionWarning;
 
         upsertSortedNativeRunPoint(pt);
         lastPointReceivedTime = Date.now();
+        viewerConnectionWarning = false;
 
         if (viewerConnectionLost) {
           viewerConnectionLost = false;
+        }
+
+        const hadGap = nativeRouteGapActive;
+        const hasGap = hasSequenceGap(nativePathCoords);
+        nativeRouteGapActive = hasGap;
+
+        if (
+          incomingSequence != null &&
+          previousLatestSequence != null &&
+          incomingSequence - previousLatestSequence > 1
+        ) {
+          showViewerStatus("Reconnecting - rebuilding route", "good");
+        } else if (hadGap && !hasGap) {
+          showViewerStatus("Route restored", "good");
+          hideViewerStatusSoon();
+        } else if (!hasGap && (wasConnectionLost || wasConnectionWarning)) {
           showViewerStatus("Runner reconnected", "good");
           hideViewerStatusSoon();
         }
@@ -1740,7 +1828,10 @@ async function startNativePathComparison(runId) {
         // Only render purple native path and red marker in viewer mode.
         if (document.body.classList.contains("viewer-mode")) {
           addOrUpdateNativePath();
-          updateViewerFromNativePoint(pt);
+          const latestNativePoint = getLatestSequencePoint(nativePathCoords);
+          if (latestNativePoint) {
+            updateViewerFromNativePoint(latestNativePoint);
+          }
         }
       }
     )
@@ -1777,6 +1868,9 @@ if (viewerConnectionWatchId !== null) {
 
 pathCoords = [];
 nativePathCoords = [];
+viewerConnectionWarning = false;
+viewerConnectionLost = false;
+nativeRouteGapActive = false;
 clearRunPathLayer();
 clearNativeRunPathLayer();
 
@@ -1858,7 +1952,9 @@ if (run.final_time_ms != null && lastViewerData) {
           viewerConnectionWatchId = null;
         }
 
+        viewerConnectionWarning = false;
         viewerConnectionLost = false;
+        nativeRouteGapActive = false;
         showViewerStatus("Run finished", "good");
         hideViewerStatusSoon();
       }
@@ -1965,9 +2061,13 @@ viewerConnectionWatchId = setInterval(() => {
   const now = Date.now();
   const secondsSinceLastPoint = (now - lastPointReceivedTime) / 1000;
 
-  if (secondsSinceLastPoint > 15 && !viewerConnectionLost) {
+  if (secondsSinceLastPoint > 45 && !viewerConnectionLost) {
     viewerConnectionLost = true;
+    viewerConnectionWarning = true;
     showViewerStatus("Signal lost — waiting for runner", "bad");
+  } else if (secondsSinceLastPoint > 15 && !viewerConnectionWarning) {
+    viewerConnectionWarning = true;
+    showViewerStatus("No motion detected - awaiting runner status", "warn");
   }
 }, 3000);
 

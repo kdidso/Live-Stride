@@ -1,0 +1,225 @@
+package com.kdidso.livestride;
+
+import android.app.job.JobInfo;
+import android.app.job.JobParameters;
+import android.app.job.JobScheduler;
+import android.app.job.JobService;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.util.Log;
+
+import org.json.JSONObject;
+
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.List;
+
+public class LiveStridePendingPointUploadJobService extends JobService {
+
+    private static final String TAG = "LiveStridePendingUpload";
+    private static final int JOB_ID = 44222;
+    private static final String PREFS_NAME = "livestride_native_point_upload";
+    private static final String PREF_SUPABASE_URL = "supabase_url";
+    private static final String PREF_SUPABASE_ANON_KEY = "supabase_anon_key";
+    private static final int BATCH_LIMIT = 100;
+    private static final long STALE_UPLOAD_MS = 10 * 60 * 1000L;
+    private static boolean isFlushing = false;
+
+    @Override
+    public boolean onStartJob(JobParameters params) {
+        new Thread(() -> {
+            boolean allUploaded = flushPendingPoints(getApplicationContext());
+            jobFinished(params, !allUploaded);
+
+            if (!allUploaded) {
+                schedule(getApplicationContext());
+            }
+        }).start();
+
+        return true;
+    }
+
+    @Override
+    public boolean onStopJob(JobParameters params) {
+        return true;
+    }
+
+    public static void saveSupabaseConfig(Context context, String supabaseUrl, String supabaseAnonKey) {
+        if (supabaseUrl == null || supabaseUrl.trim().isEmpty()
+                || supabaseAnonKey == null || supabaseAnonKey.trim().isEmpty()) {
+            return;
+        }
+
+        context.getApplicationContext()
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(PREF_SUPABASE_URL, supabaseUrl)
+                .putString(PREF_SUPABASE_ANON_KEY, supabaseAnonKey)
+                .apply();
+    }
+
+    public static void schedule(Context context) {
+        Context appContext = context.getApplicationContext();
+        JobScheduler scheduler = (JobScheduler) appContext.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+
+        if (scheduler == null) {
+            Log.w(TAG, "Could not schedule pending point upload: JobScheduler unavailable");
+            return;
+        }
+
+        ComponentName componentName = new ComponentName(
+                appContext,
+                LiveStridePendingPointUploadJobService.class
+        );
+
+        JobInfo jobInfo = new JobInfo.Builder(JOB_ID, componentName)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
+                .setPersisted(true)
+                .build();
+
+        int result = scheduler.schedule(jobInfo);
+        Log.i(TAG, "Scheduled pending native point upload job result=" + result);
+    }
+
+    public static boolean flushPendingPoints(Context context) {
+        synchronized (LiveStridePendingPointUploadJobService.class) {
+            if (isFlushing) {
+                Log.i(TAG, "Pending native point flush already running");
+                return false;
+            }
+
+            isFlushing = true;
+        }
+
+        try {
+            return flushPendingPointsLocked(context);
+        } finally {
+            synchronized (LiveStridePendingPointUploadJobService.class) {
+                isFlushing = false;
+            }
+        }
+    }
+
+    private static boolean flushPendingPointsLocked(Context context) {
+        Context appContext = context.getApplicationContext();
+        SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String supabaseUrl = prefs.getString(PREF_SUPABASE_URL, null);
+        String supabaseAnonKey = prefs.getString(PREF_SUPABASE_ANON_KEY, null);
+
+        if (supabaseUrl == null || supabaseAnonKey == null) {
+            Log.w(TAG, "Cannot flush pending native points without saved Supabase config");
+            return false;
+        }
+
+        LiveStridePointStore pointStore = new LiveStridePointStore(appContext);
+        pointStore.resetStaleUploadAttempts(System.currentTimeMillis() - STALE_UPLOAD_MS);
+
+        List<JSONObject> pending = pointStore.getPendingUploadBodies(BATCH_LIMIT);
+
+        if (pending.isEmpty()) {
+            Log.i(TAG, "No pending native points to upload");
+            return true;
+        }
+
+        Log.i(TAG, "Flushing pending native points count=" + pending.size());
+
+        boolean allUploaded = true;
+
+        for (JSONObject row : pending) {
+            long localId = row.optLong("local_id", -1L);
+            JSONObject uploadBody;
+
+            try {
+                uploadBody = new JSONObject(row.toString());
+                uploadBody.remove("local_id");
+            } catch (Exception e) {
+                allUploaded = false;
+                pointStore.markUploadFailed(localId, "Could not prepare pending point JSON");
+                break;
+            }
+
+            pointStore.markUploadInProgress(localId);
+
+            UploadResult result = uploadNativePointBody(supabaseUrl, supabaseAnonKey, uploadBody);
+
+            if (result.success) {
+                pointStore.markUploaded(localId);
+            } else {
+                allUploaded = false;
+                pointStore.markUploadFailed(localId, result.error);
+                break;
+            }
+        }
+
+        return allUploaded && pointStore.countPending() == 0;
+    }
+
+    public static UploadResult uploadNativePointBody(
+            String supabaseUrl,
+            String supabaseAnonKey,
+            JSONObject body
+    ) {
+        HttpURLConnection conn = null;
+
+        try {
+            URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
+
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("apikey", supabaseAnonKey);
+            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("Accept-Profile", "public");
+            conn.setRequestProperty("Content-Profile", "public");
+            conn.setRequestProperty("Prefer", "return=minimal");
+            conn.setConnectTimeout(10_000);
+            conn.setReadTimeout(10_000);
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toString().getBytes("UTF-8"));
+            }
+
+            int code = conn.getResponseCode();
+
+            if (code < 200 || code >= 300) {
+                String error = "Supabase HTTP " + code + " seq=" + body.optInt("sequence_num", -1);
+                Log.w(TAG, error);
+                return UploadResult.failure(error);
+            }
+
+            return UploadResult.success();
+
+        } catch (Exception e) {
+            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            Log.w(TAG, "Native point upload exception: " + message);
+            return UploadResult.failure(message);
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    public static class UploadResult {
+        public final boolean success;
+        public final String error;
+
+        private UploadResult(boolean success, String error) {
+            this.success = success;
+            this.error = error;
+        }
+
+        public static UploadResult success() {
+            return new UploadResult(true, null);
+        }
+
+        public static UploadResult failure(String error) {
+            return new UploadResult(false, error);
+        }
+    }
+}

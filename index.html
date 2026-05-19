@@ -266,6 +266,7 @@
     let viewerConnectionWatchId = null;
     let nativeGapPollId = null;
     let nativeGapPollRunId = null;
+    let nativeGapPollInFlight = false;
     let runnerSyncHadFailure = false;
     let programmaticViewerMove = false;
     let viewerWakeLock = null;
@@ -1533,44 +1534,80 @@ function stopNativeGapPolling() {
   }
 
   nativeGapPollRunId = null;
+  nativeGapPollInFlight = false;
+}
+
+function getSequenceGaps(points) {
+  const gaps = [];
+
+  for (let i = 1; i < points.length; i++) {
+    const previousSequence = points[i - 1].sequenceNum;
+    const currentSequence = points[i].sequenceNum;
+
+    if (
+      previousSequence != null &&
+      currentSequence != null &&
+      currentSequence - previousSequence > 1
+    ) {
+      gaps.push({
+        from: previousSequence + 1,
+        to: currentSequence - 1
+      });
+    }
+  }
+
+  return gaps;
 }
 
 async function pollNativeGapRepair(runId) {
   if (!runId || !nativeRouteGapActive) return;
+  if (nativeGapPollInFlight) return;
 
-  const { data, error } = await supabaseClient
-    .from("run_points_native_test")
-    .select("*")
-    .eq("run_id", runId)
-    .order("sequence_num", { ascending: true });
-
-  if (error) {
-    console.warn("Native gap repair poll failed:", error);
+  const gaps = getSequenceGaps(nativePathCoords);
+  if (!gaps.length) {
+    nativeRouteGapActive = false;
+    stopNativeGapPolling();
     return;
   }
 
-  const hadGap = nativeRouteGapActive;
+  nativeGapPollInFlight = true;
 
-  data.forEach(pt => {
-    upsertSortedNativeRunPoint(pt);
-  });
+  try {
+    for (const gap of gaps) {
+      const { data, error } = await supabaseClient
+        .from("run_points_native_test")
+        .select("*")
+        .eq("run_id", runId)
+        .gte("sequence_num", gap.from)
+        .lte("sequence_num", gap.to)
+        .order("sequence_num", { ascending: true })
+        .limit(250);
 
-  const hasGap = hasSequenceGap(nativePathCoords);
-  nativeRouteGapActive = hasGap;
+      if (error) {
+        console.warn("Native gap repair poll failed:", error);
+        return;
+      }
 
-  if (document.body.classList.contains("viewer-mode")) {
-    addOrUpdateNativePath();
-
-    const latestNativePoint = getLatestSequencePoint(nativePathCoords);
-    if (latestNativePoint) {
-      updateViewerFromNativePoint(latestNativePoint);
+      data.forEach(pt => {
+        upsertSortedNativeRunPoint(pt);
+      });
     }
-  }
 
-  if (hadGap && !hasGap) {
-    showViewerStatus("Route restored", "good");
-    hideViewerStatusSoon();
-    stopNativeGapPolling();
+    const hadGap = nativeRouteGapActive;
+    const hasGap = hasSequenceGap(nativePathCoords);
+    nativeRouteGapActive = hasGap;
+
+    if (document.body.classList.contains("viewer-mode")) {
+      addOrUpdateNativePath();
+    }
+
+    if (hadGap && !hasGap) {
+      showViewerStatus("Route restored", "good");
+      hideViewerStatusSoon();
+      stopNativeGapPolling();
+    }
+  } finally {
+    nativeGapPollInFlight = false;
   }
 }
 
@@ -1582,7 +1619,7 @@ function startNativeGapPolling(runId) {
 
   nativeGapPollId = setInterval(() => {
     pollNativeGapRepair(runId);
-  }, 3000);
+  }, 5000);
 
   pollNativeGapRepair(runId);
 }

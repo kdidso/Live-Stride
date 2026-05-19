@@ -828,6 +828,30 @@ async function nativeFinishSync(finishPayload) {
   }
 }
 
+async function syncFinishNow(runId, finishPayload) {
+  if (!runId || !navigator.onLine) return false;
+
+  try {
+    const { error } = await supabaseClient
+      .from("runs")
+      .update(finishPayload)
+      .eq("id", runId);
+
+    if (error) {
+      console.warn("Immediate Supabase finish failed:", error);
+      return false;
+    }
+
+    const queue = loadSyncQueue();
+    delete queue.finishEvents[runId];
+    saveSyncQueue(queue);
+    return true;
+  } catch (err) {
+    console.warn("Immediate Supabase finish exception:", err);
+    return false;
+  }
+}
+
 async function startNativeComparisonRun() {
   if (!LiveStrideNativeTracker || !activeRunId || !runnerName) return false;
 
@@ -1288,6 +1312,9 @@ if (navigator.onLine) {
 }
 
 async function stopTracking() {
+  const stoppedAtMs = Date.now();
+  const stoppedElapsedMs = startTime ? stoppedAtMs - startTime : null;
+
   if (runnerTimerId !== null) {
     clearInterval(runnerTimerId);
     runnerTimerId = null;
@@ -1343,8 +1370,8 @@ if (activeRunId) {
 
 const finishPayload = {
   is_live: false,
-  finished_at: new Date().toISOString(),
-  final_time_ms: startTime ? Date.now() - startTime : null,
+  finished_at: new Date(stoppedAtMs).toISOString(),
+  final_time_ms: stoppedElapsedMs,
   total_distance_m: totalDistanceMeters,
   latest_lat: lastPoint ? lastPoint.lat : null,
   latest_lon: lastPoint ? lastPoint.lon : null,
@@ -1354,7 +1381,8 @@ const finishPayload = {
 queueFinishEvent(activeRunId, finishPayload);
 queueFirebaseFinish();
 
-// await nativeFinishSync(finishPayload);
+await syncFinishNow(activeRunId, finishPayload);
+await nativeFinishSync(finishPayload);
 
 // Keep the JavaScript flush too as a backup when the WebView is still awake.
 await forceFlushAll();

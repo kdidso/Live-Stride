@@ -32,7 +32,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
 
     private static final String TAG = "LiveStrideSQLite";
     private static final String DATABASE_NAME = "livestride_native_points.db";
-    private static final int DATABASE_VERSION = 1;
+    private static final int DATABASE_VERSION = 2;
 
     public static final String TABLE_NATIVE_POINTS = "native_run_points";
 
@@ -71,6 +71,11 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                         "app_state TEXT, " +
                         "note TEXT, " +
                         "uploaded INTEGER NOT NULL DEFAULT 0, " +
+                        "upload_status TEXT NOT NULL DEFAULT 'pending', " +
+                        "upload_attempts INTEGER NOT NULL DEFAULT 0, " +
+                        "last_upload_error TEXT, " +
+                        "last_attempt_at TEXT, " +
+                        "last_attempt_at_ms INTEGER, " +
                         "uploaded_at TEXT, " +
                         "created_at_ms INTEGER NOT NULL" +
                         ")"
@@ -89,7 +94,16 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        // Future migrations will go here.
+        if (oldVersion < 2) {
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "upload_status", "TEXT NOT NULL DEFAULT 'pending'");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "upload_attempts", "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "last_upload_error", "TEXT");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "last_attempt_at", "TEXT");
+            addColumnIfMissing(db, TABLE_NATIVE_POINTS, "last_attempt_at_ms", "INTEGER");
+            db.execSQL("UPDATE " + TABLE_NATIVE_POINTS
+                    + " SET upload_status = CASE WHEN uploaded = 1 THEN 'uploaded' ELSE 'pending' END"
+                    + " WHERE upload_status IS NULL OR upload_status = ''");
+        }
     }
 
     public synchronized long insertNativePoint(JSONObject body) throws JSONException {
@@ -112,6 +126,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         putString(values, "note", body, "note");
 
         values.put("uploaded", 0);
+        values.put("upload_status", "pending");
         values.put("created_at_ms", System.currentTimeMillis());
 
         SQLiteDatabase db = getWritableDatabase();
@@ -129,6 +144,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
     public synchronized void markUploaded(long localId) {
         ContentValues values = new ContentValues();
         values.put("uploaded", 1);
+        values.put("upload_status", "uploaded");
         values.put("uploaded_at", isoNow());
 
         SQLiteDatabase db = getWritableDatabase();
@@ -143,6 +159,70 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                 + " pendingCount=" + countPending());
 
         exportDebugCopy();
+    }
+
+    public synchronized void markUploadInProgress(long localId) {
+        ContentValues values = new ContentValues();
+        values.put("upload_status", "uploading");
+        values.put("last_attempt_at", isoNow());
+        values.put("last_attempt_at_ms", System.currentTimeMillis());
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ? AND uploaded = 0",
+                new String[]{String.valueOf(localId)}
+        );
+    }
+
+    public synchronized void markUploadFailed(long localId, String error) {
+        ContentValues values = new ContentValues();
+        values.put("uploaded", 0);
+        values.put("upload_status", "pending");
+        values.put("last_upload_error", error == null ? "Upload failed" : error);
+        values.put("last_attempt_at", isoNow());
+        values.put("last_attempt_at_ms", System.currentTimeMillis());
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ?",
+                new String[]{String.valueOf(localId)}
+        );
+
+        db.execSQL(
+                "UPDATE " + TABLE_NATIVE_POINTS
+                        + " SET upload_attempts = upload_attempts + 1 WHERE local_id = ?",
+                new Object[]{localId}
+        );
+
+        Log.w(TAG, "Marked native point pending local_id=" + localId
+                + " error=" + values.getAsString("last_upload_error")
+                + " pendingCount=" + countPending());
+
+        exportDebugCopy();
+    }
+
+    public synchronized int resetStaleUploadAttempts(long staleBeforeMs) {
+        ContentValues values = new ContentValues();
+        values.put("upload_status", "pending");
+
+        SQLiteDatabase db = getWritableDatabase();
+        int rows = db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "uploaded = 0 AND upload_status = ? AND last_attempt_at_ms < ?",
+                new String[]{"uploading", String.valueOf(staleBeforeMs)}
+        );
+
+        if (rows > 0) {
+            Log.w(TAG, "Reset stale native point uploads rows=" + rows);
+            exportDebugCopy();
+        }
+
+        return rows;
     }
 
     public synchronized int countPending() {
@@ -188,8 +268,8 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         Cursor cursor = db.query(
                 TABLE_NATIVE_POINTS,
                 null,
-                "uploaded = 0",
-                null,
+                "uploaded = 0 AND upload_status = ?",
+                new String[]{"pending"},
                 null,
                 null,
                 "created_at_ms ASC, local_id ASC",
@@ -294,6 +374,28 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         }
     }
 
+    private static void addColumnIfMissing(
+            SQLiteDatabase db,
+            String table,
+            String column,
+            String definition
+    ) {
+        Cursor cursor = db.rawQuery("PRAGMA table_info(" + table + ")", null);
+
+        try {
+            while (cursor.moveToNext()) {
+                int nameIndex = cursor.getColumnIndex("name");
+                if (nameIndex >= 0 && column.equals(cursor.getString(nameIndex))) {
+                    return;
+                }
+            }
+        } finally {
+            cursor.close();
+        }
+
+        db.execSQL("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+    }
+
     public synchronized String exportDebugCopy() {
         try {
             // Make sure the database file has been created/opened.
@@ -367,9 +469,11 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
     }
 
     private static String isoNow() {
-        return new java.text.SimpleDateFormat(
+        java.text.SimpleDateFormat formatter = new java.text.SimpleDateFormat(
                 "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
                 java.util.Locale.US
-        ).format(new java.util.Date());
+        );
+        formatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return formatter.format(new java.util.Date());
     }
 }

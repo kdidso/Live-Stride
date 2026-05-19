@@ -26,7 +26,6 @@ import com.google.android.gms.location.Priority;
 
 import org.json.JSONObject;
 
-import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
@@ -87,6 +86,11 @@ public class LiveStrideNativeTrackerService extends Service {
             runId = intent.getStringExtra("runId");
             runnerName = intent.getStringExtra("runnerName");
             nativeSessionId = intent.getStringExtra("nativeSessionId");
+            LiveStridePendingPointUploadJobService.saveSupabaseConfig(
+                    this,
+                    supabaseUrl,
+                    supabaseAnonKey
+            );
 
             if (runnerName == null || runnerName.trim().isEmpty()) {
                 runnerName = "Native Test Runner";
@@ -98,6 +102,8 @@ public class LiveStrideNativeTrackerService extends Service {
 
             Log.i("LiveStrideNative", "SQLite native point storage active. Pending before run=" + pointStore.countPending());
             pointStore.exportDebugCopy();
+            LiveStridePendingPointUploadJobService.schedule(this);
+            new Thread(() -> LiveStridePendingPointUploadJobService.flushPendingPoints(this)).start();
 
             sequenceNum = 0;
             previousLocation = null;
@@ -291,11 +297,13 @@ private void uploadNativePoint(Location location) {
     final double finalDistanceMeters = totalDistanceMeters;
     final double finalInstPaceMinPerMile = instPaceMinPerMile;
     final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
-    final String recordedAt =
+    java.text.SimpleDateFormat recordedAtFormatter =
         new java.text.SimpleDateFormat(
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
             java.util.Locale.US
-        ).format(new java.util.Date(pointTimeMs));
+        );
+    recordedAtFormatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+    final String recordedAt = recordedAtFormatter.format(new java.util.Date(pointTimeMs));
 
     new Thread(() -> {
         try {
@@ -325,13 +333,21 @@ private void uploadNativePoint(Location location) {
             // Save every native point locally first. This makes the phone-side record durable
             // before any Supabase network attempt is made.
             long localId = pointStore.insertNativePoint(body);
+            pointStore.markUploadInProgress(localId);
 
-            boolean uploaded = uploadNativePointBody(body);
+            LiveStridePendingPointUploadJobService.UploadResult uploadResult =
+                    LiveStridePendingPointUploadJobService.uploadNativePointBody(
+                            supabaseUrl,
+                            supabaseAnonKey,
+                            body
+                    );
 
-            if (uploaded) {
+            if (uploadResult.success) {
                 pointStore.markUploaded(localId);
                 Log.i("LiveStrideNative", "SQLite point uploaded seq=" + thisSequence + " local_id=" + localId);
             } else {
+                pointStore.markUploadFailed(localId, uploadResult.error);
+                LiveStridePendingPointUploadJobService.schedule(this);
                 Log.w("LiveStrideNative", "SQLite point left pending seq=" + thisSequence
                         + " local_id=" + localId
                         + " pendingForRun=" + pointStore.countPendingForRun(runId));
@@ -341,46 +357,6 @@ private void uploadNativePoint(Location location) {
             System.out.println("LiveStride native point SQLite/upload exception: " + e.getMessage());
         }
     }).start();
-}
-
-private boolean uploadNativePointBody(JSONObject body) {
-    HttpURLConnection conn = null;
-
-    try {
-        URL url = new URL(supabaseUrl + "/rest/v1/run_points_native_test");
-
-        conn = (HttpURLConnection) url.openConnection();
-
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("apikey", supabaseAnonKey);
-        conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("Accept-Profile", "public");
-        conn.setRequestProperty("Content-Profile", "public");
-        conn.setRequestProperty("Prefer", "return=minimal");
-        conn.setDoOutput(true);
-
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(body.toString().getBytes("UTF-8"));
-        }
-
-        int code = conn.getResponseCode();
-
-        if (code < 200 || code >= 300) {
-            System.out.println("LiveStride native point upload failed. HTTP "
-                    + code + " seq=" + body.optInt("sequence_num", -1));
-            return false;
-        }
-
-        return true;
-
-    } catch (Exception e) {
-        System.out.println("LiveStride native point upload exception: " + e.getMessage());
-        return false;
-    } finally {
-        if (conn != null) conn.disconnect();
-    }
 }
 
     private Notification buildNotification(String text) {

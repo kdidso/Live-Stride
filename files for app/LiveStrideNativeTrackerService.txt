@@ -65,8 +65,21 @@ public class LiveStrideNativeTrackerService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || intent.getAction() == null) {
+            Log.w("LiveStrideNative", "onStartCommand received null intent or null action");
             return START_NOT_STICKY;
         }
+
+        Log.i(
+                "LiveStrideNative",
+                "onStartCommand action=" + intent.getAction()
+                        + " hasExtras=" + (intent.getExtras() != null)
+                        + " runId=" + intent.getStringExtra("runId")
+                        + " keyLength=" + (
+                        intent.getStringExtra("supabaseAnonKey") == null
+                                ? 0
+                                : intent.getStringExtra("supabaseAnonKey").length()
+                )
+        );
 
         if (ACTION_START.equals(intent.getAction())) {
             supabaseUrl = intent.getStringExtra("supabaseUrl");
@@ -84,6 +97,7 @@ public class LiveStrideNativeTrackerService extends Service {
             }  
 
             Log.i("LiveStrideNative", "SQLite native point storage active. Pending before run=" + pointStore.countPending());
+            pointStore.exportDebugCopy();
 
             sequenceNum = 0;
             previousLocation = null;

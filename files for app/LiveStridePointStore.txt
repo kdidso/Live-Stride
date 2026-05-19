@@ -176,6 +176,24 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         );
     }
 
+    public synchronized void updateElevation(long localId, double elevationMeters) {
+        ContentValues values = new ContentValues();
+        values.put("elevation_m", elevationMeters);
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ?",
+                new String[]{String.valueOf(localId)}
+        );
+
+        Log.i(TAG, "Updated native point elevation local_id=" + localId
+                + " elevation_m=" + elevationMeters);
+
+        exportDebugCopy();
+    }
+
     public synchronized void markUploadFailed(long localId, String error) {
         ContentValues values = new ContentValues();
         values.put("uploaded", 0);

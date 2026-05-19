@@ -1,8 +1,8 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>LiveStride – Satellite Tracker</title>
+  <title>LiveStride â€“ Satellite Tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
@@ -128,8 +128,8 @@
 
   <div id="buttonWrapper">
     <div id="modeToggle">
-      <button id="runnerModeBtn">🏃‍♂️ Runner</button>
-      <button id="viewerModeBtn">👁️ Viewer</button>
+      <button id="runnerModeBtn">ðŸƒâ€â™‚ï¸ Runner</button>
+      <button id="viewerModeBtn">ðŸ‘ï¸ Viewer</button>
     </div>
     <div id="controls">
       <button id="startBtn">Start</button>
@@ -160,7 +160,7 @@
   <button id="recenterBtn">Recenter</button>
 
   <script>
-    // → Firebase initialization
+    // â†’ Firebase initialization
     const firebaseConfig = {
       apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
       authDomain: "livestride.firebaseapp.com",
@@ -174,12 +174,12 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    // → Supabase initialization
+    // â†’ Supabase initialization
     const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
     const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    // → Style URLs
+    // â†’ Style URLs
     const STYLES = {
       satellite: `https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
       streets: `https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
@@ -187,7 +187,7 @@
       outdoor: `https://api.maptiler.com/maps/outdoor/style.json?key=Ii8JoWt1QkDL9pFlSQXC`
     };
 
-    // → Initialize map
+    // â†’ Initialize map
     let map = new maplibregl.Map({
       container: "map",
       style: STYLES.satellite,
@@ -216,7 +216,7 @@
     }
     map.on("style.load", addControls);
 
-    // → State
+    // â†’ State
     let pathCoords = [];
     let watchId = null;
     let startTime = null;
@@ -263,12 +263,13 @@
     let viewerFreshHeartbeatCount = 0;
     let lastViewerStatusMessage = null;
     let viewerStatusEl = null;
+    let viewerStatusHideTimerId = null;
     let viewerConnectionWatchId = null;
     let runnerSyncHadFailure = false;
     let programmaticViewerMove = false;
     let viewerWakeLock = null;
 
-    // → DOM
+    // â†’ DOM
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const broadcastBtn = document.getElementById("broadcastBtn");
@@ -367,7 +368,7 @@ setTimeout(() => {
     }
 
     function formatPace(minsPerMile) {
-      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "—";
+      if (!isFinite(minsPerMile) || minsPerMile <= 0) return "â€”";
       const minutes = Math.floor(minsPerMile);
       const seconds = Math.round((minsPerMile - minutes) * 60);
       return `${minutes}:${seconds.toString().padStart(2, "0")} /mi`;
@@ -388,7 +389,7 @@ setTimeout(() => {
 
     function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationFt) {
       const timeHtml = `Time: ${formatTime(elapsedMs)}`;
-      const elevHtml = elevationFt != null ? `Elev: ${Math.round(elevationFt)} ft` : "Elev: —";
+      const elevHtml = elevationFt != null ? `Elev: ${Math.round(elevationFt)} ft` : "Elev: â€”";
       const distHtml = `Distance: ${distanceMi.toFixed(2)} mi`;
       const paceHtml = `Pace: ${formatPace(instPace)}`;
       const avgHtml = `Avg Pace: ${formatPace(avgPace)}`;
@@ -588,6 +589,11 @@ function clearNativeRunPathLayer() {
     document.body.appendChild(viewerStatusEl);
   }
 
+  if (viewerStatusHideTimerId !== null) {
+    clearTimeout(viewerStatusHideTimerId);
+    viewerStatusHideTimerId = null;
+  }
+
   const buttonWrapper = document.getElementById("buttonWrapper");
   const buttonBottom = buttonWrapper
     ? buttonWrapper.getBoundingClientRect().bottom + 10
@@ -597,6 +603,7 @@ function clearNativeRunPathLayer() {
   viewerStatusEl.style.left = "10px";
   viewerStatusEl.style.right = "10px";
 
+  lastViewerStatusMessage = message;
   viewerStatusEl.textContent = message;
   viewerStatusEl.style.background =
     type === "bad"
@@ -607,11 +614,27 @@ function clearNativeRunPathLayer() {
   viewerStatusEl.style.display = "block";
 }
 
-    function hideViewerStatusSoon() {
-      setTimeout(() => {
-        if (viewerStatusEl) viewerStatusEl.style.display = "none";
-      }, 3000);
-    }
+function hideViewerStatus(message = null) {
+  if (message && lastViewerStatusMessage !== message) return;
+
+  if (viewerStatusHideTimerId !== null) {
+    clearTimeout(viewerStatusHideTimerId);
+    viewerStatusHideTimerId = null;
+  }
+
+  if (viewerStatusEl) viewerStatusEl.style.display = "none";
+  lastViewerStatusMessage = null;
+}
+
+function hideViewerStatusSoon(message = null, delayMs = 3000) {
+  if (viewerStatusHideTimerId !== null) {
+    clearTimeout(viewerStatusHideTimerId);
+  }
+
+  viewerStatusHideTimerId = setTimeout(() => {
+    hideViewerStatus(message);
+  }, delayMs);
+}
 
     async function requestViewerWakeLock() {
       if (!("wakeLock" in navigator)) return;
@@ -665,7 +688,7 @@ function clearNativeRunPathLayer() {
         console.warn("Supabase point insert failed; queued for retry:", error);
         pendingSupabasePoints.push(pointPayload);
         runnerSyncHadFailure = true;
-        showConnectionStatus("Connection lost — saving run locally", "bad");
+        showConnectionStatus("Connection lost â€” saving run locally", "bad");
         return false;
       }
 
@@ -684,11 +707,33 @@ function clearNativeRunPathLayer() {
         console.warn("Supabase run update failed; queued latest summary:", error);
         pendingRunUpdate = updatePayload;
         runnerSyncHadFailure = true;
-        showConnectionStatus("Connection lost — syncing when back online", "bad");
+        showConnectionStatus("Connection lost â€” syncing when back online", "bad");
         return false;
       }
 
       return true;
+    }
+
+    async function syncFinishNow(runId, finishPayload) {
+      if (!runId || !navigator.onLine) return false;
+
+      try {
+        const { error } = await supabaseClient
+          .from("runs")
+          .update(finishPayload)
+          .eq("id", runId);
+
+        if (error) {
+          console.warn("Immediate Supabase finish failed:", error);
+          return false;
+        }
+
+        pendingRunUpdate = null;
+        return true;
+      } catch (err) {
+        console.warn("Immediate Supabase finish exception:", err);
+        return false;
+      }
     }
 
     async function sendRunnerHeartbeat() {
@@ -734,7 +779,7 @@ function clearNativeRunPathLayer() {
 
           if (error) {
             console.warn("Still unable to sync queued point:", error);
-            showConnectionStatus("Still offline — run is saved locally", "bad");
+            showConnectionStatus("Still offline â€” run is saved locally", "bad");
             break;
           }
 
@@ -752,7 +797,7 @@ function clearNativeRunPathLayer() {
 
         if (pendingSupabasePoints.length === 0 && !pendingRunUpdate && runnerSyncHadFailure) {
           runnerSyncHadFailure = false;
-          showConnectionStatus("Connection restored — run synced", "good");
+          showConnectionStatus("Connection restored â€” run synced", "good");
           hideConnectionStatusSoon();
         }
       } finally {
@@ -762,7 +807,7 @@ function clearNativeRunPathLayer() {
 
     window.addEventListener("online", flushSupabaseQueue);
     window.addEventListener("offline", () => {
-      showConnectionStatus("Connection lost — saving run locally", "bad");
+      showConnectionStatus("Connection lost â€” saving run locally", "bad");
     });
 
     function resetRunDisplay() {
@@ -1064,7 +1109,9 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       );
     }
 
-    function stopTracking() {
+    async function stopTracking() {
+      const stoppedAtMs = Date.now();
+      const stoppedElapsedMs = startTime ? stoppedAtMs - startTime : null;
       if (runnerTimerId !== null) {
         clearInterval(runnerTimerId);
         runnerTimerId = null;
@@ -1089,7 +1136,27 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       }
 
       if (broadcasting && broadcastRef) {
-        broadcastRef.update({ finished: true });
+        const lastBroadcastPoint = pathCoords.length > 0
+          ? pathCoords[pathCoords.length - 1]
+          : null;
+
+        try {
+          await broadcastRef.update({
+            finished: true,
+            timestamp: stoppedAtMs,
+            distance: metersToMiles(totalDistanceMeters),
+            pace: latestRunnerPace,
+            avgPace: latestRunnerAvgPace,
+            elevation: latestRunnerElevFt,
+            current: lastBroadcastPoint
+              ? [lastBroadcastPoint.lon, lastBroadcastPoint.lat]
+              : null,
+            startTime
+          });
+        } catch (err) {
+          console.warn("Firebase finish update failed:", err);
+        }
+
         broadcasting = false;
       }
 
@@ -1098,17 +1165,22 @@ fetchElevation(coord[1], coord[0]).then(elev => {
           ? pathCoords[pathCoords.length - 1]
           : null;
 
-        safeUpdateRunSummary({
+        const finishPayload = {
           is_live: false,
-          finished_at: new Date().toISOString(),
-          final_time_ms: startTime ? Date.now() - startTime : null,
+          finished_at: new Date(stoppedAtMs).toISOString(),
+          final_time_ms: stoppedElapsedMs,
           total_distance_m: totalDistanceMeters,
           latest_lat: lastPoint ? lastPoint.lat : null,
           latest_lon: lastPoint ? lastPoint.lon : null,
           latest_timestamp: lastPoint ? lastPoint.time : null
-        });
+        };
 
-        flushSupabaseQueue();
+        const finishSynced = await syncFinishNow(activeRunId, finishPayload);
+        if (!finishSynced) {
+          await safeUpdateRunSummary(finishPayload);
+        }
+
+        await flushSupabaseQueue();
       }
 
       exportGpxBtn.style.display = "inline-block";
@@ -1214,7 +1286,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
           ? new Date(run.started_at).toLocaleTimeString()
           : "";
 
-        li.textContent = `${run.runner_name} — ${status} — ${started}`;
+        li.textContent = `${run.runner_name} â€” ${status} â€” ${started}`;
 
 li.onclick = () => {
   searchInput.value = run.runner_name;
@@ -1233,6 +1305,34 @@ li.onclick = () => {
       });
     };
 
+async function fetchAllNativeRunPoints(runId) {
+  const pageSize = 1000;
+  let from = 0;
+  let allRows = [];
+
+  while (true) {
+    const to = from + pageSize - 1;
+    const { data, error } = await supabaseClient
+      .from("run_points_native_test")
+      .select("*")
+      .eq("run_id", runId)
+      .order("sequence_num", { ascending: true })
+      .range(from, to);
+
+    if (error) throw error;
+
+    allRows = allRows.concat(data || []);
+
+    if (!data || data.length < pageSize) {
+      break;
+    }
+
+    from += pageSize;
+  }
+
+  return allRows;
+}
+
 async function startNativePathComparison(runId) {
   if (!runId) return;
 
@@ -1248,13 +1348,11 @@ async function startNativePathComparison(runId) {
     clearNativeRunPathLayer();
   }
 
-  const { data, error } = await supabaseClient
-    .from("run_points_native_test")
-    .select("*")
-    .eq("run_id", runId)
-    .order("sequence_num", { ascending: true });
+  let data;
 
-  if (error) {
+  try {
+    data = await fetchAllNativeRunPoints(runId);
+  } catch (error) {
     console.error("Initial native path load error:", error);
     return;
   }
@@ -1316,12 +1414,13 @@ async function startNativePathComparison(runId) {
           incomingSequence - previousLatestSequence > 1
         ) {
           showViewerStatus("Reconnecting - rebuilding route", "good");
+          hideViewerStatusSoon("Reconnecting - rebuilding route", 6000);
         } else if (hadGap && !hasGap) {
           showViewerStatus("Route restored", "good");
-          hideViewerStatusSoon();
+          hideViewerStatusSoon("Route restored", 3000);
         } else if (!hasGap && (wasConnectionLost || wasConnectionWarning)) {
           showViewerStatus("Runner reconnected", "good");
-          hideViewerStatusSoon();
+          hideViewerStatusSoon("Runner reconnected", 3000);
         }
 
         // Only render purple native path and red marker in viewer mode.
@@ -1601,7 +1700,7 @@ if (run.final_time_ms != null && lastViewerData) {
         viewerConnectionLost = false;
         nativeRouteGapActive = false;
         showViewerStatus("Run finished", "good");
-        hideViewerStatusSoon();
+        hideViewerStatusSoon("Run finished", 3000);
       }
     }
   )
@@ -1625,7 +1724,7 @@ activeSupabaseChannel = supabaseClient
       if (viewerConnectionLost) {
         viewerConnectionLost = false;
         showViewerStatus("Runner reconnected", "good");
-        hideViewerStatusSoon();
+        hideViewerStatusSoon("Runner reconnected", 3000);
       }
 
       upsertSortedRunPoint(pt);
@@ -1709,7 +1808,7 @@ viewerConnectionWatchId = setInterval(() => {
   if (secondsSinceLastPoint > 45 && !viewerConnectionLost) {
     viewerConnectionLost = true;
     viewerConnectionWarning = true;
-    showViewerStatus("Signal lost — waiting for runner", "bad");
+    showViewerStatus("Signal lost â€” waiting for runner", "bad");
   } else if (secondsSinceLastPoint > 15 && !viewerConnectionWarning) {
     viewerConnectionWarning = true;
     showViewerStatus("No motion detected - awaiting runner status", "warn");
@@ -1718,7 +1817,7 @@ viewerConnectionWatchId = setInterval(() => {
 
 }
 
-    // → Firebase legacy fallback viewer function kept for older Firebase-only runs
+    // â†’ Firebase legacy fallback viewer function kept for older Firebase-only runs
     function trackRunner(key) {
       if (activeSupabaseChannel) {
         supabaseClient.removeChannel(activeSupabaseChannel);
@@ -1851,7 +1950,7 @@ if (viewerFollowing) {
         : new Date().toISOString().slice(0, 10);
 
       const trackName = runnerName
-        ? `${runnerName} – ${runDate}`
+        ? `${runnerName} â€“ ${runDate}`
         : `LiveStride Run ${runDate}`;
 
       let gpx = `<?xml version="1.0" encoding="UTF-8"?>

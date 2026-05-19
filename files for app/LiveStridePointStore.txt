@@ -10,6 +10,10 @@ import android.util.Log;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -32,8 +36,18 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
 
     public static final String TABLE_NATIVE_POINTS = "native_run_points";
 
+    private final Context appContext;
+
     public LiveStridePointStore(Context context) {
         super(context, DATABASE_NAME, null, DATABASE_VERSION);
+        this.appContext = context.getApplicationContext();
+
+        File dbFile = this.appContext.getDatabasePath(DATABASE_NAME);
+        File debugDir = getDebugExportDir();
+
+        Log.i(TAG, "LiveStride SQLite store initialized. Internal db="
+                + dbFile.getAbsolutePath()
+                + " debugExportDir=" + debugDir.getAbsolutePath());
     }
 
     @Override
@@ -107,6 +121,8 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                 + " seq=" + body.optInt("sequence_num", -1)
                 + " pendingCount=" + countPending());
 
+        exportDebugCopy();
+
         return localId;
     }
 
@@ -125,6 +141,8 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
 
         Log.i(TAG, "Marked native point uploaded local_id=" + localId
                 + " pendingCount=" + countPending());
+
+        exportDebugCopy();
     }
 
     public synchronized int countPending() {
@@ -273,6 +291,78 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             json.put(key, JSONObject.NULL);
         } else {
             json.put(key, cursor.getDouble(idx));
+        }
+    }
+
+    public synchronized String exportDebugCopy() {
+        try {
+            // Make sure the database file has been created/opened.
+            getReadableDatabase();
+
+            File dbFile = appContext.getDatabasePath(DATABASE_NAME);
+            File debugDir = getDebugExportDir();
+
+            if (!debugDir.exists() && !debugDir.mkdirs()) {
+                Log.w(TAG, "Could not create SQLite debug export directory: "
+                        + debugDir.getAbsolutePath());
+                return null;
+            }
+
+            File copiedDb = new File(debugDir, DATABASE_NAME);
+            copyFileIfExists(dbFile, copiedDb);
+
+            // Copy common companion files if Android creates them.
+            copyFileIfExists(
+                    new File(dbFile.getAbsolutePath() + "-journal"),
+                    new File(debugDir, DATABASE_NAME + "-journal")
+            );
+            copyFileIfExists(
+                    new File(dbFile.getAbsolutePath() + "-wal"),
+                    new File(debugDir, DATABASE_NAME + "-wal")
+            );
+            copyFileIfExists(
+                    new File(dbFile.getAbsolutePath() + "-shm"),
+                    new File(debugDir, DATABASE_NAME + "-shm")
+            );
+
+            Log.i(TAG, "SQLite debug copy exported to "
+                    + copiedDb.getAbsolutePath()
+                    + " pendingCount=" + countPending());
+
+            return copiedDb.getAbsolutePath();
+
+        } catch (Exception e) {
+            Log.w(TAG, "SQLite debug export failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private File getDebugExportDir() {
+        File externalFiles = appContext.getExternalFilesDir(null);
+
+        if (externalFiles != null) {
+            return new File(externalFiles, "livestride_sqlite_debug");
+        }
+
+        return new File(appContext.getFilesDir(), "livestride_sqlite_debug");
+    }
+
+    private static void copyFileIfExists(File source, File destination) throws IOException {
+        if (source == null || !source.exists()) {
+            return;
+        }
+
+        try (FileInputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(destination)) {
+
+            byte[] buffer = new byte[8192];
+            int read;
+
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+
+            out.flush();
         }
     }
 

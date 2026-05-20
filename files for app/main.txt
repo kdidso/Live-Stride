@@ -1,9 +1,9 @@
-// â†’ Capacitor plugins
+// -> Capacitor plugins
 const { BackgroundGeolocation, Filesystem, Share, LiveStrideSync, LiveStrideNativeTracker } = Capacitor.Plugins;
 const Directory = Filesystem.Directory;
 const Encoding  = Filesystem.Encoding;
 
-// â†’ Firebase initialization
+// -> Firebase initialization
 // Assumes firebase is loaded globally via <script> before this module.
 const firebaseConfig = {
   apiKey: "AIzaSyCHJAjNTplm3eDjAjolmW6U7iPYY0aIWxk",
@@ -18,7 +18,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-// â†’ Supabase initialization
+// -> Supabase initialization
 // Assumes @supabase/supabase-js is loaded globally via <script> before this module.
 const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
@@ -27,7 +27,7 @@ const supabaseClient = window.supabase.createClient(
   SUPABASE_ANON_KEY
 );
 
-// â†’ Style URLs for map toggle
+// -> Style URLs for map toggle
 const STYLES = {
   satellite: `https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
   streets: `https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
@@ -35,7 +35,7 @@ const STYLES = {
   outdoor: `https://api.maptiler.com/maps/outdoor/style.json?key=Ii8JoWt1QkDL9pFlSQXC`
 };
 
-// â†’ Create map with default satellite style
+// -> Create map with default satellite style
 let map = new maplibregl.Map({
   container: "map",
   style: STYLES.satellite,
@@ -43,7 +43,7 @@ let map = new maplibregl.Map({
   zoom: 13
 });
 
-// â†’ Re-add geolocation control after style changes
+// -> Re-add geolocation control after style changes
 let geoControl;
 function addControls() {
   if (geoControl) {
@@ -65,7 +65,7 @@ function addControls() {
 }
 map.on("style.load", addControls);
 
-// â†’ Tracking state
+// -> Tracking state
 let pathCoords = [];
 let bgWatchId = null;
 let startTime = null;
@@ -117,7 +117,7 @@ let runnerHeartbeatId = null;
 let lastRunnerHeartbeatTime = null;
 
 
-// â†’ DOM references
+// -> DOM references
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const broadcastBtn = document.getElementById("broadcastBtn");
@@ -251,7 +251,7 @@ function updateQueuedPointElevation(runId, sequenceNum, elevationM) {
   if (changed) saveSyncQueue(queue);
 }
 
-// â†’ Mode switching
+// -> Mode switching
 function setMode(mode) {
   const controls = document.getElementById("controls");
   const broadcastLabel = document.getElementById("broadcastLabel");
@@ -301,7 +301,7 @@ viewerModeBtn.onclick = () => {
   setMode("viewer");
 };
 
-// â†’ Stop following if user manually moves map
+// -> Stop following if user manually moves map
 map.on("dragstart", () => {
   isFollowing = false;
   viewerFollowing = false;
@@ -312,7 +312,7 @@ map.on("zoomstart", () => {
   viewerFollowing = false;
 });
 
-// â†’ Recenter button for viewer mode
+// -> Recenter button for viewer mode
 recenterBtn.onclick = () => {
   if (viewerMarker) {
     viewerFollowing = true;
@@ -320,7 +320,7 @@ recenterBtn.onclick = () => {
   }
 };
 
-// â†’ Utility functions
+// -> Utility functions
 function metersToMiles(meters) {
   return meters / 1609.34;
 }
@@ -346,7 +346,7 @@ function formatTime(ms) {
 }
 
 function formatPace(minsPerMile) {
-  if (!isFinite(minsPerMile) || minsPerMile <= 0) return "â€”";
+  if (!isFinite(minsPerMile) || minsPerMile <= 0) return "-";
   const minutes = Math.floor(minsPerMile);
   const seconds = Math.round((minsPerMile - minutes) * 60);
   return `${minutes}:${seconds.toString().padStart(2, "0")} /mi`;
@@ -375,7 +375,7 @@ async function fetchElevation(lat, lon) {
 
 function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationFt) {
   const timeHtml = `Time: ${formatTime(elapsedMs)}`;
-  const elevHtml = elevationFt != null ? `Elev: ${Math.round(elevationFt)} ft` : "Elev: â€”";
+  const elevHtml = elevationFt != null ? `Elev: ${Math.round(elevationFt)} ft` : "Elev: -";
   const distHtml = `Distance: ${distanceMi.toFixed(2)} mi`;
   const paceHtml = `Pace: ${formatPace(instPace)}`;
   const avgHtml = `Avg Pace: ${formatPace(avgPace)}`;
@@ -638,9 +638,9 @@ function hideConnectionStatusSoon() {
 async function safeInsertRunPoint(pointPayload) {
   if (!navigator.onLine) {
   queueRunPoint(pointPayload);
-  await nativeQueuePoint(pointPayload); // ðŸ”¥ NEW
+  await nativeQueuePoint(pointPayload); // NEW
   runnerSyncHadFailure = true;
-  showConnectionStatus("Connection lost â€” saving run locally", "bad");
+  showConnectionStatus("Connection lost - saving run locally", "bad");
   return false;
 }
 
@@ -651,9 +651,9 @@ async function safeInsertRunPoint(pointPayload) {
 if (error) {
   console.warn("Supabase point insert failed; queued for retry:", error);
   queueRunPoint(pointPayload);
-  await nativeQueuePoint(pointPayload); // ðŸ”¥ NEW
+  await nativeQueuePoint(pointPayload); // NEW
   runnerSyncHadFailure = true;
-  showConnectionStatus("Connection lost â€” saving run locally", "bad");
+  showConnectionStatus("Connection lost - saving run locally", "bad");
   return false;
 }
 
@@ -693,7 +693,7 @@ async function safeUpdateRunSummary(updatePayload) {
   if (!navigator.onLine) {
     queueRunUpdate(activeRunId, updatePayload);
     runnerSyncHadFailure = true;
-    showConnectionStatus("Connection lost â€” syncing when back online", "bad");
+    showConnectionStatus("Connection lost - syncing when back online", "bad");
     return false;
   }
 
@@ -706,7 +706,7 @@ async function safeUpdateRunSummary(updatePayload) {
     console.warn("Supabase run update failed; queued latest summary:", error);
     queueRunUpdate(activeRunId, updatePayload);
     runnerSyncHadFailure = true;
-    showConnectionStatus("Connection lost â€” syncing when back online", "bad");
+    showConnectionStatus("Connection lost - syncing when back online", "bad");
     return false;
   }
 
@@ -757,7 +757,7 @@ try {
 
       if (error) {
         console.warn("Still unable to sync queued point:", error);
-        showConnectionStatus("Still offline â€” run is saved locally", "bad");
+        showConnectionStatus("Still offline - run is saved locally", "bad");
         saveSyncQueue(queue);
         return;
       }
@@ -774,7 +774,7 @@ try {
 
       if (error) {
         console.warn("Still unable to sync queued run update:", error);
-        showConnectionStatus("Still offline â€” run summary is saved locally", "bad");
+        showConnectionStatus("Still offline - run summary is saved locally", "bad");
         saveSyncQueue(queue);
         return;
       }
@@ -791,7 +791,7 @@ try {
 
       if (error) {
         console.warn("Still unable to sync finish event:", error);
-        showConnectionStatus("Still offline â€” finish will sync later", "bad");
+        showConnectionStatus("Still offline - finish will sync later", "bad");
         saveSyncQueue(queue);
         return;
       }
@@ -802,7 +802,7 @@ try {
 
     if (runnerSyncHadFailure) {
       runnerSyncHadFailure = false;
-      showConnectionStatus("Connection restored â€” run synced", "good");
+      showConnectionStatus("Connection restored - run synced", "good");
       hideConnectionStatusSoon();
     }
   } finally {
@@ -942,12 +942,12 @@ async function forceFlushAll() {
   return false;
 }
 window.addEventListener("online", () => {
-  showConnectionStatus("Connection restored â€” syncing run", "good");
+  showConnectionStatus("Connection restored - syncing run", "good");
   flushSupabaseQueue();
 });
 
 window.addEventListener("offline", () => {
-  showConnectionStatus("Connection lost â€” saving run locally", "bad");
+  showConnectionStatus("Connection lost - saving run locally", "bad");
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -1526,7 +1526,7 @@ exportGpxBtn.onclick = async () => {
     try {
       await Share.share({
         title: "LiveStride GPX Export",
-        text: "Hereâ€™s my run in GPX format.",
+        text: "Here's my run in GPX format.",
         url: uri,
         dialogTitle: "Save or share your run GPX"
       });
@@ -1612,7 +1612,7 @@ searchInput.oninput = async () => {
       ? new Date(run.started_at).toLocaleTimeString()
       : "";
 
-    li.textContent = `${run.runner_name} â€” ${status} â€” ${started}`;
+    li.textContent = `${run.runner_name} - ${status} - ${started}`;
 
     li.onclick = () => {
       searchInput.value = run.runner_name;
@@ -2140,7 +2140,7 @@ viewerConnectionWatchId = setInterval(() => {
   if (secondsSinceLastPoint > 45 && !viewerConnectionLost) {
     viewerConnectionLost = true;
     viewerConnectionWarning = true;
-    showViewerStatus("Signal lost â€” waiting for runner", "bad");
+    showViewerStatus("Signal lost - waiting for runner", "bad");
   } else if (secondsSinceLastPoint > 15 && !viewerConnectionWarning) {
     viewerConnectionWarning = true;
     showViewerStatus("No motion detected - awaiting runner status", "warn");
@@ -2149,7 +2149,7 @@ viewerConnectionWatchId = setInterval(() => {
 
 }
 
-// â†’ Firebase legacy fallback viewer function kept for older Firebase-only runs
+// -> Firebase legacy fallback viewer function kept for older Firebase-only runs
 function trackRunner(key) {
   if (activeSupabaseChannel) {
     supabaseClient.removeChannel(activeSupabaseChannel);
@@ -2266,7 +2266,3 @@ layerSelect.addEventListener("change", () => {
 });
 
 map.on("load", () => setMode("runner"));
-
-
-
-

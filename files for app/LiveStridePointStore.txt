@@ -279,6 +279,56 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         }
     }
 
+    public synchronized JSONObject getRunSummaryFromNativePoints(String runId) {
+        if (runId == null) return null;
+
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT lat, lon, recorded_at, distance_m FROM " + TABLE_NATIVE_POINTS
+                        + " WHERE run_id = ?"
+                        + " ORDER BY sequence_num ASC, recorded_at ASC, local_id ASC",
+                new String[]{runId}
+        );
+
+        try {
+            if (!cursor.moveToFirst()) {
+                return null;
+            }
+
+            String firstRecordedAt = cursor.getString(cursor.getColumnIndexOrThrow("recorded_at"));
+            String lastRecordedAt = firstRecordedAt;
+            double latestLat = cursor.getDouble(cursor.getColumnIndexOrThrow("lat"));
+            double latestLon = cursor.getDouble(cursor.getColumnIndexOrThrow("lon"));
+            double totalDistanceM = getNullableDouble(cursor, "distance_m", 0.0);
+
+            while (cursor.moveToNext()) {
+                latestLat = cursor.getDouble(cursor.getColumnIndexOrThrow("lat"));
+                latestLon = cursor.getDouble(cursor.getColumnIndexOrThrow("lon"));
+                lastRecordedAt = cursor.getString(cursor.getColumnIndexOrThrow("recorded_at"));
+                totalDistanceM = getNullableDouble(cursor, "distance_m", totalDistanceM);
+            }
+
+            JSONObject summary = new JSONObject();
+            summary.put("latest_lat", latestLat);
+            summary.put("latest_lon", latestLon);
+            summary.put("latest_timestamp", lastRecordedAt);
+            summary.put("total_distance_m", totalDistanceM);
+
+            Long firstMs = parseIsoMillis(firstRecordedAt);
+            Long lastMs = parseIsoMillis(lastRecordedAt);
+            if (firstMs != null && lastMs != null && lastMs >= firstMs) {
+                summary.put("final_time_ms", lastMs - firstMs);
+            }
+
+            return summary;
+        } catch (JSONException e) {
+            Log.w(TAG, "Could not build native run summary: " + e.getMessage());
+            return null;
+        } finally {
+            cursor.close();
+        }
+    }
+
     public synchronized List<JSONObject> getPendingUploadBodies(int limit) {
         List<JSONObject> rows = new ArrayList<>();
 
@@ -389,6 +439,35 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             json.put(key, JSONObject.NULL);
         } else {
             json.put(key, cursor.getDouble(idx));
+        }
+    }
+
+    private static double getNullableDouble(Cursor cursor, String column, double fallback) {
+        int idx = cursor.getColumnIndex(column);
+        if (idx < 0 || cursor.isNull(idx)) {
+            return fallback;
+        }
+
+        return cursor.getDouble(idx);
+    }
+
+    private static Long parseIsoMillis(String iso) {
+        if (iso == null || iso.trim().isEmpty()) {
+            return null;
+        }
+
+        try {
+            java.text.SimpleDateFormat formatter =
+                    new java.text.SimpleDateFormat(
+                            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                            java.util.Locale.US
+                    );
+            formatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+            java.util.Date parsed = formatter.parse(iso);
+            return parsed == null ? null : parsed.getTime();
+        } catch (Exception e) {
+            Log.w(TAG, "Could not parse native point timestamp: " + iso);
+            return null;
         }
     }
 

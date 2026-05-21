@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteOpenHelper;
 import android.util.Log;
 
 import org.json.JSONException;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -326,6 +327,102 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             return null;
         } finally {
             cursor.close();
+        }
+    }
+
+    public synchronized JSONObject getRunDisplaySnapshot(
+            String runId,
+            int afterSequenceNum,
+            boolean includeFullPath
+    ) {
+        if (runId == null) return null;
+
+        SQLiteDatabase db = getReadableDatabase();
+        JSONArray points = new JSONArray();
+        JSONObject latestPoint = null;
+        String firstRecordedAt = null;
+        int latestSequenceNum = -1;
+
+        String pointWhere = includeFullPath
+                ? "run_id = ?"
+                : "run_id = ? AND sequence_num > ?";
+        String[] pointArgs = includeFullPath
+                ? new String[]{runId}
+                : new String[]{runId, String.valueOf(afterSequenceNum)};
+
+        Cursor pointCursor = db.query(
+                TABLE_NATIVE_POINTS,
+                null,
+                pointWhere,
+                pointArgs,
+                null,
+                null,
+                "sequence_num ASC, recorded_at ASC, local_id ASC"
+        );
+
+        try {
+            while (pointCursor.moveToNext()) {
+                points.put(cursorToJson(pointCursor));
+            }
+        } finally {
+            pointCursor.close();
+        }
+
+        Cursor latestCursor = db.query(
+                TABLE_NATIVE_POINTS,
+                null,
+                "run_id = ?",
+                new String[]{runId},
+                null,
+                null,
+                "sequence_num DESC, recorded_at DESC, local_id DESC",
+                "1"
+        );
+
+        try {
+            if (latestCursor.moveToFirst()) {
+                latestPoint = cursorToJson(latestCursor);
+                int sequenceIdx = latestCursor.getColumnIndex("sequence_num");
+                if (sequenceIdx >= 0 && !latestCursor.isNull(sequenceIdx)) {
+                    latestSequenceNum = latestCursor.getInt(sequenceIdx);
+                }
+            }
+        } finally {
+            latestCursor.close();
+        }
+
+        Cursor firstCursor = db.query(
+                TABLE_NATIVE_POINTS,
+                new String[]{"recorded_at"},
+                "run_id = ?",
+                new String[]{runId},
+                null,
+                null,
+                "sequence_num ASC, recorded_at ASC, local_id ASC",
+                "1"
+        );
+
+        try {
+            if (firstCursor.moveToFirst()) {
+                firstRecordedAt = firstCursor.getString(0);
+            }
+        } finally {
+            firstCursor.close();
+        }
+
+        try {
+            JSONObject snapshot = new JSONObject();
+            snapshot.put("run_id", runId);
+            snapshot.put("points", points);
+            snapshot.put("latestPoint", latestPoint == null ? JSONObject.NULL : latestPoint);
+            snapshot.put("latestSequenceNum", latestSequenceNum);
+            snapshot.put("firstRecordedAt", firstRecordedAt == null ? JSONObject.NULL : firstRecordedAt);
+            snapshot.put("pendingCount", countPendingForRun(runId));
+            snapshot.put("includeFullPath", includeFullPath);
+            return snapshot;
+        } catch (JSONException e) {
+            Log.w(TAG, "Could not build native run display snapshot: " + e.getMessage());
+            return null;
         }
     }
 

@@ -115,6 +115,7 @@ let runnerSyncHadFailure = false;
 let activeRunStatusChannel = null;
 let runnerHeartbeatId = null;
 let lastRunnerHeartbeatTime = null;
+let runnerConnectionWarningEnabledAtMs = 0;
 
 
 // -> DOM references
@@ -635,12 +636,21 @@ function hideConnectionStatusSoon() {
   }, 3000);
 }
 
+function showRunnerConnectionLossStatus(message) {
+  if (Date.now() < runnerConnectionWarningEnabledAtMs) {
+    runnerSyncHadFailure = true;
+    return;
+  }
+
+  showConnectionStatus(message, "bad");
+}
+
 async function safeInsertRunPoint(pointPayload) {
   if (!navigator.onLine) {
   queueRunPoint(pointPayload);
   await nativeQueuePoint(pointPayload); // NEW
   runnerSyncHadFailure = true;
-  showConnectionStatus("Connection lost - saving run locally", "bad");
+  showRunnerConnectionLossStatus("Connection lost - saving run locally");
   return false;
 }
 
@@ -653,7 +663,7 @@ if (error) {
   queueRunPoint(pointPayload);
   await nativeQueuePoint(pointPayload); // NEW
   runnerSyncHadFailure = true;
-  showConnectionStatus("Connection lost - saving run locally", "bad");
+  showRunnerConnectionLossStatus("Connection lost - saving run locally");
   return false;
 }
 
@@ -693,7 +703,7 @@ async function safeUpdateRunSummary(updatePayload) {
   if (!navigator.onLine) {
     queueRunUpdate(activeRunId, updatePayload);
     runnerSyncHadFailure = true;
-    showConnectionStatus("Connection lost - syncing when back online", "bad");
+    showRunnerConnectionLossStatus("Connection lost - syncing when back online");
     return false;
   }
 
@@ -706,7 +716,7 @@ async function safeUpdateRunSummary(updatePayload) {
     console.warn("Supabase run update failed; queued latest summary:", error);
     queueRunUpdate(activeRunId, updatePayload);
     runnerSyncHadFailure = true;
-    showConnectionStatus("Connection lost - syncing when back online", "bad");
+    showRunnerConnectionLossStatus("Connection lost - syncing when back online");
     return false;
   }
 
@@ -947,7 +957,7 @@ window.addEventListener("online", () => {
 });
 
 window.addEventListener("offline", () => {
-  showConnectionStatus("Connection lost - saving run locally", "bad");
+  showRunnerConnectionLossStatus("Connection lost - saving run locally");
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -1258,6 +1268,7 @@ async function startTracking() {
   latestRunnerAvgPace = 0;
   latestRunnerElevFt = null;
   pointSequence = 0;
+  runnerConnectionWarningEnabledAtMs = Date.now() + 15000;
   clearLegacyQueuedRunPoints();
   clearRunPathLayer();
   clearNativeRunPathLayer();

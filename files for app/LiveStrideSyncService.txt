@@ -57,6 +57,7 @@ public int onStartCommand(Intent intent, int flags, int startId) {
         String firebaseDatabaseUrl = intent.getStringExtra("firebaseDatabaseUrl");
         String firebaseRunnerPath = intent.getStringExtra("firebaseRunnerPath");
         String finishPayloadJson = intent.getStringExtra("finishPayload");
+        finishPayloadJson = mergeNativePointSummary(runId, finishPayloadJson);
 
         boolean supabaseDone = false;
         boolean firebaseDone = false;
@@ -89,6 +90,51 @@ public int onStartCommand(Intent intent, int flags, int startId) {
         }
 
         stopSelf();
+    }
+
+    private String mergeNativePointSummary(String runId, String finishPayloadJson) {
+        try {
+            JSONObject finishPayload = new JSONObject(finishPayloadJson);
+            LiveStridePointStore pointStore = new LiveStridePointStore(this);
+            JSONObject nativeSummary = pointStore.getRunSummaryFromNativePoints(runId);
+
+            if (nativeSummary == null) {
+                return finishPayloadJson;
+            }
+
+            String[] keys = {
+                    "latest_lat",
+                    "latest_lon",
+                    "latest_timestamp",
+                    "total_distance_m",
+                    "final_time_ms"
+            };
+
+            for (String key : keys) {
+                if (nativeSummary.has(key) && !nativeSummary.isNull(key)) {
+                    finishPayload.put(key, nativeSummary.get(key));
+                }
+            }
+
+            finishPayload.put("is_live", false);
+            if (!finishPayload.has("finished_at") || finishPayload.isNull("finished_at")) {
+                finishPayload.put("finished_at", isoNow());
+            }
+
+            return finishPayload.toString();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return finishPayloadJson;
+        }
+    }
+
+    private static String isoNow() {
+        java.text.SimpleDateFormat formatter = new java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                java.util.Locale.US
+        );
+        formatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return formatter.format(new java.util.Date());
     }
 
     private boolean syncSupabaseFinish(

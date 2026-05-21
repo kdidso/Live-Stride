@@ -965,14 +965,18 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
       if (broadcasting && broadcastRef) {
         broadcastRef.update({
           name: runnerName,
-          path: pathCoords,
+          run_id: activeRunId,
+          finished: false,
           current: [coord[0], coord[1]],
           distance: latestRunnerDistance,
           pace: latestRunnerPace,
           avgPace: latestRunnerAvgPace,
           elevation: latestRunnerElevFt,
           timestamp: Date.now(),
+          last_seen_at: new Date().toISOString(),
           startTime
+        }).catch(err => {
+          console.warn("Firebase lightweight summary update failed:", err);
         });
       }
 
@@ -1024,9 +1028,11 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 
   if (broadcasting && broadcastRef) {
     broadcastRef.update({
-      path: pathCoords,
       elevation: latestRunnerElevFt,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      last_seen_at: new Date().toISOString()
+    }).catch(err => {
+      console.warn("Firebase lightweight elevation update failed:", err);
     });
   }
 
@@ -1143,11 +1149,15 @@ fetchElevation(coord[1], coord[0]).then(elev => {
         try {
           await broadcastRef.update({
             finished: true,
+            finish_requested_at: new Date(stoppedAtMs).toISOString(),
+            finished_at: new Date(stoppedAtMs).toISOString(),
             timestamp: stoppedAtMs,
             distance: metersToMiles(totalDistanceMeters),
             pace: latestRunnerPace,
             avgPace: latestRunnerAvgPace,
             elevation: latestRunnerElevFt,
+            total_distance_m: totalDistanceMeters,
+            final_time_ms: stoppedElapsedMs,
             current: lastBroadcastPoint
               ? [lastBroadcastPoint.lon, lastBroadcastPoint.lat]
               : null,
@@ -1221,18 +1231,22 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
       broadcastRef = db.ref(`runners/${safeName}`);
 
-      await broadcastRef.update({
+      await broadcastRef.set({
+        run_id: activeRunId,
+        name: runnerName,
         finished: false,
-        runner_heartbeat_at: new Date().toISOString()
+        started_at: new Date().toISOString(),
+        runner_heartbeat_at: new Date().toISOString(),
+        timestamp: Date.now(),
+        last_seen_at: new Date().toISOString(),
+        startTime
       });
 
       broadcasting = true;
       broadcastBtn.style.display = "none";
 
       if (startTime !== null) {
-        broadcastRef.set({
-          name: runnerName,
-          path: pathCoords,
+        broadcastRef.update({
           current: pathCoords.length > 0
             ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
             : null,
@@ -1241,7 +1255,10 @@ fetchElevation(coord[1], coord[0]).then(elev => {
           avgPace: latestRunnerAvgPace,
           elevation: latestRunnerElevFt,
           timestamp: Date.now(),
+          last_seen_at: new Date().toISOString(),
           startTime
+        }).catch(err => {
+          console.warn("Firebase lightweight start summary failed:", err);
         });
       }
     };

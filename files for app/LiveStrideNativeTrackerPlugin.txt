@@ -141,4 +141,34 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         result.put("message", "Native GPS test service stop requested.");
         call.resolve(result);
     }
+
+    @PluginMethod
+    public void getNativeRunSnapshot(PluginCall call) {
+        String runId = call.getString("runId");
+        int afterSequenceNum = call.getInt("afterSequenceNum", -1);
+        boolean includeFullPath = call.getBoolean("includeFullPath", false);
+
+        if (runId == null || runId.trim().isEmpty()) {
+            call.reject("Missing runId.");
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                LiveStridePointStore pointStore = new LiveStridePointStore(getContext());
+                org.json.JSONObject snapshot = pointStore.getRunDisplaySnapshot(
+                        runId,
+                        afterSequenceNum,
+                        includeFullPath
+                );
+
+                JSObject result = new JSObject();
+                result.put("ok", snapshot != null);
+                result.put("snapshotJson", snapshot == null ? "{}" : snapshot.toString());
+                call.resolve(result);
+            } catch (Exception e) {
+                call.reject("Native run snapshot failed: " + e.getMessage(), e);
+            }
+        }).start();
+    }
 }

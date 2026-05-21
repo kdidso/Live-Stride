@@ -120,6 +120,8 @@ public class LiveStrideNativeTrackerService extends Service {
 
         if (ACTION_STOP.equals(intent.getAction())) {
             stopLocationUpdates();
+            LiveStridePendingPointUploadJobService.schedule(this);
+            new Thread(() -> LiveStridePendingPointUploadJobService.flushPendingPoints(this)).start();
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;

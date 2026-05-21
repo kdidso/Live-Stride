@@ -116,6 +116,9 @@ let activeRunStatusChannel = null;
 let runnerHeartbeatId = null;
 let lastRunnerHeartbeatTime = null;
 let runnerConnectionWarningEnabledAtMs = 0;
+let runnerNativeSnapshotTimerId = null;
+let runnerNativeLastSequenceNum = -1;
+let runnerNativeDisplayActive = false;
 
 
 // -> DOM references
@@ -162,28 +165,52 @@ function showGpsCallbackAudit() {
   alert(`GPS callback audit entries: ${rows.length}. Check console table.`);
 }
 
-function queueFirebaseFinish() {
-  localStorage.setItem(FIREBASE_FINISH_QUEUE_KEY, "true");
+function queueFirebaseFinish(finishPayload = null) {
+  const fallbackPayload = {
+    finished: true,
+    finish_requested_at: new Date().toISOString(),
+    finished_at: new Date().toISOString(),
+    timestamp: Date.now()
+  };
+
+  localStorage.setItem(
+    FIREBASE_FINISH_QUEUE_KEY,
+    JSON.stringify(finishPayload || fallbackPayload)
+  );
 }
 
 function clearFirebaseFinishQueue() {
   localStorage.removeItem(FIREBASE_FINISH_QUEUE_KEY);
 }
 
+function getQueuedFirebaseFinish() {
+  const raw = localStorage.getItem(FIREBASE_FINISH_QUEUE_KEY);
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    return {
+      finished: true,
+      finish_requested_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      timestamp: Date.now()
+    };
+  }
+}
+
 function hasQueuedFirebaseFinish() {
-  return localStorage.getItem(FIREBASE_FINISH_QUEUE_KEY) === "true";
+  return getQueuedFirebaseFinish() != null;
 }
 
 async function flushFirebaseFinish() {
   if (!broadcastRef) return true;
-  if (!hasQueuedFirebaseFinish()) return true;
+  const finishPayload = getQueuedFirebaseFinish();
+  if (!finishPayload) return true;
   if (!navigator.onLine) return false;
 
   try {
-    await broadcastRef.update({
-      finished: true,
-      timestamp: Date.now()
-    });
+    await broadcastRef.update(finishPayload);
 
     clearFirebaseFinishQueue();
     return true;
@@ -919,6 +946,138 @@ async function stopNativeComparisonRun() {
   }
 }
 
+function isRunnerNativeSnapshotAllowed() {
+  return Boolean(
+    LiveStrideNativeTracker &&
+    activeRunId &&
+    !document.body.classList.contains("viewer-mode")
+  );
+}
+
+function upsertRunnerNativeDisplayPoint(point) {
+  const normalized = normalizeNativeRunPoint(point);
+  if (normalized.sequenceNum == null) return;
+
+  const existingIndex = pathCoords.findIndex(existing =>
+    existing.sequenceNum != null && existing.sequenceNum === normalized.sequenceNum
+  );
+
+  if (existingIndex >= 0) {
+    pathCoords[existingIndex] = {
+      ...pathCoords[existingIndex],
+      ...normalized
+    };
+  } else {
+    pathCoords.push(normalized);
+  }
+}
+
+function applyRunnerNativeSnapshot(snapshot, includeFullPath = false) {
+  if (!snapshot) return false;
+
+  const points = Array.isArray(snapshot.points) ? snapshot.points : [];
+  const latestRaw = snapshot.latestPoint && typeof snapshot.latestPoint === "object"
+    ? snapshot.latestPoint
+    : null;
+
+  if (includeFullPath || pathCoords.length === 0 || !runnerNativeDisplayActive) {
+    pathCoords = points.map(normalizeNativeRunPoint).filter(point =>
+      point.sequenceNum != null && Number.isFinite(point.lat) && Number.isFinite(point.lon)
+    );
+  } else {
+    points.forEach(upsertRunnerNativeDisplayPoint);
+  }
+
+  if (pathCoords.length > 0) {
+    sortRunPoints(pathCoords);
+    addOrUpdatePath();
+    runnerNativeDisplayActive = true;
+  }
+
+  const latestPoint = latestRaw ? normalizeNativeRunPoint(latestRaw) : pathCoords[pathCoords.length - 1];
+  if (!latestPoint) return points.length > 0;
+
+  if (snapshot.firstRecordedAt) {
+    const nativeStartMs = new Date(snapshot.firstRecordedAt).getTime();
+    if (Number.isFinite(nativeStartMs)) {
+      startTime = nativeStartMs;
+    }
+  } else if (!startTime && latestPoint.timestamp) {
+    startTime = latestPoint.timestamp;
+  }
+
+  lastPointTime = latestPoint.timestamp || lastPointTime;
+  totalDistanceMeters = latestPoint.distanceM ?? totalDistanceMeters;
+  latestRunnerDistance = metersToMiles(totalDistanceMeters);
+  latestRunnerPace = latestPoint.instPace ?? latestRunnerPace;
+  latestRunnerAvgPace = latestPoint.avgPace ?? latestRunnerAvgPace;
+  latestRunnerElevFt = latestPoint.elevationFt ?? latestRunnerElevFt;
+  runnerNativeLastSequenceNum = Math.max(
+    runnerNativeLastSequenceNum,
+    snapshot.latestSequenceNum ?? latestPoint.sequenceNum ?? -1
+  );
+
+  if (latestPoint.sequenceNum != null) {
+    pointSequence = Math.max(pointSequence, latestPoint.sequenceNum + 1);
+  }
+
+  const elapsedMs = startTime
+    ? Math.max(0, (latestPoint.timestamp || Date.now()) - startTime)
+    : 0;
+
+  updateStatsDisplay(
+    latestRunnerDistance,
+    latestRunnerPace,
+    latestRunnerAvgPace,
+    elapsedMs,
+    latestRunnerElevFt
+  );
+
+  if (isFollowing && Number.isFinite(latestPoint.lon) && Number.isFinite(latestPoint.lat)) {
+    map.setCenter([latestPoint.lon, latestPoint.lat]);
+  }
+
+  return true;
+}
+
+async function refreshRunnerFromNativeSqlite(options = {}) {
+  if (!isRunnerNativeSnapshotAllowed()) return false;
+
+  const includeFullPath = Boolean(options.includeFullPath);
+  const afterSequenceNum = includeFullPath ? -1 : runnerNativeLastSequenceNum;
+
+  try {
+    const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
+      runId: activeRunId,
+      afterSequenceNum,
+      includeFullPath
+    });
+
+    const snapshot = JSON.parse(result?.snapshotJson || "{}");
+    return applyRunnerNativeSnapshot(snapshot, includeFullPath);
+  } catch (err) {
+    console.warn("Native SQLite runner snapshot failed:", err);
+    return false;
+  }
+}
+
+function startRunnerNativeSnapshotPolling() {
+  if (runnerNativeSnapshotTimerId !== null) {
+    clearInterval(runnerNativeSnapshotTimerId);
+  }
+
+  runnerNativeSnapshotTimerId = setInterval(() => {
+    refreshRunnerFromNativeSqlite({ includeFullPath: false });
+  }, 2000);
+}
+
+function stopRunnerNativeSnapshotPolling() {
+  if (runnerNativeSnapshotTimerId !== null) {
+    clearInterval(runnerNativeSnapshotTimerId);
+    runnerNativeSnapshotTimerId = null;
+  }
+}
+
 function clearLegacyQueuedRunPoints() {
   const queue = loadSyncQueue();
   queue.points = [];
@@ -961,10 +1120,16 @@ window.addEventListener("offline", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) flushSupabaseQueue();
+  if (!document.hidden) {
+    refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
+    flushSupabaseQueue();
+  }
 });
 
-window.addEventListener("focus", flushSupabaseQueue);
+window.addEventListener("focus", () => {
+  refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
+  flushSupabaseQueue();
+});
 
 function resetRunDisplay() {
   pathCoords = [];
@@ -1094,8 +1259,7 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   const now = typeof locationTime === "number"
     ? locationTime
     : new Date(locationTime).getTime();
-    logGpsCallbackAudit(now);
-  if (lastPointTime && now <= lastPointTime) {
+    if (lastPointTime && now <= lastPointTime) {
     console.warn("Ignoring out-of-order location point:", new Date(now).toISOString());
     return;
   }
@@ -1181,14 +1345,18 @@ latestRunnerDistance = metersToMiles(totalDistanceMeters);
 if (broadcasting && broadcastRef) {
   broadcastRef.update({
     name: runnerName,
-    path: pathCoords,
+    run_id: activeRunId,
+    finished: false,
     current: [coord[0], coord[1]],
     distance: latestRunnerDistance,
     pace: latestRunnerPace,
     avgPace: latestRunnerAvgPace,
     elevation: latestRunnerElevFt,
     timestamp: Date.now(),
+    last_seen_at: new Date().toISOString(),
     startTime
+  }).catch(err => {
+    console.warn("Firebase lightweight summary update failed:", err);
   });
 }
 
@@ -1238,9 +1406,11 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 
   if (broadcasting && broadcastRef) {
     broadcastRef.update({
-      path: pathCoords,
       elevation: latestRunnerElevFt,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      last_seen_at: new Date().toISOString()
+    }).catch(err => {
+      console.warn("Firebase lightweight elevation update failed:", err);
     });
   }
 
@@ -1268,6 +1438,8 @@ async function startTracking() {
   latestRunnerAvgPace = 0;
   latestRunnerElevFt = null;
   pointSequence = 0;
+  runnerNativeLastSequenceNum = -1;
+  runnerNativeDisplayActive = false;
   runnerConnectionWarningEnabledAtMs = Date.now() + 15000;
   clearLegacyQueuedRunPoints();
   clearRunPathLayer();
@@ -1347,6 +1519,7 @@ if (navigator.onLine) {
 }
 
 async function stopTracking() {
+  await refreshRunnerFromNativeSqlite({ includeFullPath: true });
   const stoppedAtMs = Date.now();
   const stoppedElapsedMs = startTime ? stoppedAtMs - startTime : null;
 
@@ -1359,6 +1532,8 @@ if (runnerHeartbeatId !== null) {
   clearInterval(runnerHeartbeatId);
   runnerHeartbeatId = null;
 }
+
+stopRunnerNativeSnapshotPolling();
 
   if (privateSaveIntervalId !== null) {
     clearInterval(privateSaveIntervalId);
@@ -1381,14 +1556,29 @@ await stopNativeComparisonRun();
     viewerTimerId = null;
   }
 
+const lastPoint = pathCoords.length > 0
+  ? pathCoords[pathCoords.length - 1]
+  : null;
+
+const firebaseFinishPayload = {
+  finished: true,
+  finish_requested_at: new Date(stoppedAtMs).toISOString(),
+  finished_at: new Date(stoppedAtMs).toISOString(),
+  timestamp: stoppedAtMs,
+  current: lastPoint ? [lastPoint.lon, lastPoint.lat] : null,
+  distance: latestRunnerDistance,
+  pace: latestRunnerPace,
+  avgPace: latestRunnerAvgPace,
+  elevation: latestRunnerElevFt,
+  total_distance_m: totalDistanceMeters,
+  final_time_ms: stoppedElapsedMs
+};
+
 if (broadcasting && broadcastRef) {
-  queueFirebaseFinish();
+  queueFirebaseFinish(firebaseFinishPayload);
 
   try {
-    await broadcastRef.update({
-      finished: true,
-      timestamp: Date.now()
-    });
+    await broadcastRef.update(firebaseFinishPayload);
 
     clearFirebaseFinishQueue();
   } catch (err) {
@@ -1399,10 +1589,6 @@ if (broadcasting && broadcastRef) {
 }
 
 if (activeRunId) {
-  const lastPoint = pathCoords.length > 0
-    ? pathCoords[pathCoords.length - 1]
-    : null;
-
 const finishPayload = {
   is_live: false,
   finished_at: new Date(stoppedAtMs).toISOString(),
@@ -1414,13 +1600,12 @@ const finishPayload = {
 };
 
 queueFinishEvent(activeRunId, finishPayload);
-queueFirebaseFinish();
+if (broadcastRef) queueFirebaseFinish(firebaseFinishPayload);
 
 await syncFinishNow(activeRunId, finishPayload);
 await nativeFinishSync(finishPayload);
-
-// Keep the JavaScript flush too as a backup when the WebView is still awake.
-await forceFlushAll();
+flushSupabaseQueue();
+flushFirebaseFinish();
 }
 
   if (isPrivateMode) {
@@ -1473,19 +1658,27 @@ broadcastBtn.onclick = async () => {
   activeRunId = newRun.id;
   pointSequence = 0;
   await startNativeComparisonRun();
+  await refreshRunnerFromNativeSqlite({ includeFullPath: true });
+  startRunnerNativeSnapshotPolling();
   await startNativePathComparison(activeRunId);
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
   broadcastRef = db.ref(`runners/${safeName}`);
 
-  await broadcastRef.update({ finished: false });
+  await broadcastRef.set({
+    run_id: activeRunId,
+    name: runnerName,
+    finished: false,
+    started_at: new Date().toISOString(),
+    timestamp: Date.now(),
+    last_seen_at: new Date().toISOString(),
+    startTime
+  });
 
   broadcasting = true;
   broadcastBtn.style.display = "none";
 
   if (startTime !== null) {
-    broadcastRef.set({
-      name: runnerName,
-      path: pathCoords,
+    broadcastRef.update({
       current: pathCoords.length > 0
         ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
         : null,
@@ -1494,7 +1687,10 @@ broadcastBtn.onclick = async () => {
       avgPace: latestRunnerAvgPace,
       elevation: latestRunnerElevFt,
       timestamp: Date.now(),
+      last_seen_at: new Date().toISOString(),
       startTime
+    }).catch(err => {
+      console.warn("Firebase lightweight start summary failed:", err);
     });
   }
 };

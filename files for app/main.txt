@@ -141,29 +141,6 @@ const uploadStravaBtn = document.getElementById("uploadStravaBtn");
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
-function logGpsCallbackAudit(locationTime = Date.now()) {
-  try {
-    const key = "livestride_gps_callback_audit";
-    const existing = JSON.parse(localStorage.getItem(key) || "[]");
-
-    existing.push({
-      appTime: new Date().toISOString(),
-      locationTime: new Date(locationTime).toISOString(),
-      online: navigator.onLine,
-      hidden: document.hidden
-    });
-
-    localStorage.setItem(key, JSON.stringify(existing.slice(-500)));
-  } catch (err) {
-    console.warn("GPS audit log failed:", err);
-  }
-}
-
-function showGpsCallbackAudit() {
-  const rows = JSON.parse(localStorage.getItem("livestride_gps_callback_audit") || "[]");
-  console.table(rows);
-  alert(`GPS callback audit entries: ${rows.length}. Check console table.`);
-}
 
 function queueFirebaseFinish(finishPayload = null) {
   const fallbackPayload = {
@@ -1574,39 +1551,41 @@ const firebaseFinishPayload = {
   final_time_ms: stoppedElapsedMs
 };
 
-if (broadcasting && broadcastRef) {
-  queueFirebaseFinish(firebaseFinishPayload);
-
-  try {
-    await broadcastRef.update(firebaseFinishPayload);
-
-    clearFirebaseFinishQueue();
-  } catch (err) {
-    console.warn("Firebase finish failed; queued for retry:", err);
-  }
-
-  broadcasting = false;
-}
+let finishPayload = null;
 
 if (activeRunId) {
-const finishPayload = {
+finishPayload = {
   is_live: false,
   finished_at: new Date(stoppedAtMs).toISOString(),
   final_time_ms: stoppedElapsedMs,
   total_distance_m: totalDistanceMeters,
   latest_lat: lastPoint ? lastPoint.lat : null,
   latest_lon: lastPoint ? lastPoint.lon : null,
-  latest_timestamp: lastPoint ? lastPoint.time : null
+  latest_timestamp: lastPoint ? lastPoint.time : null,
+  finalization_status: "completed",
+  finalization_started_at: new Date(stoppedAtMs).toISOString(),
+  finalization_completed_at: new Date(stoppedAtMs).toISOString()
 };
 
 queueFinishEvent(activeRunId, finishPayload);
-if (broadcastRef) queueFirebaseFinish(firebaseFinishPayload);
-
-await syncFinishNow(activeRunId, finishPayload);
-await nativeFinishSync(finishPayload);
+nativeFinishSync(finishPayload);
+syncFinishNow(activeRunId, finishPayload).then(success => {
+  if (!success) flushSupabaseQueue();
+});
 flushSupabaseQueue();
-flushFirebaseFinish();
 }
+
+if (broadcastRef) {
+  queueFirebaseFinish(firebaseFinishPayload);
+
+  broadcastRef.update(firebaseFinishPayload)
+    .then(() => clearFirebaseFinishQueue())
+    .catch(err => {
+      console.warn("Firebase finish failed; queued for retry:", err);
+    });
+}
+
+broadcasting = false;
 
   if (isPrivateMode) {
     savePrivateRunToFile();

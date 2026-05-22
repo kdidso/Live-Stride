@@ -333,6 +333,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
     public synchronized JSONObject getRunDisplaySnapshot(
             String runId,
             int afterSequenceNum,
+            int beforeSequenceNum,
             boolean includeFullPath
     ) {
         if (runId == null) return null;
@@ -343,12 +344,23 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         String firstRecordedAt = null;
         int latestSequenceNum = -1;
 
-        String pointWhere = includeFullPath
-                ? "run_id = ?"
-                : "run_id = ? AND sequence_num > ?";
-        String[] pointArgs = includeFullPath
-                ? new String[]{runId}
-                : new String[]{runId, String.valueOf(afterSequenceNum)};
+        String pointWhere;
+        String[] pointArgs;
+
+        if (includeFullPath) {
+            pointWhere = "run_id = ?";
+            pointArgs = new String[]{runId};
+        } else if (beforeSequenceNum >= 0) {
+            pointWhere = "run_id = ? AND sequence_num > ? AND sequence_num < ?";
+            pointArgs = new String[]{
+                    runId,
+                    String.valueOf(afterSequenceNum),
+                    String.valueOf(beforeSequenceNum)
+            };
+        } else {
+            pointWhere = "run_id = ? AND sequence_num > ?";
+            pointArgs = new String[]{runId, String.valueOf(afterSequenceNum)};
+        }
 
         Cursor pointCursor = db.query(
                 TABLE_NATIVE_POINTS,

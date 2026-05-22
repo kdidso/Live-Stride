@@ -1021,12 +1021,20 @@ async function refreshRunnerFromNativeSqlite(options = {}) {
   if (!isRunnerNativeSnapshotAllowed()) return false;
 
   const includeFullPath = Boolean(options.includeFullPath);
-  const afterSequenceNum = includeFullPath ? -1 : runnerNativeLastSequenceNum;
+  const afterSequenceNum = includeFullPath
+    ? -1
+    : Number.isFinite(options.afterSequenceNum)
+      ? options.afterSequenceNum
+      : runnerNativeLastSequenceNum;
+  const beforeSequenceNum = Number.isFinite(options.beforeSequenceNum)
+    ? options.beforeSequenceNum
+    : -1;
 
   try {
     const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
       runId: activeRunId,
       afterSequenceNum,
+      beforeSequenceNum,
       includeFullPath
     });
 
@@ -1036,6 +1044,107 @@ async function refreshRunnerFromNativeSqlite(options = {}) {
     console.warn("Native SQLite runner snapshot failed:", err);
     return false;
   }
+}
+
+function getSequenceGaps(points) {
+  const sorted = points
+    .filter(point => point.sequenceNum != null)
+    .slice()
+    .sort((a, b) => a.sequenceNum - b.sequenceNum);
+  const gaps = [];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const previousSequence = sorted[i - 1].sequenceNum;
+    const currentSequence = sorted[i].sequenceNum;
+
+    if (currentSequence - previousSequence > 1) {
+      gaps.push({
+        afterSequenceNum: previousSequence,
+        beforeSequenceNum: currentSequence
+      });
+    }
+  }
+
+  return gaps;
+}
+
+async function loadRunnerPathFromSupabaseNative() {
+  if (!activeRunId || !navigator.onLine) return false;
+
+  try {
+    const rows = await fetchAllNativeRunPoints(activeRunId);
+    const points = rows
+      .map(normalizeNativeRunPoint)
+      .filter(point => point.sequenceNum != null && Number.isFinite(point.lat) && Number.isFinite(point.lon));
+
+    if (points.length === 0) return false;
+
+    pathCoords = points;
+    sortRunPoints(pathCoords);
+    addOrUpdatePath();
+    runnerNativeDisplayActive = true;
+
+    const latestPoint = getLatestSequencePoint(pathCoords) || pathCoords[pathCoords.length - 1];
+    if (!latestPoint) return true;
+
+    if (!startTime && pathCoords[0]?.timestamp) {
+      startTime = pathCoords[0].timestamp;
+    }
+
+    lastPointTime = latestPoint.timestamp || lastPointTime;
+    totalDistanceMeters = latestPoint.distanceM ?? totalDistanceMeters;
+    latestRunnerDistance = metersToMiles(totalDistanceMeters);
+    latestRunnerPace = latestPoint.instPace ?? latestRunnerPace;
+    latestRunnerAvgPace = latestPoint.avgPace ?? latestRunnerAvgPace;
+    latestRunnerElevFt = latestPoint.elevationFt ?? latestRunnerElevFt;
+    runnerNativeLastSequenceNum = Math.max(runnerNativeLastSequenceNum, latestPoint.sequenceNum ?? -1);
+    pointSequence = Math.max(pointSequence, (latestPoint.sequenceNum ?? -1) + 1);
+
+    updateStatsDisplay(
+      latestRunnerDistance,
+      latestRunnerPace,
+      latestRunnerAvgPace,
+      startTime ? Math.max(0, (latestPoint.timestamp || Date.now()) - startTime) : 0,
+      latestRunnerElevFt
+    );
+
+    if (isFollowing && Number.isFinite(latestPoint.lon) && Number.isFinite(latestPoint.lat)) {
+      map.setCenter([latestPoint.lon, latestPoint.lat]);
+    }
+
+    return true;
+  } catch (err) {
+    console.warn("Supabase native runner wake path load failed:", err);
+    return false;
+  }
+}
+
+async function recoverRunnerPathOnWake() {
+  if (!isRunnerNativeSnapshotAllowed()) return false;
+
+  const loadedFromSupabase = await loadRunnerPathFromSupabaseNative();
+
+  if (!loadedFromSupabase) {
+    return refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
+  }
+
+  const supabaseLatestSequence = getLatestSequencePoint(pathCoords)?.sequenceNum ?? runnerNativeLastSequenceNum;
+  const gaps = getSequenceGaps(pathCoords);
+
+  for (const gap of gaps) {
+    await refreshRunnerFromNativeSqlite({
+      includeFullPath: false,
+      afterSequenceNum: gap.afterSequenceNum,
+      beforeSequenceNum: gap.beforeSequenceNum
+    });
+  }
+
+  await refreshRunnerFromNativeSqlite({
+    includeFullPath: false,
+    afterSequenceNum: supabaseLatestSequence
+  });
+
+  return true;
 }
 
 function startRunnerNativeSnapshotPolling() {
@@ -1098,13 +1207,13 @@ window.addEventListener("offline", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
+    recoverRunnerPathOnWake();
     flushSupabaseQueue();
   }
 });
 
 window.addEventListener("focus", () => {
-  refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
+  recoverRunnerPathOnWake();
   flushSupabaseQueue();
 });
 
@@ -2072,16 +2181,24 @@ async function startNativePathComparison(runId) {
         const hasGap = hasSequenceGap(nativePathCoords);
         nativeRouteGapActive = hasGap;
 
-        if (
+        const incomingSequenceGap =
           incomingSequence != null &&
           previousLatestSequence != null &&
-          incomingSequence - previousLatestSequence > 1
-        ) {
+          incomingSequence - previousLatestSequence > 1;
+        const cleanSequentialResume =
+          incomingSequence != null &&
+          previousLatestSequence != null &&
+          incomingSequence - previousLatestSequence === 1;
+
+        if (incomingSequenceGap) {
           showViewerStatus("Reconnecting - rebuilding route", "good");
           hideViewerStatusSoon("Reconnecting - rebuilding route", 6000);
         } else if (hadGap && !hasGap) {
           showViewerStatus("Route restored", "good");
           hideViewerStatusSoon("Route restored", 3000);
+        } else if ((wasConnectionLost || wasConnectionWarning) && cleanSequentialResume) {
+          showViewerStatus("Motion detected", "good");
+          hideViewerStatusSoon("Motion detected", 3000);
         } else if (!hasGap && (wasConnectionLost || wasConnectionWarning)) {
           showViewerStatus("Runner reconnected", "good");
           hideViewerStatusSoon("Runner reconnected", 3000);

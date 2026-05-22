@@ -73,7 +73,7 @@ public int onStartCommand(Intent intent, int flags, int startId) {
             }
 
             if (!firebaseDone && firebaseDatabaseUrl != null && firebaseRunnerPath != null) {
-                firebaseDone = syncFirebaseFinish(firebaseRunnerPath);
+                firebaseDone = syncFirebaseFinish(firebaseRunnerPath, finishPayloadJson);
             } else {
                 firebaseDone = true;
             }
@@ -157,6 +157,8 @@ public int onStartCommand(Intent intent, int flags, int startId) {
             conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("Prefer", "return=minimal");
+            conn.setConnectTimeout(5_000);
+            conn.setReadTimeout(5_000);
             conn.setDoOutput(true);
 
             try (OutputStream os = conn.getOutputStream()) {
@@ -216,6 +218,8 @@ private boolean syncSupabasePoint(
         conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
         conn.setRequestProperty("Content-Type", "application/json");
         conn.setRequestProperty("Prefer", "return=minimal");
+        conn.setConnectTimeout(5_000);
+        conn.setReadTimeout(5_000);
         conn.setDoOutput(true);
 
         try (OutputStream os = conn.getOutputStream()) {
@@ -232,13 +236,20 @@ private boolean syncSupabasePoint(
         if (conn != null) conn.disconnect();
     }
 }
-    private boolean syncFirebaseFinish(String firebaseRunnerPath) {
+    private boolean syncFirebaseFinish(String firebaseRunnerPath, String finishPayloadJson) {
         HttpURLConnection conn = null;
 
         try {
+            JSONObject finishPayload = new JSONObject(finishPayloadJson);
             JSONObject body = new JSONObject();
             body.put("finished", true);
             body.put("timestamp", System.currentTimeMillis());
+            copyIfPresent(finishPayload, body, "finished_at");
+            copyIfPresent(finishPayload, body, "final_time_ms");
+            copyIfPresent(finishPayload, body, "total_distance_m");
+            copyIfPresent(finishPayload, body, "latest_lat");
+            copyIfPresent(finishPayload, body, "latest_lon");
+            copyIfPresent(finishPayload, body, "latest_timestamp");
 
             String endpoint = firebaseRunnerPath + ".json";
 
@@ -246,6 +257,8 @@ private boolean syncSupabasePoint(
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("PATCH");
             conn.setRequestProperty("Content-Type", "application/json");
+            conn.setConnectTimeout(5_000);
+            conn.setReadTimeout(5_000);
             conn.setDoOutput(true);
 
             try (OutputStream os = conn.getOutputStream()) {
@@ -260,6 +273,15 @@ private boolean syncSupabasePoint(
             return false;
         } finally {
             if (conn != null) conn.disconnect();
+        }
+    }
+
+    private static void copyIfPresent(JSONObject source, JSONObject destination, String key) {
+        try {
+            if (source.has(key) && !source.isNull(key)) {
+                destination.put(key, source.get(key));
+            }
+        } catch (Exception ignored) {
         }
     }
 

@@ -1425,16 +1425,24 @@ async function startNativePathComparison(runId) {
         const hasGap = hasSequenceGap(nativePathCoords);
         nativeRouteGapActive = hasGap;
 
-        if (
+        const incomingSequenceGap =
           incomingSequence != null &&
           previousLatestSequence != null &&
-          incomingSequence - previousLatestSequence > 1
-        ) {
+          incomingSequence - previousLatestSequence > 1;
+        const cleanSequentialResume =
+          incomingSequence != null &&
+          previousLatestSequence != null &&
+          incomingSequence - previousLatestSequence === 1;
+
+        if (incomingSequenceGap) {
           showViewerStatus("Reconnecting - rebuilding route", "good");
           hideViewerStatusSoon("Reconnecting - rebuilding route", 6000);
         } else if (hadGap && !hasGap) {
           showViewerStatus("Route restored", "good");
           hideViewerStatusSoon("Route restored", 3000);
+        } else if ((wasConnectionLost || wasConnectionWarning) && cleanSequentialResume) {
+          showViewerStatus("Motion detected", "good");
+          hideViewerStatusSoon("Motion detected", 3000);
         } else if (!hasGap && (wasConnectionLost || wasConnectionWarning)) {
           showViewerStatus("Runner reconnected", "good");
           hideViewerStatusSoon("Runner reconnected", 3000);

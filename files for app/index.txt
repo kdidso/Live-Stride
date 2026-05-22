@@ -260,8 +260,8 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
 
   <div id="buttonWrapper">
     <div id="modeToggle">
-      <button id="runnerModeBtn">🏃‍♂️ Runner</button>
-      <button id="viewerModeBtn">👁️ Viewer</button>
+      <button id="runnerModeBtn">Runner</button>
+      <button id="viewerModeBtn">Viewer</button>
     </div>
 
     <div id="controls">

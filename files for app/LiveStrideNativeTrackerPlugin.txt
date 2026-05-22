@@ -146,6 +146,7 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
     public void getNativeRunSnapshot(PluginCall call) {
         String runId = call.getString("runId");
         int afterSequenceNum = call.getInt("afterSequenceNum", -1);
+        int beforeSequenceNum = call.getInt("beforeSequenceNum", -1);
         boolean includeFullPath = call.getBoolean("includeFullPath", false);
 
         if (runId == null || runId.trim().isEmpty()) {
@@ -159,6 +160,7 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                 org.json.JSONObject snapshot = pointStore.getRunDisplaySnapshot(
                         runId,
                         afterSequenceNum,
+                        beforeSequenceNum,
                         includeFullPath
                 );
 

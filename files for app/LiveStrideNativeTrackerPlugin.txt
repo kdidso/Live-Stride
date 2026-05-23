@@ -130,11 +130,7 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         Intent intent = new Intent(getContext(), LiveStrideNativeTrackerService.class);
         intent.setAction(LiveStrideNativeTrackerService.ACTION_STOP);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getContext().startForegroundService(intent);
-        } else {
-            getContext().startService(intent);
-        }
+        getContext().startService(intent);
 
         JSObject result = new JSObject();
         result.put("ok", true);

@@ -119,6 +119,7 @@ let runnerConnectionWarningEnabledAtMs = 0;
 let runnerNativeSnapshotTimerId = null;
 let runnerNativeLastSequenceNum = -1;
 let runnerNativeDisplayActive = false;
+let runnerWakeRecoveryInFlight = false;
 
 
 // -> DOM references
@@ -1121,30 +1122,37 @@ async function loadRunnerPathFromSupabaseNative() {
 
 async function recoverRunnerPathOnWake() {
   if (!isRunnerNativeSnapshotAllowed()) return false;
+  if (runnerWakeRecoveryInFlight) return false;
 
-  const loadedFromSupabase = await loadRunnerPathFromSupabaseNative();
+  runnerWakeRecoveryInFlight = true;
 
-  if (!loadedFromSupabase) {
-    return refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
-  }
+  try {
+    const loadedFromSupabase = await loadRunnerPathFromSupabaseNative();
 
-  const supabaseLatestSequence = getLatestSequencePoint(pathCoords)?.sequenceNum ?? runnerNativeLastSequenceNum;
-  const gaps = getSequenceGaps(pathCoords);
+    if (!loadedFromSupabase) {
+      return refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
+    }
 
-  for (const gap of gaps) {
+    const supabaseLatestSequence = getLatestSequencePoint(pathCoords)?.sequenceNum ?? runnerNativeLastSequenceNum;
+    const gaps = getSequenceGaps(pathCoords);
+
+    for (const gap of gaps) {
+      await refreshRunnerFromNativeSqlite({
+        includeFullPath: false,
+        afterSequenceNum: gap.afterSequenceNum,
+        beforeSequenceNum: gap.beforeSequenceNum
+      });
+    }
+
     await refreshRunnerFromNativeSqlite({
       includeFullPath: false,
-      afterSequenceNum: gap.afterSequenceNum,
-      beforeSequenceNum: gap.beforeSequenceNum
+      afterSequenceNum: supabaseLatestSequence
     });
+
+    return true;
+  } finally {
+    runnerWakeRecoveryInFlight = false;
   }
-
-  await refreshRunnerFromNativeSqlite({
-    includeFullPath: false,
-    afterSequenceNum: supabaseLatestSequence
-  });
-
-  return true;
 }
 
 function startRunnerNativeSnapshotPolling() {
@@ -1605,7 +1613,6 @@ if (navigator.onLine) {
 }
 
 async function stopTracking() {
-  await refreshRunnerFromNativeSqlite({ includeFullPath: true });
   const stoppedAtMs = Date.now();
   const stoppedElapsedMs = startTime ? stoppedAtMs - startTime : null;
 
@@ -1677,7 +1684,7 @@ finishPayload = {
 };
 
 queueFinishEvent(activeRunId, finishPayload);
-nativeFinishSync(finishPayload);
+await nativeFinishSync(finishPayload);
 syncFinishNow(activeRunId, finishPayload).then(success => {
   if (!success) flushSupabaseQueue();
 });

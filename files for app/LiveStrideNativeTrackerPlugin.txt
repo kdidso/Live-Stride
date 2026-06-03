@@ -94,6 +94,8 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         String supabaseAnonKey = call.getString("supabaseAnonKey");
         String runId = call.getString("runId");
         String runnerName = call.getString("runnerName", "Native Test Runner");
+        String firebaseDatabaseUrl = call.getString("firebaseDatabaseUrl");
+        String firebaseRunnerPath = call.getString("firebaseRunnerPath");
         String nativeSessionId = call.getString(
                 "nativeSessionId",
                 "native_" + System.currentTimeMillis()
@@ -111,6 +113,8 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         intent.putExtra("runId", runId);
         intent.putExtra("runnerName", runnerName);
         intent.putExtra("nativeSessionId", nativeSessionId);
+        intent.putExtra("firebaseDatabaseUrl", firebaseDatabaseUrl);
+        intent.putExtra("firebaseRunnerPath", firebaseRunnerPath);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getContext().startForegroundService(intent);

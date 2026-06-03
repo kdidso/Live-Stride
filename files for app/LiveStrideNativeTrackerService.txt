@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -45,6 +46,8 @@ public class LiveStrideNativeTrackerService extends Service {
     private String runId;
     private String runnerName;
     private String nativeSessionId;
+    private String firebaseDatabaseUrl;
+    private String firebaseRunnerPath;
 
     private int sequenceNum = 0;
     private boolean isTracking = false;
@@ -87,6 +90,8 @@ public class LiveStrideNativeTrackerService extends Service {
             runId = intent.getStringExtra("runId");
             runnerName = intent.getStringExtra("runnerName");
             nativeSessionId = intent.getStringExtra("nativeSessionId");
+            firebaseDatabaseUrl = intent.getStringExtra("firebaseDatabaseUrl");
+            firebaseRunnerPath = intent.getStringExtra("firebaseRunnerPath");
             LiveStridePendingPointUploadJobService.saveSupabaseConfig(
                     this,
                     supabaseUrl,
@@ -120,6 +125,7 @@ public class LiveStrideNativeTrackerService extends Service {
 
         if (ACTION_STOP.equals(intent.getAction())) {
             stopLocationUpdates();
+            queueNativeFinishEvent();
             LiveStridePendingPointUploadJobService.schedule(this);
             new Thread(() -> LiveStridePendingPointUploadJobService.flushPendingPoints(this)).start();
             stopForeground(true);
@@ -363,6 +369,54 @@ private void uploadNativePoint(Location location) {
     }).start();
 }
 
+private void queueNativeFinishEvent() {
+    if (runId == null || runId.trim().isEmpty()) {
+        Log.w("LiveStrideNative", "Stop requested without runId; finish event not queued");
+        return;
+    }
+
+    try {
+        String finishPayloadJson = buildNativeFinishPayload();
+        pointStore.savePendingFinishEvent(
+                runId,
+                supabaseUrl,
+                supabaseAnonKey,
+                firebaseDatabaseUrl,
+                firebaseRunnerPath,
+                finishPayloadJson
+        );
+    } catch (Exception e) {
+        Log.w("LiveStrideNative", "Could not queue native finish event: " + e.getMessage());
+    }
+}
+
+private String buildNativeFinishPayload() throws org.json.JSONException {
+    JSONObject finishPayload = pointStore.getRunSummaryFromNativePoints(runId);
+    if (finishPayload == null) {
+        finishPayload = new JSONObject();
+    }
+
+    String finishedAt = isoNow();
+    finishPayload.put("is_live", false);
+    finishPayload.put("finished_at", finishedAt);
+    finishPayload.put("finalization_status", "completed");
+    finishPayload.put("finalization_started_at", finishedAt);
+    finishPayload.put("finalization_completed_at", finishedAt);
+
+    if (!finishPayload.has("final_time_ms") || finishPayload.isNull("final_time_ms")) {
+        long elapsedMs = runStartTimeMs > 0L
+                ? Math.max(0L, System.currentTimeMillis() - runStartTimeMs)
+                : 0L;
+        finishPayload.put("final_time_ms", elapsedMs);
+    }
+
+    if (!finishPayload.has("total_distance_m") || finishPayload.isNull("total_distance_m")) {
+        finishPayload.put("total_distance_m", totalDistanceMeters);
+    }
+
+    return finishPayload.toString();
+}
+
 private void kickPendingFlushIfNeeded() {
     if (pointStore.countPendingForRun(runId) <= 0) {
         return;
@@ -381,12 +435,32 @@ private void kickPendingFlushIfNeeded() {
 }
 
     private Notification buildNotification(String text) {
+        Intent stopIntent = new Intent(this, LiveStrideNativeTrackerService.class);
+        stopIntent.setAction(ACTION_STOP);
+
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+
+        PendingIntent stopPendingIntent = PendingIntent.getService(
+                this,
+                44224,
+                stopIntent,
+                flags
+        );
+
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("LiveStride Native Tracker")
                 .setContentText(text)
                 .setSmallIcon(getApplicationInfo().icon)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
+                .addAction(
+                        android.R.drawable.ic_media_pause,
+                        "Stop Run",
+                        stopPendingIntent
+                )
                 .build();
     }
 
@@ -409,5 +483,14 @@ private void kickPendingFlushIfNeeded() {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    private static String isoNow() {
+        java.text.SimpleDateFormat formatter = new java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                java.util.Locale.US
+        );
+        formatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return formatter.format(new java.util.Date());
     }
 }

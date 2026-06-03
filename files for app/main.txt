@@ -926,6 +926,68 @@ async function stopNativeComparisonRun() {
   }
 }
 
+function settleRunnerAfterNativeStop(finalTimeMs = null) {
+  if (runnerTimerId !== null) {
+    clearInterval(runnerTimerId);
+    runnerTimerId = null;
+  }
+
+  if (runnerHeartbeatId !== null) {
+    clearInterval(runnerHeartbeatId);
+    runnerHeartbeatId = null;
+  }
+
+  stopRunnerNativeSnapshotPolling();
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+
+  const elapsedMs = finalTimeMs != null && finalTimeMs > 0
+    ? finalTimeMs
+    : startTime
+      ? Date.now() - startTime
+      : 0;
+
+  updateStatsDisplay(
+    latestRunnerDistance,
+    latestRunnerPace,
+    latestRunnerAvgPace,
+    elapsedMs,
+    latestRunnerElevFt
+  );
+
+  if (!isPrivateMode) {
+    exportUploadBtn.style.display = "inline-block";
+    exportGpxBtn.style.display = "none";
+    uploadStravaBtn.style.display = "none";
+  }
+}
+
+async function syncRunnerUiWithNativeStop() {
+  if (!LiveStrideNativeTracker || !activeRunId) return false;
+
+  try {
+    const state = await LiveStrideNativeTracker.getNativeTrackerState();
+
+    if (
+      state?.runId === activeRunId &&
+      state.running === false &&
+      Number(state.stoppedAtMs || 0) > 0 &&
+      runnerTimerId !== null
+    ) {
+      settleRunnerAfterNativeStop(Number(state.finalTimeMs || 0));
+      showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+      hideConnectionStatusSoon();
+      flushSupabaseQueue();
+      return true;
+    }
+  } catch (err) {
+    console.warn("Native tracker state check failed:", err);
+  }
+
+  return false;
+}
+
 function isRunnerNativeSnapshotAllowed() {
   return Boolean(
     LiveStrideNativeTracker &&
@@ -1217,12 +1279,14 @@ window.addEventListener("offline", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
+    syncRunnerUiWithNativeStop();
     recoverRunnerPathOnWake();
     flushSupabaseQueue();
   }
 });
 
 window.addEventListener("focus", () => {
+  syncRunnerUiWithNativeStop();
   recoverRunnerPathOnWake();
   flushSupabaseQueue();
 });

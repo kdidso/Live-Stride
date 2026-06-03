@@ -33,9 +33,10 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
 
     private static final String TAG = "LiveStrideSQLite";
     private static final String DATABASE_NAME = "livestride_native_points.db";
-    private static final int DATABASE_VERSION = 2;
+    private static final int DATABASE_VERSION = 3;
 
     public static final String TABLE_NATIVE_POINTS = "native_run_points";
+    public static final String TABLE_FINISH_EVENTS = "pending_finish_events";
 
     private final Context appContext;
 
@@ -91,6 +92,8 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                 "CREATE INDEX IF NOT EXISTS idx_native_points_uploaded " +
                         "ON " + TABLE_NATIVE_POINTS + " (uploaded, created_at_ms)"
         );
+
+        createFinishEventTable(db);
     }
 
     @Override
@@ -105,6 +108,40 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                     + " SET upload_status = CASE WHEN uploaded = 1 THEN 'uploaded' ELSE 'pending' END"
                     + " WHERE upload_status IS NULL OR upload_status = ''");
         }
+
+        if (oldVersion < 3) {
+            createFinishEventTable(db);
+        }
+    }
+
+    private static void createFinishEventTable(SQLiteDatabase db) {
+        db.execSQL(
+                "CREATE TABLE IF NOT EXISTS " + TABLE_FINISH_EVENTS + " (" +
+                        "finish_id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "run_id TEXT NOT NULL, " +
+                        "supabase_url TEXT, " +
+                        "supabase_anon_key TEXT, " +
+                        "firebase_database_url TEXT, " +
+                        "firebase_runner_path TEXT, " +
+                        "finish_payload_json TEXT NOT NULL, " +
+                        "created_at_ms INTEGER NOT NULL, " +
+                        "attempts INTEGER NOT NULL DEFAULT 0, " +
+                        "last_attempt_at_ms INTEGER, " +
+                        "last_error TEXT, " +
+                        "completed INTEGER NOT NULL DEFAULT 0, " +
+                        "completed_at TEXT" +
+                        ")"
+        );
+
+        db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_finish_events_pending " +
+                        "ON " + TABLE_FINISH_EVENTS + " (completed, created_at_ms)"
+        );
+
+        db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_finish_events_run " +
+                        "ON " + TABLE_FINISH_EVENTS + " (run_id, completed)"
+        );
     }
 
     public synchronized long insertNativePoint(JSONObject body) throws JSONException {
@@ -268,6 +305,168 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         Cursor cursor = db.rawQuery(
                 "SELECT COUNT(*) FROM " + TABLE_NATIVE_POINTS + " WHERE uploaded = 0 AND run_id = ?",
                 new String[]{runId}
+        );
+
+        try {
+            if (cursor.moveToFirst()) {
+                return cursor.getInt(0);
+            }
+            return 0;
+        } finally {
+            cursor.close();
+        }
+    }
+
+    public synchronized long savePendingFinishEvent(
+            String runId,
+            String supabaseUrl,
+            String supabaseAnonKey,
+            String firebaseDatabaseUrl,
+            String firebaseRunnerPath,
+            String finishPayloadJson
+    ) {
+        if (runId == null || runId.trim().isEmpty()
+                || finishPayloadJson == null || finishPayloadJson.trim().isEmpty()) {
+            return -1L;
+        }
+
+        ContentValues values = new ContentValues();
+        values.put("run_id", runId);
+        values.put("supabase_url", supabaseUrl);
+        values.put("supabase_anon_key", supabaseAnonKey);
+        values.put("firebase_database_url", firebaseDatabaseUrl);
+        values.put("firebase_runner_path", firebaseRunnerPath);
+        values.put("finish_payload_json", finishPayloadJson);
+        values.put("created_at_ms", System.currentTimeMillis());
+        values.put("last_error", (String) null);
+        values.put("completed", 0);
+        values.put("completed_at", (String) null);
+
+        SQLiteDatabase db = getWritableDatabase();
+
+        int updated = db.update(
+                TABLE_FINISH_EVENTS,
+                values,
+                "run_id = ? AND completed = 0",
+                new String[]{runId}
+        );
+
+        long finishId;
+        if (updated > 0) {
+            Cursor cursor = db.query(
+                    TABLE_FINISH_EVENTS,
+                    new String[]{"finish_id"},
+                    "run_id = ? AND completed = 0",
+                    new String[]{runId},
+                    null,
+                    null,
+                    "created_at_ms DESC",
+                    "1"
+            );
+
+            try {
+                finishId = cursor.moveToFirst() ? cursor.getLong(0) : -1L;
+            } finally {
+                cursor.close();
+            }
+        } else {
+            finishId = db.insertOrThrow(TABLE_FINISH_EVENTS, null, values);
+        }
+
+        Log.i(TAG, "Saved pending finish event run_id=" + runId
+                + " finish_id=" + finishId
+                + " pendingFinishCount=" + countPendingFinishEvents());
+
+        exportDebugCopy();
+        return finishId;
+    }
+
+    public synchronized JSONObject getNextPendingFinishEvent() {
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.query(
+                TABLE_FINISH_EVENTS,
+                null,
+                "completed = 0",
+                null,
+                null,
+                null,
+                "created_at_ms ASC, finish_id ASC",
+                "1"
+        );
+
+        try {
+            if (!cursor.moveToFirst()) {
+                return null;
+            }
+
+            JSONObject event = new JSONObject();
+            putJsonLong(event, "finish_id", cursor);
+            putJsonString(event, "run_id", cursor);
+            putJsonString(event, "supabase_url", cursor);
+            putJsonString(event, "supabase_anon_key", cursor);
+            putJsonString(event, "firebase_database_url", cursor);
+            putJsonString(event, "firebase_runner_path", cursor);
+            putJsonString(event, "finish_payload_json", cursor);
+            putJsonLong(event, "created_at_ms", cursor);
+            putJsonInt(event, "attempts", cursor);
+            putJsonLong(event, "last_attempt_at_ms", cursor);
+            putJsonString(event, "last_error", cursor);
+            return event;
+        } catch (JSONException e) {
+            Log.w(TAG, "Could not read pending finish event: " + e.getMessage());
+            return null;
+        } finally {
+            cursor.close();
+        }
+    }
+
+    public synchronized void markFinishEventCompleted(long finishId) {
+        ContentValues values = new ContentValues();
+        values.put("completed", 1);
+        values.put("completed_at", isoNow());
+        values.put("last_error", (String) null);
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_FINISH_EVENTS,
+                values,
+                "finish_id = ?",
+                new String[]{String.valueOf(finishId)}
+        );
+
+        Log.i(TAG, "Marked finish event completed finish_id=" + finishId);
+        exportDebugCopy();
+    }
+
+    public synchronized void markFinishEventFailed(long finishId, String error) {
+        ContentValues values = new ContentValues();
+        values.put("last_attempt_at_ms", System.currentTimeMillis());
+        values.put("last_error", error == null ? "Finish sync failed" : error);
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_FINISH_EVENTS,
+                values,
+                "finish_id = ? AND completed = 0",
+                new String[]{String.valueOf(finishId)}
+        );
+
+        db.execSQL(
+                "UPDATE " + TABLE_FINISH_EVENTS
+                        + " SET attempts = attempts + 1 WHERE finish_id = ? AND completed = 0",
+                new Object[]{finishId}
+        );
+
+        Log.w(TAG, "Marked finish event pending finish_id=" + finishId
+                + " error=" + values.getAsString("last_error"));
+        exportDebugCopy();
+    }
+
+    public synchronized int countPendingFinishEvents() {
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM " + TABLE_FINISH_EVENTS + " WHERE completed = 0",
+                null
         );
 
         try {

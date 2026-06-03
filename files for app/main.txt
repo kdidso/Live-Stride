@@ -905,6 +905,14 @@ async function startNativeComparisonRun(firebaseRunnerPath = null) {
       nativeSessionId: `native_compare_${activeRunId}`
     });
 
+    console.log("Native comparison tracker started:", result);
+    return true;
+  } catch (err) {
+    console.warn("Native comparison tracker failed to start:", err);
+    return false;
+  }
+}
+
 async function stopNativeComparisonRun() {
   if (!LiveStrideNativeTracker) return false;
 

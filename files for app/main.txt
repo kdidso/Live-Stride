@@ -1687,6 +1687,7 @@ finishPayload = {
 
 queueFinishEvent(activeRunId, finishPayload);
 showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+hideConnectionStatusSoon();
 nativeFinishSync(finishPayload).then(success => {
   if (!success) flushSupabaseQueue();
 });
@@ -1760,7 +1761,13 @@ broadcastBtn.onclick = async () => {
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
   broadcastRef = db.ref(`runners/${safeName}`);
 
-  await startNativeComparisonRun(broadcastRef.toString());
+  const nativeStarted = await startNativeComparisonRun(broadcastRef.toString());
+  if (nativeStarted && bgWatchId != null) {
+    BackgroundGeolocation
+      .removeWatcher({ id: bgWatchId })
+      .catch(err => console.warn("Failed to remove background watcher after native start:", err));
+    bgWatchId = null;
+  }
   await refreshRunnerFromNativeSqlite({ includeFullPath: true });
   startRunnerNativeSnapshotPolling();
   await startNativePathComparison(activeRunId);

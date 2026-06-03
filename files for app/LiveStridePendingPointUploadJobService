@@ -124,16 +124,17 @@ public class LiveStridePendingPointUploadJobService extends JobService {
 
     private static boolean flushPendingPointsLocked(Context context) {
         Context appContext = context.getApplicationContext();
+        LiveStridePointStore pointStore = new LiveStridePointStore(appContext);
         SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String supabaseUrl = prefs.getString(PREF_SUPABASE_URL, null);
         String supabaseAnonKey = prefs.getString(PREF_SUPABASE_ANON_KEY, null);
 
         if (supabaseUrl == null || supabaseAnonKey == null) {
             Log.w(TAG, "Cannot flush pending native points without saved Supabase config");
-            return false;
+            boolean finishEventsDone = flushPendingFinishEvents(pointStore);
+            return pointStore.countPending() == 0 && finishEventsDone;
         }
 
-        LiveStridePointStore pointStore = new LiveStridePointStore(appContext);
         pointStore.resetStaleUploadAttempts(System.currentTimeMillis() - STALE_UPLOAD_MS);
 
         List<JSONObject> pending = pointStore.getPendingUploadBodies(BATCH_LIMIT);
@@ -191,7 +192,204 @@ public class LiveStridePendingPointUploadJobService extends JobService {
             }
         }
 
-        return allUploaded && pointStore.countPending() == 0;
+        boolean noPendingPoints = pointStore.countPending() == 0;
+        boolean finishEventsDone = flushPendingFinishEvents(pointStore);
+
+        return allUploaded && noPendingPoints && finishEventsDone;
+    }
+
+    private static boolean flushPendingFinishEvents(LiveStridePointStore pointStore) {
+        boolean allFinished = true;
+
+        while (true) {
+            JSONObject event = pointStore.getNextPendingFinishEvent();
+            if (event == null) {
+                return allFinished;
+            }
+
+            long finishId = event.optLong("finish_id", -1L);
+            String runId = event.optString("run_id", null);
+
+            if (pointStore.countPendingForRun(runId) > 0) {
+                Log.i(TAG, "Finish event waiting for pending native points run_id=" + runId);
+                return false;
+            }
+
+            String finishPayloadJson = event.optString("finish_payload_json", "{}");
+            finishPayloadJson = mergeNativePointSummary(pointStore, runId, finishPayloadJson);
+
+            boolean supabaseDone = syncSupabaseFinish(
+                    optCleanString(event, "supabase_url"),
+                    optCleanString(event, "supabase_anon_key"),
+                    runId,
+                    finishPayloadJson
+            );
+
+            boolean firebaseDone = true;
+            String firebaseRunnerPath = optCleanString(event, "firebase_runner_path");
+            if (firebaseRunnerPath != null) {
+                firebaseDone = syncFirebaseFinish(firebaseRunnerPath, finishPayloadJson);
+            }
+
+            if (supabaseDone && firebaseDone) {
+                pointStore.markFinishEventCompleted(finishId);
+            } else {
+                allFinished = false;
+                pointStore.markFinishEventFailed(
+                        finishId,
+                        "Finish sync incomplete supabase=" + supabaseDone
+                                + " firebase=" + firebaseDone
+                );
+                break;
+            }
+        }
+
+        return allFinished;
+    }
+
+    private static String mergeNativePointSummary(
+            LiveStridePointStore pointStore,
+            String runId,
+            String finishPayloadJson
+    ) {
+        try {
+            JSONObject finishPayload = new JSONObject(finishPayloadJson);
+            JSONObject nativeSummary = pointStore.getRunSummaryFromNativePoints(runId);
+
+            if (nativeSummary == null) {
+                return finishPayloadJson;
+            }
+
+            String[] keys = {
+                    "latest_lat",
+                    "latest_lon",
+                    "latest_timestamp",
+                    "total_distance_m",
+                    "final_time_ms"
+            };
+
+            for (String key : keys) {
+                if (nativeSummary.has(key) && !nativeSummary.isNull(key)) {
+                    finishPayload.put(key, nativeSummary.get(key));
+                }
+            }
+
+            finishPayload.put("is_live", false);
+            if (!finishPayload.has("finished_at") || finishPayload.isNull("finished_at")) {
+                finishPayload.put("finished_at", isoNow());
+            }
+
+            return finishPayload.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "Could not merge native summary into finish event: " + e.getMessage());
+            return finishPayloadJson;
+        }
+    }
+
+    private static boolean syncSupabaseFinish(
+            String supabaseUrl,
+            String supabaseAnonKey,
+            String runId,
+            String finishPayloadJson
+    ) {
+        if (supabaseUrl == null || supabaseAnonKey == null || runId == null) {
+            return false;
+        }
+
+        HttpURLConnection conn = null;
+
+        try {
+            URL url = new URL(supabaseUrl + "/rest/v1/runs?id=eq." + runId);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("PATCH");
+            conn.setRequestProperty("apikey", supabaseAnonKey);
+            conn.setRequestProperty("Authorization", "Bearer " + supabaseAnonKey);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Prefer", "return=minimal");
+            conn.setConnectTimeout(5_000);
+            conn.setReadTimeout(5_000);
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(finishPayloadJson.getBytes("UTF-8"));
+            }
+
+            int code = conn.getResponseCode();
+            return code >= 200 && code < 300;
+        } catch (Exception e) {
+            Log.w(TAG, "Pending finish Supabase exception: " + e.getMessage());
+            return false;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    private static boolean syncFirebaseFinish(String firebaseRunnerPath, String finishPayloadJson) {
+        HttpURLConnection conn = null;
+
+        try {
+            JSONObject finishPayload = new JSONObject(finishPayloadJson);
+            JSONObject body = new JSONObject();
+            body.put("finished", true);
+            body.put("timestamp", System.currentTimeMillis());
+            copyIfPresent(finishPayload, body, "finished_at");
+            copyIfPresent(finishPayload, body, "final_time_ms");
+            copyIfPresent(finishPayload, body, "total_distance_m");
+            copyIfPresent(finishPayload, body, "latest_lat");
+            copyIfPresent(finishPayload, body, "latest_lon");
+            copyIfPresent(finishPayload, body, "latest_timestamp");
+
+            URL url = new URL(firebaseRunnerPath + ".json");
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("PATCH");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setConnectTimeout(5_000);
+            conn.setReadTimeout(5_000);
+            conn.setDoOutput(true);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.toString().getBytes("UTF-8"));
+            }
+
+            int code = conn.getResponseCode();
+            return code >= 200 && code < 300;
+        } catch (Exception e) {
+            Log.w(TAG, "Pending finish Firebase exception: " + e.getMessage());
+            return false;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    private static void copyIfPresent(JSONObject source, JSONObject destination, String key) {
+        try {
+            if (source.has(key) && !source.isNull(key)) {
+                destination.put(key, source.get(key));
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String optCleanString(JSONObject json, String key) {
+        if (json == null || !json.has(key) || json.isNull(key)) {
+            return null;
+        }
+
+        String value = json.optString(key, null);
+        if (value == null) {
+            return null;
+        }
+
+        value = value.trim();
+        if (value.isEmpty() || "null".equalsIgnoreCase(value)) {
+            return null;
+        }
+
+        return value;
     }
 
     public static UploadResult uploadNativePointBody(
@@ -301,6 +499,15 @@ public class LiveStridePendingPointUploadJobService extends JobService {
                 conn.disconnect();
             }
         }
+    }
+
+    private static String isoNow() {
+        java.text.SimpleDateFormat formatter = new java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                java.util.Locale.US
+        );
+        formatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return formatter.format(new java.util.Date());
     }
 
     public static class UploadResult {

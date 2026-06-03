@@ -1686,7 +1686,10 @@ finishPayload = {
 };
 
 queueFinishEvent(activeRunId, finishPayload);
-await nativeFinishSync(finishPayload);
+showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+nativeFinishSync(finishPayload).then(success => {
+  if (!success) flushSupabaseQueue();
+});
 syncFinishNow(activeRunId, finishPayload).then(success => {
   if (!success) flushSupabaseQueue();
 });

@@ -23,7 +23,7 @@ public class LiveStridePendingPointUploadJobService extends JobService {
     private static final String PREFS_NAME = "livestride_native_point_upload";
     private static final String PREF_SUPABASE_URL = "supabase_url";
     private static final String PREF_SUPABASE_ANON_KEY = "supabase_anon_key";
-    private static final int BATCH_LIMIT = 100;
+    private static final int BATCH_LIMIT = 250;
     private static final long STALE_UPLOAD_MS = 10 * 60 * 1000L;
     private static final long MIN_SCHEDULE_INTERVAL_MS = 30_000L;
     private static boolean isFlushing = false;
@@ -137,63 +137,55 @@ public class LiveStridePendingPointUploadJobService extends JobService {
 
         pointStore.resetStaleUploadAttempts(System.currentTimeMillis() - STALE_UPLOAD_MS);
 
-        List<JSONObject> pending = pointStore.getPendingUploadBodies(BATCH_LIMIT);
-
-        if (pending.isEmpty()) {
-            Log.i(TAG, "No pending native points to upload");
-            return true;
-        }
-
-        Log.i(TAG, "Flushing pending native points count=" + pending.size());
-
         boolean allUploaded = true;
 
-        for (JSONObject row : pending) {
-            long localId = row.optLong("local_id", -1L);
-            JSONObject uploadBody;
+        while (true) {
+            List<JSONObject> pending = pointStore.getPendingUploadBodies(BATCH_LIMIT);
 
-            try {
-                uploadBody = new JSONObject(row.toString());
-                uploadBody.remove("local_id");
-            } catch (Exception e) {
-                allUploaded = false;
-                pointStore.markUploadFailed(localId, "Could not prepare pending point JSON");
+            if (pending.isEmpty()) {
+                Log.i(TAG, "No pending native points to upload");
                 break;
             }
 
-            if (uploadBody.isNull("elevation_m")) {
-                Double elevationMeters = fetchElevationMeters(
-                        uploadBody.optDouble("lat"),
-                        uploadBody.optDouble("lon")
-                );
+            Log.i(TAG, "Flushing pending native points count=" + pending.size());
 
-                if (elevationMeters != null) {
-                    try {
-                        uploadBody.put("elevation_m", elevationMeters);
-                        pointStore.updateElevation(localId, elevationMeters);
-                    } catch (Exception e) {
-                        Log.w(TAG, "Could not attach elevation before retry: " + e.getMessage());
-                    }
+            for (JSONObject row : pending) {
+                long localId = row.optLong("local_id", -1L);
+                JSONObject uploadBody;
+
+                try {
+                    uploadBody = new JSONObject(row.toString());
+                    uploadBody.remove("local_id");
+                } catch (Exception e) {
+                    allUploaded = false;
+                    pointStore.markUploadFailed(localId, "Could not prepare pending point JSON");
+                    break;
+                }
+
+                pointStore.markUploadInProgress(localId);
+
+                UploadResult result = uploadNativePointBody(supabaseUrl, supabaseAnonKey, uploadBody);
+
+                if (result.success) {
+                    pointStore.markUploaded(localId);
                 } else {
-                    Log.w(TAG, "Elevation unavailable before retry; uploading point without elevation local_id="
-                            + localId);
+                    allUploaded = false;
+                    pointStore.markUploadFailed(localId, result.error);
+                    break;
                 }
             }
 
-            pointStore.markUploadInProgress(localId);
-
-            UploadResult result = uploadNativePointBody(supabaseUrl, supabaseAnonKey, uploadBody);
-
-            if (result.success) {
-                pointStore.markUploaded(localId);
-            } else {
-                allUploaded = false;
-                pointStore.markUploadFailed(localId, result.error);
+            if (!allUploaded) {
+                break;
             }
         }
 
         boolean noPendingPoints = pointStore.countPending() == 0;
         boolean finishEventsDone = flushPendingFinishEvents(pointStore);
+
+        if (!noPendingPoints || !finishEventsDone) {
+            schedule(appContext);
+        }
 
         return allUploaded && noPendingPoints && finishEventsDone;
     }

@@ -32,7 +32,7 @@ import java.net.URL;
 
 public class LiveStrideNativeTrackerService extends Service {
 
-    private static final String CHANNEL_ID = "livestride_native_tracker";
+    private static final String CHANNEL_ID = "livestride_native_tracker_v2";
     private static final int NOTIFICATION_ID = 44221;
 
     public static final String ACTION_START = "START_NATIVE_TEST_RUN";
@@ -423,7 +423,7 @@ private void kickPendingFlushIfNeeded() {
     }
 
     long now = System.currentTimeMillis();
-    if (now - lastPendingFlushKickMs < 15_000L) {
+    if (now - lastPendingFlushKickMs < 3_000L) {
         return;
     }
 
@@ -451,14 +451,19 @@ private void kickPendingFlushIfNeeded() {
         );
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("LiveStride Native Tracker")
-                .setContentText(text)
+                .setContentTitle("LiveStride Run in Progress")
+                .setContentText("Tap STOP RUN to finish")
                 .setSmallIcon(getApplicationInfo().icon)
                 .setOngoing(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOnlyAlertOnce(true)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setColor(0xFFD32F2F)
+                .setColorized(true)
                 .addAction(
                         android.R.drawable.ic_media_pause,
-                        "Stop Run",
+                        "STOP RUN",
                         stopPendingIntent
                 )
                 .build();
@@ -468,9 +473,10 @@ private void kickPendingFlushIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "LiveStride Native Tracker",
-                    NotificationManager.IMPORTANCE_LOW
+                    "LiveStride Run Controls",
+                    NotificationManager.IMPORTANCE_DEFAULT
             );
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
 
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {

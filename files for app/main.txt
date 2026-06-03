@@ -891,7 +891,7 @@ async function syncFinishNow(runId, finishPayload) {
   }
 }
 
-async function startNativeComparisonRun() {
+async function startNativeComparisonRun(firebaseRunnerPath = null) {
   if (!LiveStrideNativeTracker || !activeRunId || !runnerName) return false;
 
   try {
@@ -900,16 +900,10 @@ async function startNativeComparisonRun() {
       supabaseAnonKey: SUPABASE_ANON_KEY,
       runId: activeRunId,
       runnerName,
+      firebaseDatabaseUrl: firebaseConfig.databaseURL,
+      firebaseRunnerPath,
       nativeSessionId: `native_compare_${activeRunId}`
     });
-
-    console.log("Native comparison tracker started:", result);
-    return true;
-  } catch (err) {
-    console.warn("Native comparison tracker failed to start:", err);
-    return false;
-  }
-}
 
 async function stopNativeComparisonRun() {
   if (!LiveStrideNativeTracker) return false;
@@ -1752,12 +1746,13 @@ broadcastBtn.onclick = async () => {
 
   activeRunId = newRun.id;
   pointSequence = 0;
-  await startNativeComparisonRun();
+  const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
+  broadcastRef = db.ref(`runners/${safeName}`);
+
+  await startNativeComparisonRun(broadcastRef.toString());
   await refreshRunnerFromNativeSqlite({ includeFullPath: true });
   startRunnerNativeSnapshotPolling();
   await startNativePathComparison(activeRunId);
-  const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
-  broadcastRef = db.ref(`runners/${safeName}`);
 
   await broadcastRef.set({
     run_id: activeRunId,

@@ -1,6 +1,7 @@
 package com.kdidso.livestride;
 
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Build;
 
 import com.getcapacitor.JSObject;
@@ -139,6 +140,22 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         JSObject result = new JSObject();
         result.put("ok", true);
         result.put("message", "Native GPS test service stop requested.");
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void getNativeTrackerState(PluginCall call) {
+        SharedPreferences prefs = getContext().getSharedPreferences(
+                LiveStrideNativeTrackerService.STATE_PREFS_NAME,
+                android.content.Context.MODE_PRIVATE
+        );
+
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        result.put("runId", prefs.getString(LiveStrideNativeTrackerService.STATE_RUN_ID, null));
+        result.put("running", prefs.getBoolean(LiveStrideNativeTrackerService.STATE_RUNNING, false));
+        result.put("stoppedAtMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_STOPPED_AT_MS, 0L));
+        result.put("finalTimeMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_FINAL_TIME_MS, 0L));
         call.resolve(result);
     }
 

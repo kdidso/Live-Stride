@@ -887,6 +887,12 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
         return;
       }
 
+      const reportedAccuracy = Number(accuracy);
+      if (Number.isFinite(reportedAccuracy) && reportedAccuracy >= 10) {
+        console.warn("Ignoring inaccurate GPS point:", reportedAccuracy.toFixed(2), "m");
+        return;
+      }
+
       if (isFollowing) {
         map.setCenter(coord);
       }

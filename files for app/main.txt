@@ -1419,8 +1419,15 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   const now = typeof locationTime === "number"
     ? locationTime
     : new Date(locationTime).getTime();
-    if (lastPointTime && now <= lastPointTime) {
+
+  if (lastPointTime && now <= lastPointTime) {
     console.warn("Ignoring out-of-order location point:", new Date(now).toISOString());
+    return;
+  }
+
+  const reportedAccuracy = Number(accuracy);
+  if (Number.isFinite(reportedAccuracy) && reportedAccuracy >= 10) {
+    console.warn("Ignoring inaccurate GPS point:", reportedAccuracy.toFixed(2), "m");
     return;
   }
 

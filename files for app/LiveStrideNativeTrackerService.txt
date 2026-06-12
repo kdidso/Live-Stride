@@ -26,10 +26,13 @@ import com.google.android.gms.location.LocationResult;
 import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.location.Priority;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 
 public class LiveStrideNativeTrackerService extends Service {
 
@@ -41,6 +44,9 @@ public class LiveStrideNativeTrackerService extends Service {
     public static final String STATE_RUNNING = "running";
     public static final String STATE_STOPPED_AT_MS = "stopped_at_ms";
     public static final String STATE_FINAL_TIME_MS = "final_time_ms";
+    public static final String STATE_MAP_CONTEXT_JSON = "map_context_json";
+    public static final String STATE_MAP_CONTEXT_RUN_ID = "map_context_run_id";
+    public static final String STATE_MAP_CONTEXT_UPDATED_AT_MS = "map_context_updated_at_ms";
 
     public static final String ACTION_START = "START_NATIVE_TEST_RUN";
     public static final String ACTION_STOP = "STOP_NATIVE_TEST_RUN";
@@ -64,6 +70,8 @@ public class LiveStrideNativeTrackerService extends Service {
     private long previousPointTimeMs = 0L;
     private LiveStridePointStore pointStore;
     private long lastPendingFlushKickMs = 0L;
+    private long loadedMapContextUpdatedAtMs = 0L;
+    private final BridgeTunnelMatcher bridgeTunnelMatcher = new BridgeTunnelMatcher();
     @Override
     public void onCreate() {
         super.onCreate();
@@ -123,6 +131,8 @@ public class LiveStrideNativeTrackerService extends Service {
             totalDistanceMeters = 0.0;
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
+            loadedMapContextUpdatedAtMs = 0L;
+            bridgeTunnelMatcher.reset();
             saveNativeTrackerState(true, 0L, 0L);
             
             startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
@@ -249,19 +259,47 @@ private Double fetchElevationMeters(double lat, double lon) {
     }
 }
 
-private void uploadNativePoint(Location location) {
-    final double lat = location.getLatitude();
-    final double lon = location.getLongitude();
-    final float accuracy = location.hasAccuracy() ? location.getAccuracy() : -1f;
+private void uploadNativePoint(Location rawLocation) {
+    final float accuracy = rawLocation.hasAccuracy() ? rawLocation.getAccuracy() : -1f;
+    final long pointTimeMs = rawLocation.getTime() > 0
+            ? rawLocation.getTime()
+            : System.currentTimeMillis();
+    final boolean accuracyIsGood = accuracy < 0
+            || accuracy <= MAX_ACCEPTED_ACCURACY_METERS;
 
-    if (accuracy >= MAX_ACCEPTED_ACCURACY_METERS) {
+    refreshMapMatchingContext();
+    BridgeTunnelMatcher.Result matchResult = bridgeTunnelMatcher.process(
+            new BridgeTunnelMatcher.Point(
+                    rawLocation.getLatitude(),
+                    rawLocation.getLongitude()
+            ),
+            accuracy,
+            pointTimeMs,
+            accuracyIsGood
+    );
+
+    if (!matchResult.matched && !accuracyIsGood) {
         Log.i("LiveStrideNative", "Ignored inaccurate GPS fix: " + accuracy + " m");
         return;
     }
 
-    final long pointTimeMs = location.getTime() > 0
-            ? location.getTime()
-            : System.currentTimeMillis();
+    Location location = new Location(rawLocation);
+    if (matchResult.matched) {
+        location.setLatitude(matchResult.point.lat);
+        location.setLongitude(matchResult.point.lon);
+        Log.i(
+                "LiveStrideNative",
+                "Map-matched " + matchResult.structureType
+                        + " point state=" + matchResult.state
+                        + " rawAccuracy=" + accuracy
+        );
+    }
+
+    final double lat = location.getLatitude();
+    final double lon = location.getLongitude();
+    final boolean wasMapMatched = matchResult.matched;
+    final String matchingState = matchResult.state.name().toLowerCase(java.util.Locale.US);
+    final String matchedStructureType = matchResult.structureType;
 
     double segmentMeters = 0.0;
     double instPaceMinPerMile = 0.0;
@@ -351,8 +389,19 @@ private void uploadNativePoint(Location location) {
             body.put("inst_pace_min_per_mile", finalInstPaceMinPerMile);
             body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
             body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
-            body.put("app_state", "foreground_service");
-            body.put("note", "Inserted from native Android GPS service with SQLite-backed local storage");
+            body.put(
+                    "app_state",
+                    wasMapMatched
+                            ? "foreground_service_map_matched"
+                            : "foreground_service"
+            );
+            body.put(
+                    "note",
+                    wasMapMatched
+                            ? "Map matched to connected " + matchedStructureType
+                                    + " route during " + matchingState
+                            : "Inserted from native Android GPS service with SQLite-backed local storage"
+            );
 
             // Phase SQLite-1:
             // Save every native point locally first. This makes the phone-side record durable
@@ -383,6 +432,62 @@ private void uploadNativePoint(Location location) {
             System.out.println("LiveStride native point SQLite/upload exception: " + e.getMessage());
         }
     }).start();
+}
+
+private void refreshMapMatchingContext() {
+    SharedPreferences prefs = getSharedPreferences(STATE_PREFS_NAME, MODE_PRIVATE);
+    long updatedAtMs = prefs.getLong(STATE_MAP_CONTEXT_UPDATED_AT_MS, 0L);
+    if (updatedAtMs <= loadedMapContextUpdatedAtMs) return;
+
+    loadedMapContextUpdatedAtMs = updatedAtMs;
+    String contextRunId = prefs.getString(STATE_MAP_CONTEXT_RUN_ID, null);
+    if (runId == null || contextRunId == null || !runId.equals(contextRunId)) return;
+
+    String contextJson = prefs.getString(STATE_MAP_CONTEXT_JSON, null);
+    if (contextJson == null || contextJson.trim().isEmpty()) return;
+
+    try {
+        JSONObject root = new JSONObject(contextJson);
+        JSONArray jsonSegments = root.optJSONArray("segments");
+        if (jsonSegments == null) return;
+
+        List<BridgeTunnelMatcher.Segment> segments = new ArrayList<>();
+        for (int i = 0; i < jsonSegments.length(); i++) {
+            JSONObject jsonSegment = jsonSegments.optJSONObject(i);
+            if (jsonSegment == null) continue;
+
+            JSONArray jsonPoints = jsonSegment.optJSONArray("points");
+            if (jsonPoints == null || jsonPoints.length() < 2) continue;
+
+            List<BridgeTunnelMatcher.Point> points = new ArrayList<>();
+            for (int j = 0; j < jsonPoints.length(); j++) {
+                JSONArray coordinate = jsonPoints.optJSONArray(j);
+                if (coordinate == null || coordinate.length() < 2) continue;
+                points.add(new BridgeTunnelMatcher.Point(
+                        coordinate.optDouble(1),
+                        coordinate.optDouble(0)
+                ));
+            }
+
+            if (points.size() < 2) continue;
+            segments.add(new BridgeTunnelMatcher.Segment(
+                    jsonSegment.optString("id", "segment_" + i),
+                    jsonSegment.optString("brunnel", ""),
+                    jsonSegment.optString("subclass", ""),
+                    points
+            ));
+        }
+
+        bridgeTunnelMatcher.setContext(
+                new BridgeTunnelMatcher.Context(updatedAtMs, segments)
+        );
+        Log.i(
+                "LiveStrideNative",
+                "Loaded bridge/tunnel map context with " + segments.size() + " segments"
+        );
+    } catch (Exception e) {
+        Log.w("LiveStrideNative", "Could not parse map matching context: " + e.getMessage());
+    }
 }
 
 private void queueNativeFinishEvent() {

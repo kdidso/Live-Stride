@@ -120,6 +120,8 @@ let runnerNativeSnapshotTimerId = null;
 let runnerNativeLastSequenceNum = -1;
 let runnerNativeDisplayActive = false;
 let runnerWakeRecoveryInFlight = false;
+let lastMapMatchingContextSentAt = 0;
+let lastMapMatchingContextSignature = "";
 
 
 // -> DOM references
@@ -1415,6 +1417,109 @@ function convertToGpx(runData) {
   return gpx;
 }
 
+function collectCoordinateLines(value, lines = []) {
+  if (!Array.isArray(value) || value.length === 0) return lines;
+
+  const isCoordinate = point =>
+    Array.isArray(point) &&
+    point.length >= 2 &&
+    Number.isFinite(Number(point[0])) &&
+    Number.isFinite(Number(point[1]));
+
+  if (value.length >= 2 && value.every(isCoordinate)) {
+    lines.push(value.map(point => [Number(point[0]), Number(point[1])]));
+    return lines;
+  }
+
+  value.forEach(child => collectCoordinateLines(child, lines));
+  return lines;
+}
+
+async function updateNativeMapMatchingContext(coord) {
+  if (!activeRunId || !LiveStrideNativeTracker || !map?.getStyle) return;
+
+  const now = Date.now();
+  if (now - lastMapMatchingContextSentAt < 1500) return;
+
+  try {
+    const availableLayerIds = new Set(
+      (map.getStyle().layers || []).map(layer => layer.id)
+    );
+    const pathLayers = ["Path", "Path minor"].filter(id =>
+      availableLayerIds.has(id)
+    );
+    if (pathLayers.length === 0) return;
+
+    const centerPoint = map.project(coord);
+    const radiusPixels = 100;
+    const features = map.queryRenderedFeatures(
+      [
+        [centerPoint.x - radiusPixels, centerPoint.y - radiusPixels],
+        [centerPoint.x + radiusPixels, centerPoint.y + radiusPixels]
+      ],
+      { layers: pathLayers }
+    );
+
+    const hasStructure = features.some(feature => {
+      const brunnel = String(feature.properties?.brunnel || "").toLowerCase();
+      return brunnel === "tunnel" || brunnel === "bridge";
+    });
+    if (!hasStructure) return;
+
+    const segments = [];
+    const seen = new Set();
+
+    features.forEach((feature, featureIndex) => {
+      const lines = collectCoordinateLines(feature.geometry?.coordinates);
+      lines.forEach((points, lineIndex) => {
+        if (points.length < 2) return;
+
+        const baseId = feature.id ?? `rendered_${featureIndex}`;
+        const id = `${baseId}:${lineIndex}`;
+        const signature = `${id}:${JSON.stringify(points)}`;
+        if (seen.has(signature)) return;
+        seen.add(signature);
+
+        segments.push({
+          id,
+          brunnel: String(feature.properties?.brunnel || "").toLowerCase(),
+          subclass: String(feature.properties?.subclass || "").toLowerCase(),
+          points
+        });
+      });
+    });
+
+    if (!segments.some(segment =>
+      segment.brunnel === "tunnel" || segment.brunnel === "bridge"
+    )) {
+      return;
+    }
+
+    const contextSignature = JSON.stringify(segments);
+    if (
+      contextSignature === lastMapMatchingContextSignature &&
+      now - lastMapMatchingContextSentAt < 10_000
+    ) {
+      return;
+    }
+
+    await LiveStrideNativeTracker.updateMapMatchingContext({
+      runId: activeRunId,
+      contextJson: JSON.stringify({ segments })
+    });
+
+    lastMapMatchingContextSignature = contextSignature;
+    lastMapMatchingContextSentAt = now;
+    console.log(
+      "Updated native bridge/tunnel context:",
+      segments.length,
+      "path segments"
+    );
+  } catch (err) {
+    console.warn("Bridge/tunnel context update skipped:", err);
+  }
+}
+
 async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.now()) {
   const now = typeof locationTime === "number"
     ? locationTime
@@ -1425,14 +1530,15 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     return;
   }
 
-  const reportedAccuracy = Number(accuracy);
-  if (Number.isFinite(reportedAccuracy) && reportedAccuracy >= 10) {
-    console.warn("Ignoring inaccurate GPS point:", reportedAccuracy.toFixed(2), "m");
-    return;
-  }
-
   if (isFollowing) {
     map.setCenter(coord);
+  }
+  updateNativeMapMatchingContext(coord);
+
+  const reportedAccuracy = Number(accuracy);
+  if (Number.isFinite(reportedAccuracy) && reportedAccuracy > 10) {
+    console.warn("Ignoring inaccurate GPS point:", reportedAccuracy.toFixed(2), "m");
+    return;
   }
 
   let elevMeters = null;
@@ -1608,6 +1714,8 @@ async function startTracking() {
   runnerNativeLastSequenceNum = -1;
   runnerNativeDisplayActive = false;
   runnerConnectionWarningEnabledAtMs = Date.now() + 15000;
+  lastMapMatchingContextSentAt = 0;
+  lastMapMatchingContextSignature = "";
   clearLegacyQueuedRunPoints();
   clearRunPathLayer();
   clearNativeRunPathLayer();
@@ -1833,11 +1941,9 @@ broadcastBtn.onclick = async () => {
   broadcastRef = db.ref(`runners/${safeName}`);
 
   const nativeStarted = await startNativeComparisonRun(broadcastRef.toString());
-  if (nativeStarted && bgWatchId != null) {
-    BackgroundGeolocation
-      .removeWatcher({ id: bgWatchId })
-      .catch(err => console.warn("Failed to remove background watcher after native start:", err));
-    bgWatchId = null;
+  if (nativeStarted && pathCoords.length > 0) {
+    const latestPoint = pathCoords[pathCoords.length - 1];
+    updateNativeMapMatchingContext([latestPoint.lon, latestPoint.lat]);
   }
   await refreshRunnerFromNativeSqlite({ includeFullPath: true });
   startRunnerNativeSnapshotPolling();

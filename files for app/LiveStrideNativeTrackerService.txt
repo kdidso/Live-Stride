@@ -47,6 +47,7 @@ public class LiveStrideNativeTrackerService extends Service {
     public static final String STATE_MAP_CONTEXT_JSON = "map_context_json";
     public static final String STATE_MAP_CONTEXT_RUN_ID = "map_context_run_id";
     public static final String STATE_MAP_CONTEXT_UPDATED_AT_MS = "map_context_updated_at_ms";
+    public static final String STATE_MATCHING_STATE = "matching_state";
 
     public static final String ACTION_START = "START_NATIVE_TEST_RUN";
     public static final String ACTION_STOP = "STOP_NATIVE_TEST_RUN";
@@ -72,6 +73,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private long lastPendingFlushKickMs = 0L;
     private long loadedMapContextUpdatedAtMs = 0L;
     private final BridgeTunnelMatcher bridgeTunnelMatcher = new BridgeTunnelMatcher();
+    private BridgeTunnelMatcher.State lastSavedMatchingState = null;
     @Override
     public void onCreate() {
         super.onCreate();
@@ -133,6 +135,7 @@ public class LiveStrideNativeTrackerService extends Service {
             previousPointTimeMs = 0L;
             loadedMapContextUpdatedAtMs = 0L;
             bridgeTunnelMatcher.reset();
+            saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             saveNativeTrackerState(true, 0L, 0L);
             
             startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
@@ -143,6 +146,7 @@ public class LiveStrideNativeTrackerService extends Service {
 
         if (ACTION_STOP.equals(intent.getAction())) {
             stopLocationUpdates();
+            saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             queueNativeFinishEvent();
             long stoppedAtMs = System.currentTimeMillis();
             long finalTimeMs = runStartTimeMs > 0L ? stoppedAtMs - runStartTimeMs : 0L;
@@ -277,6 +281,7 @@ private void uploadNativePoint(Location rawLocation) {
             pointTimeMs,
             accuracyIsGood
     );
+    saveMatchingState(matchResult.state);
 
     if (!matchResult.matched && !accuracyIsGood) {
         Log.i("LiveStrideNative", "Ignored inaccurate GPS fix: " + accuracy + " m");
@@ -432,6 +437,15 @@ private void uploadNativePoint(Location rawLocation) {
             System.out.println("LiveStride native point SQLite/upload exception: " + e.getMessage());
         }
     }).start();
+}
+
+private void saveMatchingState(BridgeTunnelMatcher.State state) {
+    if (state == lastSavedMatchingState) return;
+    lastSavedMatchingState = state;
+    getSharedPreferences(STATE_PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(STATE_MATCHING_STATE, state.name().toLowerCase(java.util.Locale.US))
+            .apply();
 }
 
 private void refreshMapMatchingContext() {

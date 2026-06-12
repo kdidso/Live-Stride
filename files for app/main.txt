@@ -2486,8 +2486,14 @@ if (trackedRunnerName) {
         "GPS signal recovering. Determining direction of travel...",
         "warn"
       );
+    } else if (matchingState === "raw_recovery") {
+      showViewerStatus(
+        "GPS signal recovering. Waiting for a reliable location...",
+        "warn"
+      );
     } else {
       hideViewerStatus("GPS signal recovering. Determining direction of travel...");
+      hideViewerStatus("GPS signal recovering. Waiting for a reliable location...");
     }
   });
 }

@@ -268,6 +268,7 @@
     let runnerSyncHadFailure = false;
     let programmaticViewerMove = false;
     let viewerWakeLock = null;
+    let bridgeTunnelMatcher = null;
 
     // -> DOM
     const startBtn = document.getElementById("startBtn");
@@ -357,6 +358,341 @@ setTimeout(() => {
       const h = Math.sin(dLat / 2) ** 2 +
         Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
       return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+    }
+
+    function collectCoordinateLines(value, lines = []) {
+      if (!Array.isArray(value) || value.length === 0) return lines;
+
+      const isCoordinate = point =>
+        Array.isArray(point) &&
+        point.length >= 2 &&
+        Number.isFinite(Number(point[0])) &&
+        Number.isFinite(Number(point[1]));
+
+      if (value.length >= 2 && value.every(isCoordinate)) {
+        lines.push(value.map(point => [Number(point[0]), Number(point[1])]));
+        return lines;
+      }
+
+      value.forEach(child => collectCoordinateLines(child, lines));
+      return lines;
+    }
+
+    function bearingDegrees(from, to) {
+      const lat1 = from[1] * Math.PI / 180;
+      const lat2 = to[1] * Math.PI / 180;
+      const deltaLon = (to[0] - from[0]) * Math.PI / 180;
+      const y = Math.sin(deltaLon) * Math.cos(lat2);
+      const x =
+        Math.cos(lat1) * Math.sin(lat2) -
+        Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLon);
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function angleDifference(a, b) {
+      const difference = Math.abs(a - b) % 360;
+      return difference > 180 ? 360 - difference : difference;
+    }
+
+    function polylineLength(points) {
+      let total = 0;
+      for (let i = 1; i < points.length; i += 1) {
+        total += haversineDistance(points[i - 1], points[i]);
+      }
+      return total;
+    }
+
+    function pointAlongPolyline(points, targetMeters) {
+      if (!points.length) return null;
+      if (targetMeters <= 0) return points[0];
+
+      let traversed = 0;
+      for (let i = 1; i < points.length; i += 1) {
+        const a = points[i - 1];
+        const b = points[i];
+        const segmentMeters = haversineDistance(a, b);
+        if (traversed + segmentMeters >= targetMeters) {
+          const fraction = segmentMeters > 0
+            ? (targetMeters - traversed) / segmentMeters
+            : 0;
+          return [
+            a[0] + (b[0] - a[0]) * fraction,
+            a[1] + (b[1] - a[1]) * fraction
+          ];
+        }
+        traversed += segmentMeters;
+      }
+      return points[points.length - 1];
+    }
+
+    function projectOntoPolyline(points, target) {
+      let best = {
+        point: points[0],
+        distanceMeters: haversineDistance(points[0], target),
+        alongMeters: 0
+      };
+      let traversed = 0;
+
+      for (let i = 1; i < points.length; i += 1) {
+        const a = points[i - 1];
+        const b = points[i];
+        const segmentMeters = haversineDistance(a, b);
+        if (segmentMeters <= 0) continue;
+
+        const refLat = ((a[1] + b[1] + target[1]) / 3) * Math.PI / 180;
+        const ax = a[0] * Math.cos(refLat);
+        const ay = a[1];
+        const bx = b[0] * Math.cos(refLat);
+        const by = b[1];
+        const tx = target[0] * Math.cos(refLat);
+        const ty = target[1];
+        const dx = bx - ax;
+        const dy = by - ay;
+        const denominator = dx * dx + dy * dy;
+        const fraction = denominator > 0
+          ? Math.max(0, Math.min(1, ((tx - ax) * dx + (ty - ay) * dy) / denominator))
+          : 0;
+        const projected = [
+          a[0] + (b[0] - a[0]) * fraction,
+          a[1] + (b[1] - a[1]) * fraction
+        ];
+        const distanceMeters = haversineDistance(projected, target);
+
+        if (distanceMeters < best.distanceMeters) {
+          best = {
+            point: projected,
+            distanceMeters,
+            alongMeters: traversed + segmentMeters * fraction
+          };
+        }
+        traversed += segmentMeters;
+      }
+
+      return best;
+    }
+
+    function createBridgeTunnelMatcher() {
+      const matcher = {
+        state: "normal",
+        lastRawPoint: null,
+        lastRawTime: 0,
+        speeds: [],
+        route: [],
+        routeLength: 0,
+        progress: 0,
+        structureExit: 0,
+        lastMatchedTime: 0,
+        recoveryFixes: 0,
+        structureType: ""
+      };
+
+      function nearbySegments(coord) {
+        if (!map?.getStyle || !map.loaded()) return [];
+
+        const availableLayers = new Set(
+          (map.getStyle().layers || []).map(layer => layer.id)
+        );
+        const pathLayers = ["Path", "Path minor"].filter(id =>
+          availableLayers.has(id)
+        );
+        if (!pathLayers.length) return [];
+
+        const center = map.project(coord);
+        const radiusPixels = 100;
+        const features = map.queryRenderedFeatures(
+          [
+            [center.x - radiusPixels, center.y - radiusPixels],
+            [center.x + radiusPixels, center.y + radiusPixels]
+          ],
+          { layers: pathLayers }
+        );
+
+        const segments = [];
+        features.forEach((feature, featureIndex) => {
+          collectCoordinateLines(feature.geometry?.coordinates).forEach((points, lineIndex) => {
+            if (points.length < 2) return;
+            segments.push({
+              id: `${feature.id ?? `rendered_${featureIndex}`}:${lineIndex}`,
+              brunnel: String(feature.properties?.brunnel || "").toLowerCase(),
+              subclass: String(feature.properties?.subclass || "").toLowerCase(),
+              points
+            });
+          });
+        });
+        return segments;
+      }
+
+      function buildRoute(structure, enterAtStart, segments) {
+        const structurePoints = enterAtStart
+          ? [...structure.points]
+          : [...structure.points].reverse();
+        const route = [...structurePoints];
+        const used = new Set([structure.id]);
+
+        for (let depth = 0; depth < 4; depth += 1) {
+          const routeEnd = route[route.length - 1];
+          const incomingBearing = bearingDegrees(route[route.length - 2], routeEnd);
+          let best = null;
+
+          segments.forEach(candidate => {
+            if (used.has(candidate.id) || candidate.points.length < 2) return;
+            const orientations = [
+              { distance: haversineDistance(routeEnd, candidate.points[0]), reverse: false },
+              {
+                distance: haversineDistance(
+                  routeEnd,
+                  candidate.points[candidate.points.length - 1]
+                ),
+                reverse: true
+              }
+            ];
+
+            orientations.forEach(option => {
+              if (option.distance > 4) return;
+              const points = option.reverse
+                ? [...candidate.points].reverse()
+                : candidate.points;
+              const heading = bearingDegrees(points[0], points[1]);
+              const score = option.distance + angleDifference(incomingBearing, heading) / 20;
+              if (!best || score < best.score) {
+                best = { candidate, points, score };
+              }
+            });
+          });
+
+          if (!best) break;
+          route.push(...best.points.slice(1));
+          used.add(best.candidate.id);
+        }
+
+        return { route, structureLength: polylineLength(structurePoints) };
+      }
+
+      function medianSpeed() {
+        if (!matcher.speeds.length) return 2.5;
+        const sorted = matcher.speeds.map(sample => sample.speed).sort((a, b) => a - b);
+        return sorted[Math.floor(sorted.length / 2)];
+      }
+
+      matcher.process = (rawCoord, accuracy, now) => {
+        const accuracyIsGood = !Number.isFinite(Number(accuracy)) || Number(accuracy) <= 10;
+
+        if (matcher.lastRawPoint && matcher.lastRawTime && accuracyIsGood) {
+          const elapsed = (now - matcher.lastRawTime) / 1000;
+          const speed = elapsed > 0
+            ? haversineDistance(matcher.lastRawPoint, rawCoord) / elapsed
+            : 0;
+          if (elapsed <= 5 && speed >= 0.5 && speed <= 8) {
+            matcher.speeds.push({ time: now, speed });
+          }
+        }
+        matcher.speeds = matcher.speeds.filter(sample => now - sample.time <= 20000);
+
+        if (matcher.state === "normal" && matcher.lastRawPoint) {
+          const segments = nearbySegments(rawCoord);
+          const structures = segments.filter(segment =>
+            segment.brunnel === "tunnel" || segment.brunnel === "bridge"
+          );
+          let candidate = null;
+
+          structures.forEach(structure => {
+            [
+              { point: structure.points[0], enterAtStart: true },
+              {
+                point: structure.points[structure.points.length - 1],
+                enterAtStart: false
+              }
+            ].forEach(endpoint => {
+              const distance = haversineDistance(rawCoord, endpoint.point);
+              if (!candidate || distance < candidate.distance) {
+                candidate = { structure, ...endpoint, distance };
+              }
+            });
+          });
+
+          if (candidate && candidate.distance <= 5) {
+            const priorDistance = haversineDistance(
+              matcher.lastRawPoint,
+              candidate.point
+            );
+            const structurePoints = candidate.enterAtStart
+              ? candidate.structure.points
+              : [...candidate.structure.points].reverse();
+            const movementBearing = bearingDegrees(matcher.lastRawPoint, rawCoord);
+            const structureBearing = bearingDegrees(structurePoints[0], structurePoints[1]);
+
+            if (
+              priorDistance > candidate.distance + 0.75 &&
+              angleDifference(movementBearing, structureBearing) <= 75
+            ) {
+              const built = buildRoute(
+                candidate.structure,
+                candidate.enterAtStart,
+                segments
+              );
+              matcher.route = built.route;
+              matcher.routeLength = polylineLength(built.route);
+              matcher.structureExit = built.structureLength;
+              matcher.progress = projectOntoPolyline(built.route, rawCoord).alongMeters;
+              matcher.lastMatchedTime = now;
+              matcher.recoveryFixes = 0;
+              matcher.structureType = candidate.structure.brunnel;
+              matcher.state = "structure";
+            }
+          }
+        }
+
+        let output = rawCoord;
+        let matched = false;
+
+        if (matcher.state !== "normal") {
+          const elapsed = Math.max(0, (now - matcher.lastMatchedTime) / 1000);
+          matcher.progress = Math.min(
+            matcher.routeLength,
+            matcher.progress + medianSpeed() * elapsed
+          );
+          matcher.lastMatchedTime = now;
+          output = pointAlongPolyline(matcher.route, matcher.progress);
+          matched = true;
+
+          if (matcher.state === "structure" && matcher.progress >= matcher.structureExit) {
+            matcher.state = "recovery";
+          }
+
+          if (matcher.state === "recovery") {
+            const routeProjection = projectOntoPolyline(matcher.route, rawCoord);
+            const recoveryCandidate =
+              accuracyIsGood &&
+              routeProjection.distanceMeters <= 12 &&
+              haversineDistance(output, rawCoord) <= 20;
+
+            matcher.recoveryFixes = recoveryCandidate
+              ? matcher.recoveryFixes + 1
+              : 0;
+
+            if (matcher.recoveryFixes >= 3) {
+              matcher.state = "normal";
+              matcher.route = [];
+              matcher.recoveryFixes = 0;
+              matcher.structureType = "";
+              output = rawCoord;
+              matched = false;
+            }
+          }
+        }
+
+        matcher.lastRawPoint = rawCoord;
+        matcher.lastRawTime = now;
+        return {
+          coord: output,
+          matched,
+          state: matcher.state,
+          structureType: matcher.structureType,
+          accuracyIsGood
+        };
+      };
+
+      return matcher;
     }
 
     function formatTime(ms) {
@@ -887,14 +1223,30 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
         return;
       }
 
+      if (isFollowing) {
+        map.setCenter(coord);
+      }
+
+      if (!bridgeTunnelMatcher) {
+        bridgeTunnelMatcher = createBridgeTunnelMatcher();
+      }
+      const matchResult = bridgeTunnelMatcher.process(coord, accuracy, now);
+      coord = matchResult.coord;
+
       const reportedAccuracy = Number(accuracy);
-      if (Number.isFinite(reportedAccuracy) && reportedAccuracy >= 10) {
+      if (
+        !matchResult.matched &&
+        Number.isFinite(reportedAccuracy) &&
+        reportedAccuracy > 10
+      ) {
         console.warn("Ignoring inaccurate GPS point:", reportedAccuracy.toFixed(2), "m");
         return;
       }
 
-      if (isFollowing) {
-        map.setCenter(coord);
+      if (matchResult.matched) {
+        console.log(
+          `Map-matched ${matchResult.structureType} point (${matchResult.state})`
+        );
       }
 
       let elevMeters = null;
@@ -1067,6 +1419,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       latestRunnerAvgPace = 0;
       latestRunnerElevFt = null;
       pointSequence = 0;
+      bridgeTunnelMatcher = createBridgeTunnelMatcher();
 
       clearRunPathLayer();
       clearNativeRunPathLayer();

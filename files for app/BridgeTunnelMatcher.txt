@@ -1,0 +1,477 @@
+package com.kdidso.livestride;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+final class BridgeTunnelMatcher {
+    static final double ENTRY_RADIUS_METERS = 5.0;
+    static final double CONNECTION_RADIUS_METERS = 4.0;
+    static final double RECOVERY_ROUTE_RADIUS_METERS = 12.0;
+    static final double RECOVERY_PREDICTION_RADIUS_METERS = 20.0;
+    static final int RECOVERY_FIX_COUNT = 3;
+    static final long CONTEXT_MAX_AGE_MS = 5 * 60 * 1000L;
+
+    enum State {
+        NORMAL,
+        STRUCTURE,
+        RECOVERY
+    }
+
+    static final class Point {
+        final double lat;
+        final double lon;
+
+        Point(double lat, double lon) {
+            this.lat = lat;
+            this.lon = lon;
+        }
+    }
+
+    static final class Segment {
+        final String id;
+        final String brunnel;
+        final String subclass;
+        final List<Point> points;
+
+        Segment(String id, String brunnel, String subclass, List<Point> points) {
+            this.id = id;
+            this.brunnel = brunnel == null ? "" : brunnel;
+            this.subclass = subclass == null ? "" : subclass;
+            this.points = points;
+        }
+
+        boolean isStructure() {
+            return "tunnel".equals(brunnel) || "bridge".equals(brunnel);
+        }
+    }
+
+    static final class Context {
+        final long updatedAtMs;
+        final List<Segment> segments;
+
+        Context(long updatedAtMs, List<Segment> segments) {
+            this.updatedAtMs = updatedAtMs;
+            this.segments = segments;
+        }
+    }
+
+    static final class Result {
+        final Point point;
+        final boolean matched;
+        final State state;
+        final String structureType;
+
+        Result(Point point, boolean matched, State state, String structureType) {
+            this.point = point;
+            this.matched = matched;
+            this.state = state;
+            this.structureType = structureType;
+        }
+    }
+
+    private static final class Projection {
+        final Point point;
+        final double distanceMeters;
+        final double alongMeters;
+
+        Projection(Point point, double distanceMeters, double alongMeters) {
+            this.point = point;
+            this.distanceMeters = distanceMeters;
+            this.alongMeters = alongMeters;
+        }
+    }
+
+    private static final class SpeedSample {
+        final long timeMs;
+        final double speedMps;
+
+        SpeedSample(long timeMs, double speedMps) {
+            this.timeMs = timeMs;
+            this.speedMps = speedMps;
+        }
+    }
+
+    private State state = State.NORMAL;
+    private Context context;
+    private Point lastRawPoint;
+    private long lastRawTimeMs;
+    private final Deque<SpeedSample> recentSpeeds = new ArrayDeque<>();
+    private List<Point> activeRoute = Collections.emptyList();
+    private double activeRouteLengthMeters;
+    private double progressMeters;
+    private long lastMatchedTimeMs;
+    private int recoveryFixes;
+    private String structureType = "";
+    private double structureExitMeters;
+
+    void reset() {
+        state = State.NORMAL;
+        context = null;
+        lastRawPoint = null;
+        lastRawTimeMs = 0L;
+        recentSpeeds.clear();
+        activeRoute = Collections.emptyList();
+        activeRouteLengthMeters = 0.0;
+        progressMeters = 0.0;
+        lastMatchedTimeMs = 0L;
+        recoveryFixes = 0;
+        structureType = "";
+        structureExitMeters = 0.0;
+    }
+
+    void setContext(Context context) {
+        this.context = context;
+    }
+
+    State getState() {
+        return state;
+    }
+
+    Result process(
+            Point rawPoint,
+            float accuracyMeters,
+            long timeMs,
+            boolean accuracyIsGood
+    ) {
+        updateRecentSpeed(rawPoint, timeMs, accuracyIsGood);
+
+        if (state == State.NORMAL) {
+            tryEnterStructure(rawPoint, timeMs);
+        }
+
+        Result result;
+        if (state == State.NORMAL) {
+            result = new Result(rawPoint, false, state, "");
+        } else {
+            advanceProgress(timeMs);
+            Point predicted = pointAlong(activeRoute, progressMeters);
+
+            if (state == State.STRUCTURE && progressMeters >= structureExitMeters) {
+                state = State.RECOVERY;
+            }
+
+            if (state == State.RECOVERY) {
+                Projection routeProjection = project(activeRoute, rawPoint);
+                double predictionDistance = distanceMeters(predicted, rawPoint);
+                boolean recoveryCandidate = accuracyIsGood
+                        && routeProjection.distanceMeters <= RECOVERY_ROUTE_RADIUS_METERS
+                        && predictionDistance <= RECOVERY_PREDICTION_RADIUS_METERS;
+
+                recoveryFixes = recoveryCandidate ? recoveryFixes + 1 : 0;
+                if (recoveryFixes >= RECOVERY_FIX_COUNT) {
+                    state = State.NORMAL;
+                    result = new Result(rawPoint, false, state, "");
+                    clearActiveRoute();
+                } else {
+                    if (recoveryCandidate && routeProjection.alongMeters > progressMeters) {
+                        progressMeters = Math.min(
+                                routeProjection.alongMeters,
+                                progressMeters + 4.0
+                        );
+                        predicted = pointAlong(activeRoute, progressMeters);
+                    }
+                    result = new Result(predicted, true, state, structureType);
+                }
+            } else {
+                result = new Result(predicted, true, state, structureType);
+            }
+        }
+
+        lastRawPoint = rawPoint;
+        lastRawTimeMs = timeMs;
+        return result;
+    }
+
+    private void tryEnterStructure(Point rawPoint, long timeMs) {
+        if (context == null
+                || timeMs - context.updatedAtMs > CONTEXT_MAX_AGE_MS
+                || lastRawPoint == null
+                || context.segments.isEmpty()) {
+            return;
+        }
+
+        Segment best = null;
+        boolean enterAtStart = true;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (Segment segment : context.segments) {
+            if (!segment.isStructure() || segment.points.size() < 2) continue;
+
+            double startDistance = distanceMeters(rawPoint, segment.points.get(0));
+            double endDistance = distanceMeters(
+                    rawPoint,
+                    segment.points.get(segment.points.size() - 1)
+            );
+
+            if (startDistance < bestDistance) {
+                best = segment;
+                enterAtStart = true;
+                bestDistance = startDistance;
+            }
+            if (endDistance < bestDistance) {
+                best = segment;
+                enterAtStart = false;
+                bestDistance = endDistance;
+            }
+        }
+
+        if (best == null || bestDistance > ENTRY_RADIUS_METERS) return;
+
+        Point entrance = enterAtStart
+                ? best.points.get(0)
+                : best.points.get(best.points.size() - 1);
+        double priorDistance = distanceMeters(lastRawPoint, entrance);
+        if (priorDistance <= bestDistance + 0.75) return;
+
+        List<Point> structurePoints = orientedPoints(best, enterAtStart);
+        double movementBearing = bearingDegrees(lastRawPoint, rawPoint);
+        double structureBearing = bearingDegrees(
+                structurePoints.get(0),
+                structurePoints.get(1)
+        );
+        if (angleDifference(movementBearing, structureBearing) > 75.0) return;
+
+        List<Point> route = buildConnectedRoute(best, enterAtStart);
+        if (route.size() < 2) return;
+
+        activeRoute = route;
+        activeRouteLengthMeters = polylineLength(route);
+        structureExitMeters = polylineLength(structurePoints);
+        progressMeters = Math.min(
+                activeRouteLengthMeters,
+                Math.max(0.0, project(activeRoute, rawPoint).alongMeters)
+        );
+        lastMatchedTimeMs = timeMs;
+        recoveryFixes = 0;
+        structureType = best.brunnel;
+        state = State.STRUCTURE;
+    }
+
+    private List<Point> buildConnectedRoute(Segment structure, boolean enterAtStart) {
+        List<Point> route = new ArrayList<>(orientedPoints(structure, enterAtStart));
+        Set<String> usedIds = new HashSet<>();
+        usedIds.add(structure.id);
+
+        for (int depth = 0; depth < 4; depth++) {
+            Point routeEnd = route.get(route.size() - 1);
+            double incomingBearing = bearingDegrees(
+                    route.get(Math.max(0, route.size() - 2)),
+                    routeEnd
+            );
+
+            Segment best = null;
+            boolean connectAtStart = true;
+            double bestScore = Double.MAX_VALUE;
+
+            for (Segment candidate : context.segments) {
+                if (candidate.points.size() < 2 || usedIds.contains(candidate.id)) continue;
+
+                Point start = candidate.points.get(0);
+                Point end = candidate.points.get(candidate.points.size() - 1);
+                double startDistance = distanceMeters(routeEnd, start);
+                double endDistance = distanceMeters(routeEnd, end);
+
+                if (startDistance <= CONNECTION_RADIUS_METERS) {
+                    double bearing = bearingDegrees(start, candidate.points.get(1));
+                    double score = startDistance + angleDifference(incomingBearing, bearing) / 20.0;
+                    if (score < bestScore) {
+                        best = candidate;
+                        connectAtStart = true;
+                        bestScore = score;
+                    }
+                }
+
+                if (endDistance <= CONNECTION_RADIUS_METERS) {
+                    double bearing = bearingDegrees(
+                            end,
+                            candidate.points.get(candidate.points.size() - 2)
+                    );
+                    double score = endDistance + angleDifference(incomingBearing, bearing) / 20.0;
+                    if (score < bestScore) {
+                        best = candidate;
+                        connectAtStart = false;
+                        bestScore = score;
+                    }
+                }
+            }
+
+            if (best == null) break;
+            List<Point> continuation = orientedPoints(best, connectAtStart);
+            for (int i = 1; i < continuation.size(); i++) {
+                route.add(continuation.get(i));
+            }
+            usedIds.add(best.id);
+        }
+
+        return route;
+    }
+
+    private void updateRecentSpeed(Point rawPoint, long timeMs, boolean accuracyIsGood) {
+        if (lastRawPoint != null && lastRawTimeMs > 0L && accuracyIsGood) {
+            double elapsedSeconds = (timeMs - lastRawTimeMs) / 1000.0;
+            if (elapsedSeconds > 0.0 && elapsedSeconds <= 5.0) {
+                double speedMps = distanceMeters(lastRawPoint, rawPoint) / elapsedSeconds;
+                if (speedMps >= 0.5 && speedMps <= 8.0) {
+                    recentSpeeds.addLast(new SpeedSample(timeMs, speedMps));
+                }
+            }
+        }
+
+        while (!recentSpeeds.isEmpty()
+                && timeMs - recentSpeeds.peekFirst().timeMs > 20_000L) {
+            recentSpeeds.removeFirst();
+        }
+    }
+
+    private void advanceProgress(long timeMs) {
+        if (lastMatchedTimeMs <= 0L) {
+            lastMatchedTimeMs = timeMs;
+            return;
+        }
+
+        double elapsedSeconds = Math.max(0.0, (timeMs - lastMatchedTimeMs) / 1000.0);
+        progressMeters = Math.min(
+                activeRouteLengthMeters,
+                progressMeters + estimatedSpeedMps() * elapsedSeconds
+        );
+        lastMatchedTimeMs = timeMs;
+    }
+
+    private double estimatedSpeedMps() {
+        if (recentSpeeds.isEmpty()) return 2.5;
+
+        List<Double> speeds = new ArrayList<>();
+        for (SpeedSample sample : recentSpeeds) {
+            speeds.add(sample.speedMps);
+        }
+        speeds.sort(Comparator.naturalOrder());
+        return speeds.get(speeds.size() / 2);
+    }
+
+    private void clearActiveRoute() {
+        activeRoute = Collections.emptyList();
+        activeRouteLengthMeters = 0.0;
+        progressMeters = 0.0;
+        lastMatchedTimeMs = 0L;
+        recoveryFixes = 0;
+        structureType = "";
+        structureExitMeters = 0.0;
+    }
+
+    private static List<Point> orientedPoints(Segment segment, boolean startToEnd) {
+        List<Point> points = new ArrayList<>(segment.points);
+        if (!startToEnd) Collections.reverse(points);
+        return points;
+    }
+
+    private static Projection project(List<Point> polyline, Point target) {
+        if (polyline.isEmpty()) {
+            return new Projection(target, Double.MAX_VALUE, 0.0);
+        }
+
+        Point bestPoint = polyline.get(0);
+        double bestDistance = distanceMeters(bestPoint, target);
+        double bestAlong = 0.0;
+        double traversed = 0.0;
+
+        for (int i = 1; i < polyline.size(); i++) {
+            Point a = polyline.get(i - 1);
+            Point b = polyline.get(i);
+            double segmentLength = distanceMeters(a, b);
+            if (segmentLength <= 0.0) continue;
+
+            double refLatRadians = Math.toRadians((a.lat + b.lat + target.lat) / 3.0);
+            double ax = Math.toRadians(a.lon) * Math.cos(refLatRadians);
+            double ay = Math.toRadians(a.lat);
+            double bx = Math.toRadians(b.lon) * Math.cos(refLatRadians);
+            double by = Math.toRadians(b.lat);
+            double tx = Math.toRadians(target.lon) * Math.cos(refLatRadians);
+            double ty = Math.toRadians(target.lat);
+            double dx = bx - ax;
+            double dy = by - ay;
+            double denominator = dx * dx + dy * dy;
+            double t = denominator == 0.0
+                    ? 0.0
+                    : ((tx - ax) * dx + (ty - ay) * dy) / denominator;
+            t = Math.max(0.0, Math.min(1.0, t));
+            Point projected = new Point(
+                    a.lat + (b.lat - a.lat) * t,
+                    a.lon + (b.lon - a.lon) * t
+            );
+            double distance = distanceMeters(projected, target);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestPoint = projected;
+                bestAlong = traversed + segmentLength * t;
+            }
+            traversed += segmentLength;
+        }
+
+        return new Projection(bestPoint, bestDistance, bestAlong);
+    }
+
+    private static Point pointAlong(List<Point> polyline, double distanceMeters) {
+        if (polyline.isEmpty()) return new Point(0.0, 0.0);
+        if (distanceMeters <= 0.0) return polyline.get(0);
+
+        double traversed = 0.0;
+        for (int i = 1; i < polyline.size(); i++) {
+            Point a = polyline.get(i - 1);
+            Point b = polyline.get(i);
+            double segmentLength = distanceMeters(a, b);
+            if (traversed + segmentLength >= distanceMeters) {
+                double fraction = segmentLength <= 0.0
+                        ? 0.0
+                        : (distanceMeters - traversed) / segmentLength;
+                return new Point(
+                        a.lat + (b.lat - a.lat) * fraction,
+                        a.lon + (b.lon - a.lon) * fraction
+                );
+            }
+            traversed += segmentLength;
+        }
+        return polyline.get(polyline.size() - 1);
+    }
+
+    private static double polylineLength(List<Point> points) {
+        double total = 0.0;
+        for (int i = 1; i < points.size(); i++) {
+            total += distanceMeters(points.get(i - 1), points.get(i));
+        }
+        return total;
+    }
+
+    static double distanceMeters(Point a, Point b) {
+        double earthRadius = 6_371_000.0;
+        double lat1 = Math.toRadians(a.lat);
+        double lat2 = Math.toRadians(b.lat);
+        double deltaLat = lat2 - lat1;
+        double deltaLon = Math.toRadians(b.lon - a.lon);
+        double sinLat = Math.sin(deltaLat / 2.0);
+        double sinLon = Math.sin(deltaLon / 2.0);
+        double h = sinLat * sinLat
+                + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+        return 2.0 * earthRadius * Math.asin(Math.min(1.0, Math.sqrt(h)));
+    }
+
+    private static double bearingDegrees(Point from, Point to) {
+        double lat1 = Math.toRadians(from.lat);
+        double lat2 = Math.toRadians(to.lat);
+        double deltaLon = Math.toRadians(to.lon - from.lon);
+        double y = Math.sin(deltaLon) * Math.cos(lat2);
+        double x = Math.cos(lat1) * Math.sin(lat2)
+                - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLon);
+        return (Math.toDegrees(Math.atan2(y, x)) + 360.0) % 360.0;
+    }
+
+    private static double angleDifference(double a, double b) {
+        double difference = Math.abs(a - b) % 360.0;
+        return difference > 180.0 ? 360.0 - difference : difference;
+    }
+}

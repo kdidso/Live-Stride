@@ -122,6 +122,7 @@ let runnerNativeDisplayActive = false;
 let runnerWakeRecoveryInFlight = false;
 let lastMapMatchingContextSentAt = 0;
 let lastMapMatchingContextSignature = "";
+let lastPublishedMatchingState = "normal";
 
 
 // -> DOM references
@@ -990,6 +991,26 @@ async function syncRunnerUiWithNativeStop() {
   return false;
 }
 
+async function syncNativeMatchingStatus() {
+  if (!LiveStrideNativeTracker || !activeRunId) return;
+
+  try {
+    const state = await LiveStrideNativeTracker.getNativeTrackerState();
+    const matchingState = state?.matchingState || "normal";
+    if (matchingState === lastPublishedMatchingState) return;
+
+    lastPublishedMatchingState = matchingState;
+    if (broadcastRef) {
+      await broadcastRef.update({
+        matching_state: matchingState,
+        matching_status_updated_at: new Date().toISOString()
+      });
+    }
+  } catch (err) {
+    console.warn("Native matching status check failed:", err);
+  }
+}
+
 function isRunnerNativeSnapshotAllowed() {
   return Boolean(
     LiveStrideNativeTracker &&
@@ -1228,6 +1249,7 @@ function startRunnerNativeSnapshotPolling() {
 
   runnerNativeSnapshotTimerId = setInterval(() => {
     refreshRunnerFromNativeSqlite({ includeFullPath: false });
+    syncNativeMatchingStatus();
   }, 2000);
 }
 
@@ -1716,6 +1738,7 @@ async function startTracking() {
   runnerConnectionWarningEnabledAtMs = Date.now() + 15000;
   lastMapMatchingContextSentAt = 0;
   lastMapMatchingContextSignature = "";
+  lastPublishedMatchingState = "normal";
   clearLegacyQueuedRunPoints();
   clearRunPathLayer();
   clearNativeRunPathLayer();
@@ -2110,7 +2133,7 @@ searchInput.oninput = async () => {
       searchInput.value = run.runner_name;
       viewerFollowing = true;
       selectedRunner = run.id;
-      trackRunnerSupabase(run.id, run.is_live);
+      trackRunnerSupabase(run.id, run.is_live, run.runner_name);
 
       suggestionsList.innerHTML = "";
       suggestionsList.style.display = "none";
@@ -2414,7 +2437,7 @@ async function startNativePathComparison(runId) {
     .subscribe();
 }
 
-async function trackRunnerSupabase(runId, isLive = false) {
+async function trackRunnerSupabase(runId, isLive = false, trackedRunnerName = null) {
   if (activeListener) {
     activeListener.off();
     activeListener = null;
@@ -2449,6 +2472,25 @@ viewerConnectionLost = false;
 nativeRouteGapActive = false;
 clearRunPathLayer();
 clearNativeRunPathLayer();
+
+if (trackedRunnerName) {
+  const safeName = trackedRunnerName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "-");
+  const matchingRef = db.ref(`runners/${safeName}`);
+  activeListener = matchingRef;
+  matchingRef.on("value", snap => {
+    const matchingState = snap.val()?.matching_state || "normal";
+    if (matchingState === "junction_hold") {
+      showViewerStatus(
+        "GPS signal recovering. Determining direction of travel...",
+        "warn"
+      );
+    } else {
+      hideViewerStatus("GPS signal recovering. Determining direction of travel...");
+    }
+  });
+}
 
   const { data, error } = await supabaseClient
     .from("run_points")

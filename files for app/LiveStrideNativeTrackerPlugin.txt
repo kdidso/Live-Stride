@@ -156,6 +156,10 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         result.put("running", prefs.getBoolean(LiveStrideNativeTrackerService.STATE_RUNNING, false));
         result.put("stoppedAtMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_STOPPED_AT_MS, 0L));
         result.put("finalTimeMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_FINAL_TIME_MS, 0L));
+        result.put(
+                "matchingState",
+                prefs.getString(LiveStrideNativeTrackerService.STATE_MATCHING_STATE, "normal")
+        );
         call.resolve(result);
     }
 

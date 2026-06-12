@@ -190,4 +190,39 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
             }
         }).start();
     }
+
+    @PluginMethod
+    public void updateMapMatchingContext(PluginCall call) {
+        String runId = call.getString("runId");
+        String contextJson = call.getString("contextJson");
+
+        if (runId == null || runId.trim().isEmpty()) {
+            call.reject("Missing runId.");
+            return;
+        }
+        if (contextJson == null || contextJson.trim().isEmpty()) {
+            call.reject("Missing map matching context.");
+            return;
+        }
+
+        long updatedAtMs = System.currentTimeMillis();
+        getContext()
+                .getSharedPreferences(
+                        LiveStrideNativeTrackerService.STATE_PREFS_NAME,
+                        android.content.Context.MODE_PRIVATE
+                )
+                .edit()
+                .putString(LiveStrideNativeTrackerService.STATE_MAP_CONTEXT_RUN_ID, runId)
+                .putString(LiveStrideNativeTrackerService.STATE_MAP_CONTEXT_JSON, contextJson)
+                .putLong(
+                        LiveStrideNativeTrackerService.STATE_MAP_CONTEXT_UPDATED_AT_MS,
+                        updatedAtMs
+                )
+                .apply();
+
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        result.put("updatedAtMs", updatedAtMs);
+        call.resolve(result);
+    }
 }

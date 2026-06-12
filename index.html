@@ -488,8 +488,6 @@ setTimeout(() => {
         lastMatchedTime: 0,
         holdStartedAt: 0,
         heldDistance: 0,
-        minimumMatchedUntil: 0,
-        recoveryFixes: 0,
         structureType: "",
         structureId: ""
       };
@@ -623,7 +621,7 @@ setTimeout(() => {
         if (matcher.observations.length < 2) return null;
         const first = matcher.observations[0];
         const last = matcher.observations[matcher.observations.length - 1];
-        if (last.time - first.time < 5000) return null;
+        if (last.time - first.time < 2000) return null;
         if (haversineDistance(first.point, last.point) < 3) return null;
 
         const observedBearing = bearingDegrees(first.point, last.point);
@@ -644,7 +642,6 @@ setTimeout(() => {
         matcher.routeLength = polylineLength(matcher.route);
         matcher.progress = Math.min(matcher.routeLength, initialDistance);
         matcher.lastMatchedTime = now;
-        matcher.recoveryFixes = 0;
         matcher.state = "recovery";
         matcher.branches = [];
         matcher.observations = [];
@@ -662,8 +659,6 @@ setTimeout(() => {
         matcher.progress = 0;
         matcher.holdStartedAt = 0;
         matcher.heldDistance = 0;
-        matcher.minimumMatchedUntil = 0;
-        matcher.recoveryFixes = 0;
         matcher.structureType = "";
         matcher.structureId = "";
       }
@@ -731,7 +726,6 @@ setTimeout(() => {
               matcher.routeLength = polylineLength(matcher.route);
               matcher.progress = projectOntoPolyline(matcher.route, rawCoord).alongMeters;
               matcher.lastMatchedTime = now;
-              matcher.recoveryFixes = 0;
               matcher.structureType = candidate.structure.brunnel;
               matcher.structureId = candidate.structure.id;
               matcher.state = "structure";
@@ -750,26 +744,25 @@ setTimeout(() => {
           output = matcher.structureRoute[matcher.structureRoute.length - 1];
           matched = true;
 
-          if (now - matcher.holdStartedAt >= 5000) {
+          if (accuracyIsGood) {
+            clearMatch();
+            output = rawCoord;
+            matched = false;
+          } else {
             const branch = chooseObservedBranch();
             if (branch) {
-              if (accuracyIsGood && Number(accuracy) <= 8) {
-                clearMatch();
-                output = rawCoord;
-                matched = false;
-              } else {
-                selectBranch(branch, matcher.heldDistance, now);
-                if (accuracyIsGood && Number(accuracy) > 8) {
-                  matcher.minimumMatchedUntil = now + 5000;
-                }
-                output = pointAlongPolyline(matcher.route, matcher.progress);
-              }
-            } else {
-              matcher.observations = matcher.observations.filter(
-                observation => now - observation.time <= 10000
-              );
+              selectBranch(branch, matcher.heldDistance, now);
+              output = pointAlongPolyline(matcher.route, matcher.progress);
+            } else if (now - matcher.holdStartedAt >= 5000) {
+              matcher.state = "raw_recovery";
+              output = rawCoord;
+              matched = false;
             }
           }
+        } else if (matcher.state === "raw_recovery") {
+          output = rawCoord;
+          matched = false;
+          if (accuracyIsGood) clearMatch();
         } else if (matcher.state !== "normal") {
           const elapsed = Math.max(0, (now - matcher.lastMatchedTime) / 1000);
           matcher.progress = Math.min(
@@ -800,19 +793,7 @@ setTimeout(() => {
           }
 
           if (matcher.state === "recovery") {
-            const routeProjection = projectOntoPolyline(matcher.route, rawCoord);
-            const recoveryCandidate =
-              accuracyIsGood &&
-              routeProjection.distanceMeters <= 12 &&
-              haversineDistance(output, rawCoord) <= 20;
-
-            matcher.recoveryFixes = now < matcher.minimumMatchedUntil
-              ? 0
-              : recoveryCandidate
-                ? matcher.recoveryFixes + 1
-                : 0;
-
-            if (matcher.recoveryFixes >= 3) {
+            if (accuracyIsGood) {
               clearMatch();
               output = rawCoord;
               matched = false;

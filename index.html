@@ -269,6 +269,7 @@
     let programmaticViewerMove = false;
     let viewerWakeLock = null;
     let bridgeTunnelMatcher = null;
+    let lastPublishedMatchingState = "normal";
 
     // -> DOM
     const startBtn = document.getElementById("startBtn");
@@ -478,12 +479,19 @@ setTimeout(() => {
         lastRawTime: 0,
         speeds: [],
         route: [],
+        structureRoute: [],
+        segments: [],
+        branches: [],
+        observations: [],
         routeLength: 0,
         progress: 0,
-        structureExit: 0,
         lastMatchedTime: 0,
+        holdStartedAt: 0,
+        heldDistance: 0,
+        minimumMatchedUntil: 0,
         recoveryFixes: 0,
-        structureType: ""
+        structureType: "",
+        structureId: ""
       };
 
       function nearbySegments(coord) {
@@ -522,40 +530,84 @@ setTimeout(() => {
         return segments;
       }
 
-      function buildRoute(structure, enterAtStart, segments) {
-        const structurePoints = enterAtStart
-          ? [...structure.points]
-          : [...structure.points].reverse();
-        const route = [...structurePoints];
-        const used = new Set([structure.id]);
+      function findBranches(junction) {
+        const branches = [];
+        matcher.segments.forEach(segment => {
+          if (
+            segment.id === matcher.structureId ||
+            segment.brunnel === "tunnel" ||
+            segment.brunnel === "bridge" ||
+            segment.points.length < 2
+          ) {
+            return;
+          }
 
-        for (let depth = 0; depth < 4; depth += 1) {
+          [
+            {
+              distance: haversineDistance(junction, segment.points[0]),
+              points: segment.points
+            },
+            {
+              distance: haversineDistance(
+                junction,
+                segment.points[segment.points.length - 1]
+              ),
+              points: [...segment.points].reverse()
+            }
+          ].forEach(option => {
+            if (option.distance <= 4) {
+              branches.push({
+                segment,
+                points: option.points,
+                heading: bearingDegrees(option.points[0], option.points[1])
+              });
+            }
+          });
+        });
+        return branches;
+      }
+
+      function buildBranchRoute(initialBranch) {
+        const route = [...initialBranch.points];
+        const used = new Set([matcher.structureId, initialBranch.segment.id]);
+
+        for (let depth = 0; depth < 3; depth += 1) {
           const routeEnd = route[route.length - 1];
           const incomingBearing = bearingDegrees(route[route.length - 2], routeEnd);
           let best = null;
 
-          segments.forEach(candidate => {
-            if (used.has(candidate.id) || candidate.points.length < 2) return;
-            const orientations = [
-              { distance: haversineDistance(routeEnd, candidate.points[0]), reverse: false },
+          matcher.segments.forEach(candidate => {
+            if (
+              used.has(candidate.id) ||
+              candidate.brunnel === "tunnel" ||
+              candidate.brunnel === "bridge" ||
+              candidate.points.length < 2
+            ) {
+              return;
+            }
+
+            [
+              {
+                distance: haversineDistance(routeEnd, candidate.points[0]),
+                points: candidate.points
+              },
               {
                 distance: haversineDistance(
                   routeEnd,
                   candidate.points[candidate.points.length - 1]
                 ),
-                reverse: true
+                points: [...candidate.points].reverse()
               }
-            ];
-
-            orientations.forEach(option => {
+            ].forEach(option => {
               if (option.distance > 4) return;
-              const points = option.reverse
-                ? [...candidate.points].reverse()
-                : candidate.points;
-              const heading = bearingDegrees(points[0], points[1]);
-              const score = option.distance + angleDifference(incomingBearing, heading) / 20;
+              const score =
+                option.distance +
+                angleDifference(
+                  incomingBearing,
+                  bearingDegrees(option.points[0], option.points[1])
+                ) / 20;
               if (!best || score < best.score) {
-                best = { candidate, points, score };
+                best = { candidate, points: option.points, score };
               }
             });
           });
@@ -564,8 +616,56 @@ setTimeout(() => {
           route.push(...best.points.slice(1));
           used.add(best.candidate.id);
         }
+        return route;
+      }
 
-        return { route, structureLength: polylineLength(structurePoints) };
+      function chooseObservedBranch() {
+        if (matcher.observations.length < 2) return null;
+        const first = matcher.observations[0];
+        const last = matcher.observations[matcher.observations.length - 1];
+        if (last.time - first.time < 5000) return null;
+        if (haversineDistance(first.point, last.point) < 3) return null;
+
+        const observedBearing = bearingDegrees(first.point, last.point);
+        const ranked = matcher.branches
+          .map(branch => ({
+            branch,
+            error: angleDifference(observedBearing, branch.heading)
+          }))
+          .sort((a, b) => a.error - b.error);
+
+        if (!ranked.length || ranked[0].error > 65) return null;
+        if (ranked.length > 1 && ranked[1].error - ranked[0].error < 25) return null;
+        return ranked[0].branch;
+      }
+
+      function selectBranch(branch, initialDistance, now) {
+        matcher.route = buildBranchRoute(branch);
+        matcher.routeLength = polylineLength(matcher.route);
+        matcher.progress = Math.min(matcher.routeLength, initialDistance);
+        matcher.lastMatchedTime = now;
+        matcher.recoveryFixes = 0;
+        matcher.state = "recovery";
+        matcher.branches = [];
+        matcher.observations = [];
+        matcher.heldDistance = 0;
+      }
+
+      function clearMatch() {
+        matcher.state = "normal";
+        matcher.route = [];
+        matcher.structureRoute = [];
+        matcher.segments = [];
+        matcher.branches = [];
+        matcher.observations = [];
+        matcher.routeLength = 0;
+        matcher.progress = 0;
+        matcher.holdStartedAt = 0;
+        matcher.heldDistance = 0;
+        matcher.minimumMatchedUntil = 0;
+        matcher.recoveryFixes = 0;
+        matcher.structureType = "";
+        matcher.structureId = "";
       }
 
       function medianSpeed() {
@@ -625,18 +725,15 @@ setTimeout(() => {
               priorDistance > candidate.distance + 0.75 &&
               angleDifference(movementBearing, structureBearing) <= 75
             ) {
-              const built = buildRoute(
-                candidate.structure,
-                candidate.enterAtStart,
-                segments
-              );
-              matcher.route = built.route;
-              matcher.routeLength = polylineLength(built.route);
-              matcher.structureExit = built.structureLength;
-              matcher.progress = projectOntoPolyline(built.route, rawCoord).alongMeters;
+              matcher.segments = segments;
+              matcher.structureRoute = [...structurePoints];
+              matcher.route = [...structurePoints];
+              matcher.routeLength = polylineLength(matcher.route);
+              matcher.progress = projectOntoPolyline(matcher.route, rawCoord).alongMeters;
               matcher.lastMatchedTime = now;
               matcher.recoveryFixes = 0;
               matcher.structureType = candidate.structure.brunnel;
+              matcher.structureId = candidate.structure.id;
               matcher.state = "structure";
             }
           }
@@ -645,7 +742,35 @@ setTimeout(() => {
         let output = rawCoord;
         let matched = false;
 
-        if (matcher.state !== "normal") {
+        if (matcher.state === "junction_hold") {
+          const elapsed = Math.max(0, (now - matcher.lastMatchedTime) / 1000);
+          matcher.heldDistance += medianSpeed() * elapsed;
+          matcher.lastMatchedTime = now;
+          matcher.observations.push({ point: rawCoord, time: now });
+          output = matcher.structureRoute[matcher.structureRoute.length - 1];
+          matched = true;
+
+          if (now - matcher.holdStartedAt >= 5000) {
+            const branch = chooseObservedBranch();
+            if (branch) {
+              if (accuracyIsGood && Number(accuracy) <= 8) {
+                clearMatch();
+                output = rawCoord;
+                matched = false;
+              } else {
+                selectBranch(branch, matcher.heldDistance, now);
+                if (accuracyIsGood && Number(accuracy) > 8) {
+                  matcher.minimumMatchedUntil = now + 5000;
+                }
+                output = pointAlongPolyline(matcher.route, matcher.progress);
+              }
+            } else {
+              matcher.observations = matcher.observations.filter(
+                observation => now - observation.time <= 10000
+              );
+            }
+          }
+        } else if (matcher.state !== "normal") {
           const elapsed = Math.max(0, (now - matcher.lastMatchedTime) / 1000);
           matcher.progress = Math.min(
             matcher.routeLength,
@@ -655,8 +780,23 @@ setTimeout(() => {
           output = pointAlongPolyline(matcher.route, matcher.progress);
           matched = true;
 
-          if (matcher.state === "structure" && matcher.progress >= matcher.structureExit) {
-            matcher.state = "recovery";
+          if (matcher.state === "structure" && matcher.progress >= matcher.routeLength) {
+            const junction = matcher.structureRoute[matcher.structureRoute.length - 1];
+            matcher.branches = findBranches(junction);
+
+            if (matcher.branches.length === 1) {
+              selectBranch(matcher.branches[0], 0, now);
+              output = pointAlongPolyline(matcher.route, matcher.progress);
+            } else if (matcher.branches.length > 1) {
+              matcher.state = "junction_hold";
+              matcher.holdStartedAt = now;
+              matcher.lastMatchedTime = now;
+              matcher.heldDistance = 0;
+              matcher.observations = [{ point: rawCoord, time: now }];
+              output = junction;
+            } else {
+              matcher.state = "recovery";
+            }
           }
 
           if (matcher.state === "recovery") {
@@ -666,15 +806,14 @@ setTimeout(() => {
               routeProjection.distanceMeters <= 12 &&
               haversineDistance(output, rawCoord) <= 20;
 
-            matcher.recoveryFixes = recoveryCandidate
-              ? matcher.recoveryFixes + 1
-              : 0;
+            matcher.recoveryFixes = now < matcher.minimumMatchedUntil
+              ? 0
+              : recoveryCandidate
+                ? matcher.recoveryFixes + 1
+                : 0;
 
             if (matcher.recoveryFixes >= 3) {
-              matcher.state = "normal";
-              matcher.route = [];
-              matcher.recoveryFixes = 0;
-              matcher.structureType = "";
+              clearMatch();
               output = rawCoord;
               matched = false;
             }
@@ -1233,6 +1372,18 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
       const matchResult = bridgeTunnelMatcher.process(coord, accuracy, now);
       coord = matchResult.coord;
 
+      if (matchResult.state !== lastPublishedMatchingState) {
+        lastPublishedMatchingState = matchResult.state;
+        if (broadcastRef) {
+          broadcastRef.update({
+            matching_state: matchResult.state,
+            matching_status_updated_at: new Date().toISOString()
+          }).catch(err => {
+            console.warn("Matching status update failed:", err);
+          });
+        }
+      }
+
       const reportedAccuracy = Number(accuracy);
       if (
         !matchResult.matched &&
@@ -1420,6 +1571,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       latestRunnerElevFt = null;
       pointSequence = 0;
       bridgeTunnelMatcher = createBridgeTunnelMatcher();
+      lastPublishedMatchingState = "normal";
 
       clearRunPathLayer();
       clearNativeRunPathLayer();
@@ -1670,7 +1822,7 @@ li.onclick = () => {
   selectedRunner = run.id;
   updateViewerWakeLock();
 
-  trackRunnerSupabase(run.id, run.is_live);
+  trackRunnerSupabase(run.id, run.is_live, run.runner_name);
 
   suggestionsList.innerHTML = "";
   suggestionsList.style.display = "none";
@@ -1966,7 +2118,7 @@ function updateViewerFromNativePoint(pt) {
   }
 } 
     
-    async function trackRunnerSupabase(runId, isLive = false) {
+    async function trackRunnerSupabase(runId, isLive = false, trackedRunnerName = null) {
   if (activeListener) {
     activeListener.off();
     activeListener = null;
@@ -2001,6 +2153,25 @@ viewerConnectionLost = false;
 nativeRouteGapActive = false;
 clearRunPathLayer();
 clearNativeRunPathLayer();
+
+if (trackedRunnerName) {
+  const safeName = trackedRunnerName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "-");
+  const matchingRef = db.ref(`runners/${safeName}`);
+  activeListener = matchingRef;
+  matchingRef.on("value", snap => {
+    const matchingState = snap.val()?.matching_state || "normal";
+    if (matchingState === "junction_hold") {
+      showViewerStatus(
+        "GPS signal recovering. Determining direction of travel...",
+        "warn"
+      );
+    } else {
+      hideViewerStatus("GPS signal recovering. Determining direction of travel...");
+    }
+  });
+}
 
   const { data, error } = await supabaseClient
     .from("run_points")

@@ -1,0 +1,188 @@
+package com.kdidso.livestride;
+
+import android.content.Context;
+import android.util.Log;
+
+import org.json.JSONObject;
+
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.File;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
+
+final class LiveStrideMapContextProvider {
+    private static final String TAG = "LiveStrideMapContext";
+    private static final int PREFETCH_RADIUS_METERS = 1_000;
+    private static final long SUCCESS_REFRESH_MS = 5 * 60 * 1_000L;
+    private static final long FAILURE_RETRY_MS = 60_000L;
+
+    private final File cacheDirectory;
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final AtomicReference<BridgeTunnelMatcher.Context> pendingContext =
+            new AtomicReference<>();
+    private final Object lock = new Object();
+
+    private String desiredTileKey;
+    private double desiredLatitude;
+    private double desiredLongitude;
+    private String lastHandledTileKey;
+    private long lastAttemptAtMs;
+    private boolean lastAttemptSucceeded;
+    private boolean workerRunning;
+
+    LiveStrideMapContextProvider(Context context) {
+        cacheDirectory = new File(context.getFilesDir(), "map_context_cache");
+    }
+
+    void requestForLocation(double latitude, double longitude) {
+        String tileKey = LiveStrideMapContext.tileKey(
+                latitude,
+                longitude,
+                PREFETCH_RADIUS_METERS
+        );
+        long now = System.currentTimeMillis();
+
+        synchronized (lock) {
+            desiredTileKey = tileKey;
+            desiredLatitude = latitude;
+            desiredLongitude = longitude;
+
+            long refreshInterval = lastAttemptSucceeded
+                    ? SUCCESS_REFRESH_MS
+                    : FAILURE_RETRY_MS;
+            boolean tileChanged = !tileKey.equals(lastHandledTileKey);
+            if (!tileChanged && now - lastAttemptAtMs < refreshInterval) return;
+            if (workerRunning) return;
+
+            workerRunning = true;
+            executor.execute(this::runRequests);
+        }
+    }
+
+    BridgeTunnelMatcher.Context consumePendingContext() {
+        return pendingContext.getAndSet(null);
+    }
+
+    void shutdown() {
+        executor.shutdownNow();
+    }
+
+    private void runRequests() {
+        while (!Thread.currentThread().isInterrupted()) {
+            String tileKey;
+            double latitude;
+            double longitude;
+            synchronized (lock) {
+                tileKey = desiredTileKey;
+                latitude = desiredLatitude;
+                longitude = desiredLongitude;
+                lastHandledTileKey = tileKey;
+                lastAttemptAtMs = System.currentTimeMillis();
+            }
+
+            publishCachedContext(tileKey);
+            boolean succeeded = fetchAndCache(tileKey, latitude, longitude);
+
+            synchronized (lock) {
+                lastAttemptSucceeded = succeeded;
+                if (tileKey.equals(desiredTileKey)) {
+                    workerRunning = false;
+                    return;
+                }
+            }
+        }
+
+        synchronized (lock) {
+            workerRunning = false;
+        }
+    }
+
+    private void publishCachedContext(String tileKey) {
+        File cacheFile = cacheFile(tileKey);
+        if (!cacheFile.isFile()) return;
+
+        try {
+            byte[] bytes = new byte[(int) cacheFile.length()];
+            try (InputStream input = new FileInputStream(cacheFile)) {
+                int offset = 0;
+                while (offset < bytes.length) {
+                    int read = input.read(bytes, offset, bytes.length - offset);
+                    if (read < 0) break;
+                    offset += read;
+                }
+                if (offset != bytes.length) {
+                    throw new IllegalStateException("Map-context cache read was incomplete.");
+                }
+            }
+            String json = new String(bytes, StandardCharsets.UTF_8);
+            pendingContext.set(
+                    LiveStrideMapContext.parse(
+                            new JSONObject(json),
+                            cacheFile.lastModified()
+                    )
+            );
+            Log.i(TAG, "Loaded cached map context tile " + tileKey);
+        } catch (Exception error) {
+            Log.w(TAG, "Could not read cached map context: " + message(error));
+        }
+    }
+
+    private boolean fetchAndCache(
+            String tileKey,
+            double latitude,
+            double longitude
+    ) {
+        try {
+            JSONObject response = LiveStrideServerClient.fetchMapContext(
+                    latitude,
+                    longitude,
+                    PREFETCH_RADIUS_METERS
+            );
+            if (response == null) return false;
+
+            long updatedAtMs = System.currentTimeMillis();
+            BridgeTunnelMatcher.Context context =
+                    LiveStrideMapContext.parse(response, updatedAtMs);
+            pendingContext.set(context);
+            writeCache(tileKey, response.toString());
+            Log.i(
+                    TAG,
+                    "Fetched map context tile " + tileKey
+                            + " with " + context.segments.size() + " segments"
+            );
+            return true;
+        } catch (Exception error) {
+            Log.w(TAG, "Map-context fetch failed: " + message(error));
+            return false;
+        }
+    }
+
+    private void writeCache(String tileKey, String json) {
+        try {
+            if (!cacheDirectory.exists() && !cacheDirectory.mkdirs()) {
+                Log.w(TAG, "Could not create map-context cache directory");
+                return;
+            }
+            try (OutputStream output = new FileOutputStream(cacheFile(tileKey))) {
+                output.write(json.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Could not cache map context: " + message(error));
+        }
+    }
+
+    private File cacheFile(String tileKey) {
+        return new File(cacheDirectory, tileKey + ".json");
+    }
+
+    private static String message(Exception error) {
+        return error.getMessage() == null
+                ? error.getClass().getSimpleName()
+                : error.getMessage();
+    }
+}

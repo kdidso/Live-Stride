@@ -29,8 +29,6 @@ import com.google.android.gms.location.Priority;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -70,8 +68,10 @@ public class LiveStrideNativeTrackerService extends Service {
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
     private LiveStridePointStore pointStore;
+    private LiveStrideMapContextProvider mapContextProvider;
     private long lastPendingFlushKickMs = 0L;
     private long loadedMapContextUpdatedAtMs = 0L;
+    private boolean serverMapContextActive = false;
     private final BridgeTunnelMatcher bridgeTunnelMatcher = new BridgeTunnelMatcher();
     private BridgeTunnelMatcher.State lastSavedMatchingState = null;
     @Override
@@ -79,6 +79,7 @@ public class LiveStrideNativeTrackerService extends Service {
         super.onCreate();
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
         pointStore = new LiveStridePointStore(this);
+        mapContextProvider = new LiveStrideMapContextProvider(this);
         createNotificationChannel();
     }
 
@@ -134,6 +135,7 @@ public class LiveStrideNativeTrackerService extends Service {
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
             loadedMapContextUpdatedAtMs = 0L;
+            serverMapContextActive = false;
             bridgeTunnelMatcher.reset();
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             saveNativeTrackerState(true, 0L, 0L);
@@ -215,54 +217,6 @@ public class LiveStrideNativeTrackerService extends Service {
         isTracking = false;
     }
 
-private Double fetchElevationMeters(double lat, double lon) {
-    HttpURLConnection conn = null;
-
-    try {
-        String endpoint = "https://elevation.livestride.run/api/v1/lookup?locations="
-                + lat + "," + lon;
-
-        URL url = new URL(endpoint);
-        conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("GET");
-        conn.setConnectTimeout(5000);
-        conn.setReadTimeout(5000);
-
-        int code = conn.getResponseCode();
-
-        if (code < 200 || code >= 300) {
-            System.out.println("LiveStride native elevation fetch failed. HTTP " + code);
-            return null;
-        }
-
-        java.io.InputStream is = conn.getInputStream();
-        java.util.Scanner scanner = new java.util.Scanner(is, "UTF-8").useDelimiter("\\A");
-        String response = scanner.hasNext() ? scanner.next() : "";
-        scanner.close();
-
-        JSONObject json = new JSONObject(response);
-
-        if (!json.has("results")) return null;
-
-        org.json.JSONArray results = json.getJSONArray("results");
-        if (results.length() == 0) return null;
-
-        JSONObject first = results.getJSONObject(0);
-
-        if (!first.has("elevation") || first.isNull("elevation")) {
-            return null;
-        }
-
-        return first.getDouble("elevation");
-
-    } catch (Exception e) {
-        System.out.println("LiveStride native elevation exception: " + e.getMessage());
-        return null;
-    } finally {
-        if (conn != null) conn.disconnect();
-    }
-}
-
 private void uploadNativePoint(Location rawLocation) {
     final float accuracy = rawLocation.hasAccuracy() ? rawLocation.getAccuracy() : -1f;
     final long pointTimeMs = rawLocation.getTime() > 0
@@ -271,7 +225,24 @@ private void uploadNativePoint(Location rawLocation) {
     final boolean accuracyIsGood = accuracy < 0
             || accuracy <= MAX_ACCEPTED_ACCURACY_METERS;
 
-    refreshMapMatchingContext();
+    if (!serverMapContextActive) {
+        refreshMapMatchingContext();
+    }
+    mapContextProvider.requestForLocation(
+            rawLocation.getLatitude(),
+            rawLocation.getLongitude()
+    );
+    BridgeTunnelMatcher.Context serverContext =
+            mapContextProvider.consumePendingContext();
+    if (serverContext != null) {
+        bridgeTunnelMatcher.setContext(serverContext);
+        serverMapContextActive = true;
+        Log.i(
+                "LiveStrideNative",
+                "Activated server map context with "
+                        + serverContext.segments.size() + " segments"
+        );
+    }
     BridgeTunnelMatcher.Result matchResult = bridgeTunnelMatcher.process(
             new BridgeTunnelMatcher.Point(
                     rawLocation.getLatitude(),
@@ -375,7 +346,8 @@ private void uploadNativePoint(Location rawLocation) {
 
     new Thread(() -> {
         try {
-            Double elevationMeters = fetchElevationMeters(lat, lon);
+            Double elevationMeters =
+                    LiveStrideServerClient.fetchElevationMeters(lat, lon);
             JSONObject body = new JSONObject();
 
             if (runId != null && !runId.trim().isEmpty()) {
@@ -624,6 +596,15 @@ private void kickPendingFlushIfNeeded() {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    @Override
+    public void onDestroy() {
+        stopLocationUpdates();
+        if (mapContextProvider != null) {
+            mapContextProvider.shutdown();
+        }
+        super.onDestroy();
     }
 
     private static String isoNow() {

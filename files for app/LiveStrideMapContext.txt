@@ -1,0 +1,72 @@
+package com.kdidso.livestride;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+final class LiveStrideMapContext {
+    private static final double TILE_SIZE_DEGREES = 0.005;
+
+    private LiveStrideMapContext() {
+    }
+
+    static BridgeTunnelMatcher.Context parse(JSONObject root, long updatedAtMs) {
+        JSONArray jsonSegments = root.optJSONArray("segments");
+        Map<String, BridgeTunnelMatcher.Segment> segmentsById = new LinkedHashMap<>();
+        if (jsonSegments == null) {
+            return new BridgeTunnelMatcher.Context(updatedAtMs, new ArrayList<>());
+        }
+
+        for (int i = 0; i < jsonSegments.length(); i++) {
+            JSONObject jsonSegment = jsonSegments.optJSONObject(i);
+            if (jsonSegment == null) continue;
+
+            JSONArray jsonPoints = jsonSegment.optJSONArray("points");
+            if (jsonPoints == null || jsonPoints.length() < 2) continue;
+
+            List<BridgeTunnelMatcher.Point> points = new ArrayList<>();
+            for (int j = 0; j < jsonPoints.length(); j++) {
+                JSONArray coordinate = jsonPoints.optJSONArray(j);
+                if (coordinate == null || coordinate.length() < 2) continue;
+
+                double longitude = coordinate.optDouble(0, Double.NaN);
+                double latitude = coordinate.optDouble(1, Double.NaN);
+                if (Double.isNaN(latitude)
+                        || Double.isInfinite(latitude)
+                        || Double.isNaN(longitude)
+                        || Double.isInfinite(longitude)) {
+                    continue;
+                }
+                points.add(new BridgeTunnelMatcher.Point(latitude, longitude));
+            }
+            if (points.size() < 2) continue;
+
+            String id = jsonSegment.optString("id", "segment_" + i);
+            String brunnel = jsonSegment.isNull("brunnel")
+                    ? ""
+                    : jsonSegment.optString("brunnel", "");
+            String subclass = jsonSegment.isNull("subclass")
+                    ? ""
+                    : jsonSegment.optString("subclass", "");
+            segmentsById.put(
+                    id,
+                    new BridgeTunnelMatcher.Segment(id, brunnel, subclass, points)
+            );
+        }
+
+        return new BridgeTunnelMatcher.Context(
+                updatedAtMs,
+                new ArrayList<>(segmentsById.values())
+        );
+    }
+
+    static String tileKey(double latitude, double longitude, int radiusMeters) {
+        long latitudeTile = (long) Math.floor(latitude / TILE_SIZE_DEGREES);
+        long longitudeTile = (long) Math.floor(longitude / TILE_SIZE_DEGREES);
+        return latitudeTile + "_" + longitudeTile + "_" + radiusMeters;
+    }
+}

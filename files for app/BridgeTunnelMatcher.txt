@@ -12,7 +12,6 @@ import java.util.Set;
 final class BridgeTunnelMatcher {
     static final double ENTRY_RADIUS_METERS = 5.0;
     static final double CONNECTION_RADIUS_METERS = 4.0;
-    static final long CONTEXT_MAX_AGE_MS = 5 * 60 * 1000L;
     static final long JUNCTION_HOLD_MS = 5_000L;
     static final long DIRECTION_MIN_OBSERVATION_MS = 2_000L;
     static final double DIRECTION_MIN_MOVEMENT_METERS = 3.0;
@@ -303,7 +302,6 @@ final class BridgeTunnelMatcher {
 
     private void tryEnterStructure(Point rawPoint, long timeMs) {
         if (context == null
-                || timeMs - context.updatedAtMs > CONTEXT_MAX_AGE_MS
                 || lastRawPoint == null
                 || context.segments.isEmpty()) {
             return;

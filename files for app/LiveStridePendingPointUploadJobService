@@ -439,58 +439,7 @@ public class LiveStridePendingPointUploadJobService extends JobService {
     }
 
     private static Double fetchElevationMeters(double lat, double lon) {
-        HttpURLConnection conn = null;
-
-        try {
-            String endpoint = "https://elevation.livestride.run/api/v1/lookup?locations="
-                    + lat + "," + lon;
-
-            URL url = new URL(endpoint);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(5_000);
-            conn.setReadTimeout(5_000);
-
-            int code = conn.getResponseCode();
-
-            if (code < 200 || code >= 300) {
-                Log.w(TAG, "Elevation fetch failed. HTTP " + code);
-                return null;
-            }
-
-            java.io.InputStream is = conn.getInputStream();
-            java.util.Scanner scanner = new java.util.Scanner(is, "UTF-8").useDelimiter("\\A");
-            String response = scanner.hasNext() ? scanner.next() : "";
-            scanner.close();
-
-            JSONObject json = new JSONObject(response);
-
-            if (!json.has("results")) {
-                return null;
-            }
-
-            org.json.JSONArray results = json.getJSONArray("results");
-            if (results.length() == 0) {
-                return null;
-            }
-
-            JSONObject first = results.getJSONObject(0);
-
-            if (!first.has("elevation") || first.isNull("elevation")) {
-                return null;
-            }
-
-            return first.getDouble("elevation");
-
-        } catch (Exception e) {
-            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            Log.w(TAG, "Elevation fetch exception: " + message);
-            return null;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
-        }
+        return LiveStrideServerClient.fetchElevationMeters(lat, lon);
     }
 
     private static String isoNow() {

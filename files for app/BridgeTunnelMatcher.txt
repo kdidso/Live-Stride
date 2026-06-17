@@ -10,9 +10,12 @@ import java.util.List;
 import java.util.Set;
 
 final class BridgeTunnelMatcher {
-    static final double ENTRY_RADIUS_METERS = 5.0;
+    static final double ENTRY_RADIUS_METERS = 7.0;
     static final double CONNECTION_RADIUS_METERS = 4.0;
+    static final double STRONG_RAW_HANDOFF_ACCURACY_METERS = 5.0;
+    static final double RELAXED_RAW_HANDOFF_ACCURACY_METERS = 10.0;
     static final long JUNCTION_HOLD_MS = 5_000L;
+    static final long NO_EXIT_RELAXED_HANDOFF_MS = 10_000L;
     static final long DIRECTION_MIN_OBSERVATION_MS = 2_000L;
     static final double DIRECTION_MIN_MOVEMENT_METERS = 3.0;
     static final double DIRECTION_MAX_ERROR_DEGREES = 65.0;
@@ -137,6 +140,7 @@ final class BridgeTunnelMatcher {
     private double progressMeters;
     private long lastMatchedTimeMs;
     private long junctionHoldStartedAtMs;
+    private long noExitRecoveryStartedAtMs;
     private double heldDistanceMeters;
     private String structureType = "";
     private String activeStructureId = "";
@@ -168,7 +172,7 @@ final class BridgeTunnelMatcher {
 
         if (state == State.RAW_RECOVERY) {
             Result result = new Result(rawPoint, false, state, "");
-            if (accuracyIsGood) {
+            if (rawHandoffIsStrong(accuracyMeters)) {
                 state = State.NORMAL;
                 result = new Result(rawPoint, false, state, "");
                 clearActiveRoute();
@@ -242,6 +246,7 @@ final class BridgeTunnelMatcher {
         }
 
         state = State.RECOVERY;
+        noExitRecoveryStartedAtMs = timeMs;
         return processRecovery(rawPoint, accuracyMeters, timeMs, accuracyIsGood, junction);
     }
 
@@ -257,7 +262,7 @@ final class BridgeTunnelMatcher {
         lastMatchedTimeMs = timeMs;
         directionObservations.add(new Observation(rawPoint, timeMs));
 
-        if (accuracyIsGood) {
+        if (rawHandoffIsStrong(accuracyMeters)) {
             state = State.NORMAL;
             Result result = new Result(rawPoint, false, state, "");
             clearActiveRoute();
@@ -290,7 +295,7 @@ final class BridgeTunnelMatcher {
             boolean accuracyIsGood,
             Point predicted
     ) {
-        if (accuracyIsGood) {
+        if (rawHandoffIsStrong(accuracyMeters) || noExitRelaxedHandoffIsAllowed(accuracyMeters, timeMs)) {
             state = State.NORMAL;
             Result result = new Result(rawPoint, false, state, "");
             clearActiveRoute();
@@ -430,6 +435,7 @@ final class BridgeTunnelMatcher {
         directionObservations.clear();
         exitBranches = Collections.emptyList();
         heldDistanceMeters = 0.0;
+        noExitRecoveryStartedAtMs = 0L;
     }
 
     private List<Point> buildBranchContinuation(Branch initialBranch) {
@@ -544,9 +550,22 @@ final class BridgeTunnelMatcher {
         progressMeters = 0.0;
         lastMatchedTimeMs = 0L;
         junctionHoldStartedAtMs = 0L;
+        noExitRecoveryStartedAtMs = 0L;
         heldDistanceMeters = 0.0;
         structureType = "";
         activeStructureId = "";
+    }
+
+    private static boolean rawHandoffIsStrong(float accuracyMeters) {
+        return accuracyMeters >= 0.0f
+                && accuracyMeters <= STRONG_RAW_HANDOFF_ACCURACY_METERS;
+    }
+
+    private boolean noExitRelaxedHandoffIsAllowed(float accuracyMeters, long timeMs) {
+        return noExitRecoveryStartedAtMs > 0L
+                && timeMs - noExitRecoveryStartedAtMs >= NO_EXIT_RELAXED_HANDOFF_MS
+                && accuracyMeters >= 0.0f
+                && accuracyMeters <= RELAXED_RAW_HANDOFF_ACCURACY_METERS;
     }
 
     private static List<Point> orientedPoints(Segment segment, boolean startToEnd) {

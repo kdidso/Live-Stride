@@ -487,10 +487,24 @@ setTimeout(() => {
         progress: 0,
         lastMatchedTime: 0,
         holdStartedAt: 0,
+        noExitRecoveryStartedAt: 0,
         heldDistance: 0,
         structureType: "",
         structureId: ""
       };
+
+      function rawHandoffIsStrong(accuracy) {
+        const reportedAccuracy = Number(accuracy);
+        return Number.isFinite(reportedAccuracy) && reportedAccuracy <= 5;
+      }
+
+      function noExitRelaxedHandoffIsAllowed(accuracy, now) {
+        const reportedAccuracy = Number(accuracy);
+        return matcher.noExitRecoveryStartedAt > 0 &&
+          now - matcher.noExitRecoveryStartedAt >= 10000 &&
+          Number.isFinite(reportedAccuracy) &&
+          reportedAccuracy <= 10;
+      }
 
       function nearbySegments(coord) {
         if (!map?.getStyle || !map.loaded()) return [];
@@ -646,6 +660,7 @@ setTimeout(() => {
         matcher.branches = [];
         matcher.observations = [];
         matcher.heldDistance = 0;
+        matcher.noExitRecoveryStartedAt = 0;
       }
 
       function clearMatch() {
@@ -658,6 +673,7 @@ setTimeout(() => {
         matcher.routeLength = 0;
         matcher.progress = 0;
         matcher.holdStartedAt = 0;
+        matcher.noExitRecoveryStartedAt = 0;
         matcher.heldDistance = 0;
         matcher.structureType = "";
         matcher.structureId = "";
@@ -705,7 +721,7 @@ setTimeout(() => {
             });
           });
 
-          if (candidate && candidate.distance <= 5) {
+          if (candidate && candidate.distance <= 7) {
             const priorDistance = haversineDistance(
               matcher.lastRawPoint,
               candidate.point
@@ -744,7 +760,7 @@ setTimeout(() => {
           output = matcher.structureRoute[matcher.structureRoute.length - 1];
           matched = true;
 
-          if (accuracyIsGood) {
+          if (rawHandoffIsStrong(accuracy)) {
             clearMatch();
             output = rawCoord;
             matched = false;
@@ -762,7 +778,7 @@ setTimeout(() => {
         } else if (matcher.state === "raw_recovery") {
           output = rawCoord;
           matched = false;
-          if (accuracyIsGood) clearMatch();
+          if (rawHandoffIsStrong(accuracy)) clearMatch();
         } else if (matcher.state !== "normal") {
           const elapsed = Math.max(0, (now - matcher.lastMatchedTime) / 1000);
           matcher.progress = Math.min(
@@ -789,11 +805,15 @@ setTimeout(() => {
               output = junction;
             } else {
               matcher.state = "recovery";
+              matcher.noExitRecoveryStartedAt = now;
             }
           }
 
           if (matcher.state === "recovery") {
-            if (accuracyIsGood) {
+            if (
+              rawHandoffIsStrong(accuracy) ||
+              noExitRelaxedHandoffIsAllowed(accuracy, now)
+            ) {
               clearMatch();
               output = rawCoord;
               matched = false;
@@ -825,8 +845,12 @@ setTimeout(() => {
 
     function formatPace(minsPerMile) {
       if (!isFinite(minsPerMile) || minsPerMile <= 0) return "-";
-      const minutes = Math.floor(minsPerMile);
-      const seconds = Math.round((minsPerMile - minutes) * 60);
+      let minutes = Math.floor(minsPerMile);
+      let seconds = Math.round((minsPerMile - minutes) * 60);
+      if (seconds === 60) {
+        minutes += 1;
+        seconds = 0;
+      }
       return `${minutes}:${seconds.toString().padStart(2, "0")} /mi`;
     }
 
@@ -1363,6 +1387,11 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
             console.warn("Matching status update failed:", err);
           });
         }
+      }
+
+      if (!matchResult.matched && matchResult.state === "raw_recovery") {
+        console.warn("Holding raw GPS during map-matching recovery:", accuracy, "m");
+        return;
       }
 
       const reportedAccuracy = Number(accuracy);

@@ -254,6 +254,15 @@ private void uploadNativePoint(Location rawLocation) {
     );
     saveMatchingState(matchResult.state);
 
+    if (!matchResult.matched && matcherIsHoldingForCleanerGps(matchResult.state)) {
+        Log.i(
+                "LiveStrideNative",
+                "Holding raw GPS during map-matching recovery: "
+                        + accuracy + " m state=" + matchResult.state
+        );
+        return;
+    }
+
     if (!matchResult.matched && !accuracyIsGood) {
         Log.i("LiveStrideNative", "Ignored inaccurate GPS fix: " + accuracy + " m");
         return;
@@ -418,6 +427,10 @@ private void saveMatchingState(BridgeTunnelMatcher.State state) {
             .edit()
             .putString(STATE_MATCHING_STATE, state.name().toLowerCase(java.util.Locale.US))
             .apply();
+}
+
+private boolean matcherIsHoldingForCleanerGps(BridgeTunnelMatcher.State state) {
+    return state == BridgeTunnelMatcher.State.RAW_RECOVERY;
 }
 
 private void refreshMapMatchingContext() {

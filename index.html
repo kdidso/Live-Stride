@@ -487,7 +487,10 @@ setTimeout(() => {
         progress: 0,
         lastMatchedTime: 0,
         holdStartedAt: 0,
+        connectedRecoveryStartedAt: 0,
         noExitRecoveryStartedAt: 0,
+        lastMatchedOutputPoint: null,
+        lastMatchedOutputTime: 0,
         heldDistance: 0,
         structureType: "",
         structureId: ""
@@ -504,6 +507,25 @@ setTimeout(() => {
           now - matcher.noExitRecoveryStartedAt >= 10000 &&
           Number.isFinite(reportedAccuracy) &&
           reportedAccuracy <= 10;
+      }
+
+      function connectedRecoveryHandoffIsAllowed(rawCoord, now) {
+        if (!matcher.connectedRecoveryStartedAt) return true;
+
+        const recoveryAge = now - matcher.connectedRecoveryStartedAt;
+        if (recoveryAge < 5000) return false;
+        if (recoveryAge >= 12000) return true;
+        return !earlyHandoffLooksLikeOutlier(rawCoord, now);
+      }
+
+      function earlyHandoffLooksLikeOutlier(rawCoord, now) {
+        if (!matcher.lastMatchedOutputPoint || !matcher.lastMatchedOutputTime) return false;
+
+        const elapsed = (now - matcher.lastMatchedOutputTime) / 1000;
+        if (elapsed <= 0 || elapsed > 5) return false;
+
+        const speed = haversineDistance(matcher.lastMatchedOutputPoint, rawCoord) / elapsed;
+        return speed > 10;
       }
 
       function nearbySegments(coord) {
@@ -660,6 +682,7 @@ setTimeout(() => {
         matcher.branches = [];
         matcher.observations = [];
         matcher.heldDistance = 0;
+        matcher.connectedRecoveryStartedAt = now;
         matcher.noExitRecoveryStartedAt = 0;
       }
 
@@ -673,7 +696,10 @@ setTimeout(() => {
         matcher.routeLength = 0;
         matcher.progress = 0;
         matcher.holdStartedAt = 0;
+        matcher.connectedRecoveryStartedAt = 0;
         matcher.noExitRecoveryStartedAt = 0;
+        matcher.lastMatchedOutputPoint = null;
+        matcher.lastMatchedOutputTime = 0;
         matcher.heldDistance = 0;
         matcher.structureType = "";
         matcher.structureId = "";
@@ -805,13 +831,17 @@ setTimeout(() => {
               output = junction;
             } else {
               matcher.state = "recovery";
+              matcher.connectedRecoveryStartedAt = 0;
               matcher.noExitRecoveryStartedAt = now;
             }
           }
 
           if (matcher.state === "recovery") {
             if (
-              rawHandoffIsStrong(accuracy) ||
+              (
+                rawHandoffIsStrong(accuracy) &&
+                connectedRecoveryHandoffIsAllowed(rawCoord, now)
+              ) ||
               noExitRelaxedHandoffIsAllowed(accuracy, now)
             ) {
               clearMatch();
@@ -823,6 +853,12 @@ setTimeout(() => {
 
         matcher.lastRawPoint = rawCoord;
         matcher.lastRawTime = now;
+
+        if (matched) {
+          matcher.lastMatchedOutputPoint = output;
+          matcher.lastMatchedOutputTime = now;
+        }
+
         return {
           coord: output,
           matched,

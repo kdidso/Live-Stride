@@ -14,7 +14,10 @@ final class BridgeTunnelMatcher {
     static final double CONNECTION_RADIUS_METERS = 4.0;
     static final double STRONG_RAW_HANDOFF_ACCURACY_METERS = 5.0;
     static final double RELAXED_RAW_HANDOFF_ACCURACY_METERS = 10.0;
+    static final double MAX_EARLY_HANDOFF_SPEED_MPS = 10.0;
     static final long JUNCTION_HOLD_MS = 5_000L;
+    static final long CONNECTED_RECOVERY_MIN_MS = 5_000L;
+    static final long CONNECTED_RECOVERY_OUTLIER_PROTECTION_MS = 12_000L;
     static final long NO_EXIT_RELAXED_HANDOFF_MS = 10_000L;
     static final long DIRECTION_MIN_OBSERVATION_MS = 2_000L;
     static final double DIRECTION_MIN_MOVEMENT_METERS = 3.0;
@@ -140,7 +143,10 @@ final class BridgeTunnelMatcher {
     private double progressMeters;
     private long lastMatchedTimeMs;
     private long junctionHoldStartedAtMs;
+    private long connectedRecoveryStartedAtMs;
     private long noExitRecoveryStartedAtMs;
+    private Point lastMatchedOutputPoint;
+    private long lastMatchedOutputTimeMs;
     private double heldDistanceMeters;
     private String structureType = "";
     private String activeStructureId = "";
@@ -210,6 +216,10 @@ final class BridgeTunnelMatcher {
             }
         }
 
+        if (result.matched) {
+            lastMatchedOutputPoint = result.point;
+            lastMatchedOutputTimeMs = timeMs;
+        }
         lastRawPoint = rawPoint;
         lastRawTimeMs = timeMs;
         return result;
@@ -246,6 +256,7 @@ final class BridgeTunnelMatcher {
         }
 
         state = State.RECOVERY;
+        connectedRecoveryStartedAtMs = 0L;
         noExitRecoveryStartedAtMs = timeMs;
         return processRecovery(rawPoint, accuracyMeters, timeMs, accuracyIsGood, junction);
     }
@@ -295,7 +306,15 @@ final class BridgeTunnelMatcher {
             boolean accuracyIsGood,
             Point predicted
     ) {
-        if (rawHandoffIsStrong(accuracyMeters) || noExitRelaxedHandoffIsAllowed(accuracyMeters, timeMs)) {
+        if (rawHandoffIsStrong(accuracyMeters)
+                && connectedRecoveryHandoffIsAllowed(rawPoint, timeMs)) {
+            state = State.NORMAL;
+            Result result = new Result(rawPoint, false, state, "");
+            clearActiveRoute();
+            return result;
+        }
+
+        if (noExitRelaxedHandoffIsAllowed(accuracyMeters, timeMs)) {
             state = State.NORMAL;
             Result result = new Result(rawPoint, false, state, "");
             clearActiveRoute();
@@ -435,6 +454,7 @@ final class BridgeTunnelMatcher {
         directionObservations.clear();
         exitBranches = Collections.emptyList();
         heldDistanceMeters = 0.0;
+        connectedRecoveryStartedAtMs = timeMs;
         noExitRecoveryStartedAtMs = 0L;
     }
 
@@ -550,7 +570,10 @@ final class BridgeTunnelMatcher {
         progressMeters = 0.0;
         lastMatchedTimeMs = 0L;
         junctionHoldStartedAtMs = 0L;
+        connectedRecoveryStartedAtMs = 0L;
         noExitRecoveryStartedAtMs = 0L;
+        lastMatchedOutputPoint = null;
+        lastMatchedOutputTimeMs = 0L;
         heldDistanceMeters = 0.0;
         structureType = "";
         activeStructureId = "";
@@ -566,6 +589,26 @@ final class BridgeTunnelMatcher {
                 && timeMs - noExitRecoveryStartedAtMs >= NO_EXIT_RELAXED_HANDOFF_MS
                 && accuracyMeters >= 0.0f
                 && accuracyMeters <= RELAXED_RAW_HANDOFF_ACCURACY_METERS;
+    }
+
+    private boolean connectedRecoveryHandoffIsAllowed(Point rawPoint, long timeMs) {
+        if (connectedRecoveryStartedAtMs <= 0L) return true;
+
+        long recoveryAgeMs = timeMs - connectedRecoveryStartedAtMs;
+        if (recoveryAgeMs < CONNECTED_RECOVERY_MIN_MS) return false;
+        if (recoveryAgeMs >= CONNECTED_RECOVERY_OUTLIER_PROTECTION_MS) return true;
+
+        return !earlyHandoffLooksLikeOutlier(rawPoint, timeMs);
+    }
+
+    private boolean earlyHandoffLooksLikeOutlier(Point rawPoint, long timeMs) {
+        if (lastMatchedOutputPoint == null || lastMatchedOutputTimeMs <= 0L) return false;
+
+        double elapsedSeconds = (timeMs - lastMatchedOutputTimeMs) / 1000.0;
+        if (elapsedSeconds <= 0.0 || elapsedSeconds > 5.0) return false;
+
+        double speedMps = distanceMeters(lastMatchedOutputPoint, rawPoint) / elapsedSeconds;
+        return speedMps > MAX_EARLY_HANDOFF_SPEED_MPS;
     }
 
     private static List<Point> orientedPoints(Segment segment, boolean startToEnd) {

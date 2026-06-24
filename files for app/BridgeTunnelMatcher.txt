@@ -11,10 +11,14 @@ import java.util.Set;
 
 final class BridgeTunnelMatcher {
     static final double ENTRY_RADIUS_METERS = 7.0;
+    static final double STRICT_ENTRY_RADIUS_METERS = 5.0;
     static final double CONNECTION_RADIUS_METERS = 4.0;
     static final double STRONG_RAW_HANDOFF_ACCURACY_METERS = 5.0;
     static final double RELAXED_RAW_HANDOFF_ACCURACY_METERS = 10.0;
+    static final double EXCELLENT_ACCURACY_METERS = 4.0;
     static final double MAX_EARLY_HANDOFF_SPEED_MPS = 10.0;
+    static final double MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES = 35.0;
+    static final double BACKWARD_PROGRESS_TOLERANCE_METERS = 8.0;
     static final long JUNCTION_HOLD_MS = 5_000L;
     static final long CONNECTED_RECOVERY_MIN_MS = 5_000L;
     static final long CONNECTED_RECOVERY_OUTLIER_PROTECTION_MS = 12_000L;
@@ -189,7 +193,7 @@ final class BridgeTunnelMatcher {
         }
 
         if (state == State.NORMAL) {
-            tryEnterStructure(rawPoint, timeMs);
+            tryEnterStructure(rawPoint, accuracyMeters, timeMs);
         }
 
         Result result;
@@ -324,7 +328,7 @@ final class BridgeTunnelMatcher {
         return new Result(predicted, true, state, structureType);
     }
 
-    private void tryEnterStructure(Point rawPoint, long timeMs) {
+    private void tryEnterStructure(Point rawPoint, float accuracyMeters, long timeMs) {
         if (context == null
                 || lastRawPoint == null
                 || context.segments.isEmpty()) {
@@ -371,6 +375,14 @@ final class BridgeTunnelMatcher {
                 orientedStructure.get(1)
         );
         if (angleDifference(movementBearing, structureBearing) > 75.0) return;
+        if (excellentGpsNeedsStrongerEntryEvidence(
+                accuracyMeters,
+                bestDistance,
+                movementBearing,
+                structureBearing
+        )) {
+            return;
+        }
 
         structureRoute = orientedStructure;
         activeRoute = new ArrayList<>(structureRoute);
@@ -608,7 +620,24 @@ final class BridgeTunnelMatcher {
         if (elapsedSeconds <= 0.0 || elapsedSeconds > 5.0) return false;
 
         double speedMps = distanceMeters(lastMatchedOutputPoint, rawPoint) / elapsedSeconds;
-        return speedMps > MAX_EARLY_HANDOFF_SPEED_MPS;
+        if (speedMps > MAX_EARLY_HANDOFF_SPEED_MPS) return true;
+
+        Projection rawProjection = project(activeRoute, rawPoint);
+        return rawProjection.alongMeters < progressMeters - BACKWARD_PROGRESS_TOLERANCE_METERS;
+    }
+
+    private static boolean excellentGpsNeedsStrongerEntryEvidence(
+            float accuracyMeters,
+            double entryDistanceMeters,
+            double movementBearing,
+            double structureBearing
+    ) {
+        if (accuracyMeters < 0.0f || accuracyMeters > EXCELLENT_ACCURACY_METERS) return false;
+        if (entryDistanceMeters <= STRICT_ENTRY_RADIUS_METERS) return false;
+        return angleDifference(
+                movementBearing,
+                structureBearing
+        ) > MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES;
     }
 
     private static List<Point> orientedPoints(Segment segment, boolean startToEnd) {

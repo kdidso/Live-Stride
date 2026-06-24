@@ -501,6 +501,18 @@ setTimeout(() => {
         return Number.isFinite(reportedAccuracy) && reportedAccuracy <= 5;
       }
 
+      function excellentGpsNeedsStrongerEntryEvidence(
+        accuracy,
+        entryDistance,
+        movementBearing,
+        structureBearing
+      ) {
+        const reportedAccuracy = Number(accuracy);
+        if (!Number.isFinite(reportedAccuracy) || reportedAccuracy > 4) return false;
+        if (entryDistance <= 5) return false;
+        return angleDifference(movementBearing, structureBearing) > 35;
+      }
+
       function noExitRelaxedHandoffIsAllowed(accuracy, now) {
         const reportedAccuracy = Number(accuracy);
         return matcher.noExitRecoveryStartedAt > 0 &&
@@ -525,7 +537,10 @@ setTimeout(() => {
         if (elapsed <= 0 || elapsed > 5) return false;
 
         const speed = haversineDistance(matcher.lastMatchedOutputPoint, rawCoord) / elapsed;
-        return speed > 10;
+        if (speed > 10) return true;
+
+        const rawProjection = projectOntoPolyline(matcher.route, rawCoord);
+        return rawProjection.alongMeters < matcher.progress - 8;
       }
 
       function nearbySegments(coord) {
@@ -760,7 +775,13 @@ setTimeout(() => {
 
             if (
               priorDistance > candidate.distance + 0.75 &&
-              angleDifference(movementBearing, structureBearing) <= 75
+              angleDifference(movementBearing, structureBearing) <= 75 &&
+              !excellentGpsNeedsStrongerEntryEvidence(
+                accuracy,
+                candidate.distance,
+                movementBearing,
+                structureBearing
+              )
             ) {
               matcher.segments = segments;
               matcher.structureRoute = [...structurePoints];

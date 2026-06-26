@@ -483,6 +483,7 @@ setTimeout(() => {
         segments: [],
         branches: [],
         observations: [],
+        entryObservations: [],
         routeLength: 0,
         progress: 0,
         lastMatchedTime: 0,
@@ -501,16 +502,76 @@ setTimeout(() => {
         return Number.isFinite(reportedAccuracy) && reportedAccuracy <= 5;
       }
 
-      function excellentGpsNeedsStrongerEntryEvidence(
+      function entryNeedsStrongerEvidence(
         accuracy,
         entryDistance,
-        movementBearing,
-        structureBearing
+        evidence
       ) {
         const reportedAccuracy = Number(accuracy);
-        if (!Number.isFinite(reportedAccuracy) || reportedAccuracy > 4) return false;
         if (entryDistance <= 5) return false;
-        return angleDifference(movementBearing, structureBearing) > 35;
+
+        const excellentAccuracy = Number.isFinite(reportedAccuracy) && reportedAccuracy <= 4;
+        if (excellentAccuracy) {
+          return evidence.headingError > 35 && !evidence.strongApproachTrend;
+        }
+
+        if (evidence.observationSpan < 1500) return true;
+        if (!evidence.strongApproachTrend) return true;
+        if (evidence.headingError > 55) return true;
+        if (evidence.entranceApproachError > 75) return true;
+        return evidence.recentSharpReversal && !evidence.strongApproachTrend;
+      }
+
+      function entryEvidence(rawCoord, entrance, structureBearing) {
+        if (matcher.entryObservations.length < 2) return null;
+
+        let first = null;
+        let previous = null;
+        let previousHeading = null;
+        let firstDistance = Number.POSITIVE_INFINITY;
+        let closingSteps = 0;
+        let recentSharpReversal = false;
+
+        matcher.entryObservations.forEach(observation => {
+          const distanceFromCurrent = haversineDistance(observation.point, rawCoord);
+          if (!first && distanceFromCurrent >= 2) {
+            first = observation;
+            firstDistance = haversineDistance(observation.point, entrance);
+          }
+
+          if (previous) {
+            const priorDistance = haversineDistance(previous.point, entrance);
+            const currentDistance = haversineDistance(observation.point, entrance);
+            if (priorDistance > currentDistance + 0.75) closingSteps += 1;
+
+            const heading = bearingDegrees(previous.point, observation.point);
+            if (
+              previousHeading !== null &&
+              angleDifference(previousHeading, heading) >= 135
+            ) {
+              recentSharpReversal = true;
+            }
+            previousHeading = heading;
+          }
+          previous = observation;
+        });
+
+        if (!first) return null;
+
+        const currentDistance = haversineDistance(rawCoord, entrance);
+        const closingMeters = firstDistance - currentDistance;
+        const movementBearing = bearingDegrees(first.point, rawCoord);
+        const entranceBearing = bearingDegrees(rawCoord, entrance);
+
+        return {
+          movementBearing,
+          headingError: angleDifference(movementBearing, structureBearing),
+          entranceApproachError: angleDifference(movementBearing, entranceBearing),
+          approachTrend: closingMeters >= 1.5 || closingSteps >= 1,
+          strongApproachTrend: closingMeters >= 3 || closingSteps >= 2,
+          recentSharpReversal,
+          observationSpan: previous ? previous.time - first.time : 0
+        };
       }
 
       function noExitRelaxedHandoffIsAllowed(accuracy, now) {
@@ -739,6 +800,10 @@ setTimeout(() => {
           }
         }
         matcher.speeds = matcher.speeds.filter(sample => now - sample.time <= 20000);
+        matcher.entryObservations.push({ point: rawCoord, time: now });
+        matcher.entryObservations = matcher.entryObservations.filter(
+          observation => now - observation.time <= 5000
+        );
 
         if (matcher.state === "normal" && matcher.lastRawPoint) {
           const segments = nearbySegments(rawCoord);
@@ -763,24 +828,20 @@ setTimeout(() => {
           });
 
           if (candidate && candidate.distance <= 7) {
-            const priorDistance = haversineDistance(
-              matcher.lastRawPoint,
-              candidate.point
-            );
             const structurePoints = candidate.enterAtStart
               ? candidate.structure.points
               : [...candidate.structure.points].reverse();
-            const movementBearing = bearingDegrees(matcher.lastRawPoint, rawCoord);
             const structureBearing = bearingDegrees(structurePoints[0], structurePoints[1]);
+            const evidence = entryEvidence(rawCoord, candidate.point, structureBearing);
 
             if (
-              priorDistance > candidate.distance + 0.75 &&
-              angleDifference(movementBearing, structureBearing) <= 75 &&
-              !excellentGpsNeedsStrongerEntryEvidence(
+              evidence &&
+              evidence.approachTrend &&
+              evidence.headingError <= 75 &&
+              !entryNeedsStrongerEvidence(
                 accuracy,
                 candidate.distance,
-                movementBearing,
-                structureBearing
+                evidence
               )
             ) {
               matcher.segments = segments;

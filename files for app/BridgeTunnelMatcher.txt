@@ -27,6 +27,14 @@ final class BridgeTunnelMatcher {
     static final double DIRECTION_MIN_MOVEMENT_METERS = 3.0;
     static final double DIRECTION_MAX_ERROR_DEGREES = 65.0;
     static final double DIRECTION_WIN_MARGIN_DEGREES = 25.0;
+    static final long ENTRY_CONFIRMATION_WINDOW_MS = 5_000L;
+    static final double ENTRY_MIN_CLOSING_METERS = 1.5;
+    static final double ENTRY_STRONG_CLOSING_METERS = 3.0;
+    static final double ENTRY_MIN_MOVEMENT_METERS = 2.0;
+    static final double ENTRY_MAX_LOOSE_HEADING_ERROR_DEGREES = 55.0;
+    static final double ENTRY_MAX_APPROACH_TO_ENTRANCE_ERROR_DEGREES = 75.0;
+    static final double ENTRY_SHARP_REVERSAL_DEGREES = 135.0;
+    static final long ENTRY_LOOSE_MIN_OBSERVATION_MS = 1_500L;
 
     enum State {
         NORMAL,
@@ -134,11 +142,40 @@ final class BridgeTunnelMatcher {
         }
     }
 
+    private static final class EntryEvidence {
+        final double movementBearing;
+        final double headingError;
+        final double entranceApproachError;
+        final boolean approachTrend;
+        final boolean strongApproachTrend;
+        final boolean recentSharpReversal;
+        final long observationSpanMs;
+
+        EntryEvidence(
+                double movementBearing,
+                double headingError,
+                double entranceApproachError,
+                boolean approachTrend,
+                boolean strongApproachTrend,
+                boolean recentSharpReversal,
+                long observationSpanMs
+        ) {
+            this.movementBearing = movementBearing;
+            this.headingError = headingError;
+            this.entranceApproachError = entranceApproachError;
+            this.approachTrend = approachTrend;
+            this.strongApproachTrend = strongApproachTrend;
+            this.recentSharpReversal = recentSharpReversal;
+            this.observationSpanMs = observationSpanMs;
+        }
+    }
+
     private State state = State.NORMAL;
     private Context context;
     private Point lastRawPoint;
     private long lastRawTimeMs;
     private final Deque<SpeedSample> recentSpeeds = new ArrayDeque<>();
+    private final Deque<Observation> entryObservations = new ArrayDeque<>();
     private final List<Observation> directionObservations = new ArrayList<>();
     private List<Point> activeRoute = Collections.emptyList();
     private List<Point> structureRoute = Collections.emptyList();
@@ -161,6 +198,7 @@ final class BridgeTunnelMatcher {
         lastRawPoint = null;
         lastRawTimeMs = 0L;
         recentSpeeds.clear();
+        entryObservations.clear();
         clearActiveRoute();
     }
 
@@ -179,6 +217,7 @@ final class BridgeTunnelMatcher {
             boolean accuracyIsGood
     ) {
         updateRecentSpeed(rawPoint, timeMs, accuracyIsGood);
+        updateEntryObservations(rawPoint, timeMs);
 
         if (state == State.RAW_RECOVERY) {
             Result result = new Result(rawPoint, false, state, "");
@@ -365,21 +404,22 @@ final class BridgeTunnelMatcher {
         Point entrance = enterAtStart
                 ? best.points.get(0)
                 : best.points.get(best.points.size() - 1);
-        double priorDistance = distanceMeters(lastRawPoint, entrance);
-        if (priorDistance <= bestDistance + 0.75) return;
-
         List<Point> orientedStructure = orientedPoints(best, enterAtStart);
-        double movementBearing = bearingDegrees(lastRawPoint, rawPoint);
         double structureBearing = bearingDegrees(
                 orientedStructure.get(0),
                 orientedStructure.get(1)
         );
-        if (angleDifference(movementBearing, structureBearing) > 75.0) return;
-        if (excellentGpsNeedsStrongerEntryEvidence(
+        EntryEvidence entryEvidence = entryEvidence(
+                rawPoint,
+                entrance,
+                structureBearing
+        );
+        if (entryEvidence == null || !entryEvidence.approachTrend) return;
+        if (entryEvidence.headingError > 75.0) return;
+        if (entryNeedsStrongerEvidence(
                 accuracyMeters,
                 bestDistance,
-                movementBearing,
-                structureBearing
+                entryEvidence
         )) {
             return;
         }
@@ -548,6 +588,14 @@ final class BridgeTunnelMatcher {
         }
     }
 
+    private void updateEntryObservations(Point rawPoint, long timeMs) {
+        entryObservations.addLast(new Observation(rawPoint, timeMs));
+        while (!entryObservations.isEmpty()
+                && timeMs - entryObservations.peekFirst().timeMs > ENTRY_CONFIRMATION_WINDOW_MS) {
+            entryObservations.removeFirst();
+        }
+    }
+
     private void advanceProgress(long timeMs) {
         if (lastMatchedTimeMs <= 0L) {
             lastMatchedTimeMs = timeMs;
@@ -626,18 +674,88 @@ final class BridgeTunnelMatcher {
         return rawProjection.alongMeters < progressMeters - BACKWARD_PROGRESS_TOLERANCE_METERS;
     }
 
-    private static boolean excellentGpsNeedsStrongerEntryEvidence(
-            float accuracyMeters,
-            double entryDistanceMeters,
-            double movementBearing,
+    private EntryEvidence entryEvidence(
+            Point rawPoint,
+            Point entrance,
             double structureBearing
     ) {
-        if (accuracyMeters < 0.0f || accuracyMeters > EXCELLENT_ACCURACY_METERS) return false;
-        if (entryDistanceMeters <= STRICT_ENTRY_RADIUS_METERS) return false;
-        return angleDifference(
+        if (entryObservations.size() < 2) return null;
+
+        Observation first = null;
+        Observation previous = null;
+        Double previousHeading = null;
+        double firstDistance = Double.MAX_VALUE;
+        int closingSteps = 0;
+        boolean recentSharpReversal = false;
+
+        for (Observation observation : entryObservations) {
+            double distanceFromCurrent = distanceMeters(observation.point, rawPoint);
+            if (first == null && distanceFromCurrent >= ENTRY_MIN_MOVEMENT_METERS) {
+                first = observation;
+                firstDistance = distanceMeters(observation.point, entrance);
+            }
+
+            if (previous != null) {
+                double priorDistance = distanceMeters(previous.point, entrance);
+                double currentDistance = distanceMeters(observation.point, entrance);
+                if (priorDistance > currentDistance + 0.75) {
+                    closingSteps++;
+                }
+
+                double heading = bearingDegrees(previous.point, observation.point);
+                if (previousHeading != null
+                        && angleDifference(previousHeading, heading)
+                        >= ENTRY_SHARP_REVERSAL_DEGREES) {
+                    recentSharpReversal = true;
+                }
+                previousHeading = heading;
+            }
+            previous = observation;
+        }
+
+        if (first == null) return null;
+
+        double currentDistance = distanceMeters(rawPoint, entrance);
+        double closingMeters = firstDistance - currentDistance;
+        boolean approachTrend = closingMeters >= ENTRY_MIN_CLOSING_METERS
+                || closingSteps >= 1;
+        boolean strongApproachTrend = closingMeters >= ENTRY_STRONG_CLOSING_METERS
+                || closingSteps >= 2;
+        double movementBearing = bearingDegrees(first.point, rawPoint);
+        double entranceBearing = bearingDegrees(rawPoint, entrance);
+
+        return new EntryEvidence(
                 movementBearing,
-                structureBearing
-        ) > MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES;
+                angleDifference(movementBearing, structureBearing),
+                angleDifference(movementBearing, entranceBearing),
+                approachTrend,
+                strongApproachTrend,
+                recentSharpReversal,
+                previous == null ? 0L : previous.timeMs - first.timeMs
+        );
+    }
+
+    private static boolean entryNeedsStrongerEvidence(
+            float accuracyMeters,
+            double entryDistanceMeters,
+            EntryEvidence evidence
+    ) {
+        if (entryDistanceMeters <= STRICT_ENTRY_RADIUS_METERS) return false;
+
+        boolean excellentAccuracy = accuracyMeters >= 0.0f
+                && accuracyMeters <= EXCELLENT_ACCURACY_METERS;
+        if (excellentAccuracy) {
+            return evidence.headingError > MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES
+                    && !evidence.strongApproachTrend;
+        }
+
+        if (evidence.observationSpanMs < ENTRY_LOOSE_MIN_OBSERVATION_MS) return true;
+        if (!evidence.strongApproachTrend) return true;
+        if (evidence.headingError > ENTRY_MAX_LOOSE_HEADING_ERROR_DEGREES) return true;
+        if (evidence.entranceApproachError > ENTRY_MAX_APPROACH_TO_ENTRANCE_ERROR_DEGREES) {
+            return true;
+        }
+        return evidence.recentSharpReversal && !evidence.strongApproachTrend;
     }
 
     private static List<Point> orientedPoints(Segment segment, boolean startToEnd) {

@@ -145,27 +145,27 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
 
     #viewerGpxBtn {
       display: none;
-      position: absolute;
-      top: calc(68px + var(--top-safe-offset));
-      left: 10px;
-      z-index: 999;
     }
 
     #runnerModeBtn.viewer-position {
-      position: absolute;
-      top: calc(68px + var(--top-safe-offset));
-      left: 10px;
-      z-index: 999;
+      position: static;
+    }
+
+    body.viewer-mode #buttonWrapper {
+      top: calc(78px + var(--top-safe-offset));
+      left: 20px;
+      gap: 10px;
+    }
+
+    body.viewer-mode #modeToggle {
+      flex-direction: column;
+      gap: 10px;
     }
 
     body.viewer-mode #runnerModeBtn,
     body.viewer-mode #viewerGpxBtn {
       min-width: 140px;
       width: 140px;
-    }
-
-    body.viewer-mode #viewerGpxBtn {
-      top: calc(124px + var(--top-safe-offset));
     }
 
     /* Stats bar: left-aligned, two-line layout */
@@ -301,24 +301,20 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
         height: 48px;
       }
 
-      #viewerGpxBtn {
-        top: calc(130px + var(--top-safe-offset));
-        left: 8px;
+      #runnerModeBtn.viewer-position {
+        position: static;
       }
 
-      #runnerModeBtn.viewer-position {
-        top: calc(72px + var(--top-safe-offset));
-        left: 8px;
+      body.viewer-mode #buttonWrapper {
+        top: calc(76px + var(--top-safe-offset));
+        left: 20px;
+        gap: 10px;
       }
 
       body.viewer-mode #runnerModeBtn,
       body.viewer-mode #viewerGpxBtn {
-        min-width: 120px;
-        width: 120px;
-      }
-
-      body.viewer-mode #viewerGpxBtn {
-        top: calc(130px + var(--top-safe-offset));
+        min-width: 140px;
+        width: 140px;
       }
 
       #layerToggle {
@@ -354,6 +350,9 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       <button id="viewerModeBtn">Viewer</button>
     </div>
 
+    <!-- Viewer GPX Download Button -->
+    <button id="viewerGpxBtn">Get GPX File</button>
+
     <div id="controls">
       <button id="startBtn">Start</button>
       <button id="stopBtn" disabled>Stop</button>
@@ -381,9 +380,6 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     </div>
     <ul id="suggestionsList"></ul>
   </div>
-
-  <!-- Viewer GPX Download Button -->
-  <button id="viewerGpxBtn">Get GPX File</button>
 
   <!-- Map layer toggle dropdown -->
   <div id="layerToggle">

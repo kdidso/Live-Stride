@@ -146,20 +146,26 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     #viewerGpxBtn {
       display: none;
       position: absolute;
-      top: calc(64px + var(--top-safe-offset));
+      top: calc(68px + var(--top-safe-offset));
       left: 10px;
       z-index: 999;
     }
 
     #runnerModeBtn.viewer-position {
       position: absolute;
-      top: calc(64px + var(--top-safe-offset));
+      top: calc(68px + var(--top-safe-offset));
       left: 10px;
       z-index: 999;
     }
 
+    body.viewer-mode #runnerModeBtn,
     body.viewer-mode #viewerGpxBtn {
-      top: calc(116px + var(--top-safe-offset));
+      min-width: 140px;
+      width: 140px;
+    }
+
+    body.viewer-mode #viewerGpxBtn {
+      top: calc(124px + var(--top-safe-offset));
     }
 
     /* Stats bar: left-aligned, two-line layout */
@@ -215,7 +221,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     body.viewer-mode #layerToggle {
-      bottom: 96px;
+      bottom: calc(var(--bottom-safe-offset) + 54px);
     }
 
     /* Recenter button */
@@ -296,18 +302,23 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       }
 
       #viewerGpxBtn {
-        top: calc(124px + var(--top-safe-offset));
+        top: calc(130px + var(--top-safe-offset));
         left: 8px;
-        min-width: 115px;
       }
 
       #runnerModeBtn.viewer-position {
-        top: calc(70px + var(--top-safe-offset));
+        top: calc(72px + var(--top-safe-offset));
         left: 8px;
       }
 
+      body.viewer-mode #runnerModeBtn,
       body.viewer-mode #viewerGpxBtn {
-        top: calc(124px + var(--top-safe-offset));
+        min-width: 120px;
+        width: 120px;
+      }
+
+      body.viewer-mode #viewerGpxBtn {
+        top: calc(130px + var(--top-safe-offset));
       }
 
       #layerToggle {
@@ -317,7 +328,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       }
 
       body.viewer-mode #layerToggle {
-        bottom: 110px;
+        bottom: calc(var(--bottom-safe-offset) + 70px);
       }
 
       #recenterBtn {

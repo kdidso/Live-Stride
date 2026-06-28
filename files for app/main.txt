@@ -133,6 +133,7 @@ const exportUploadBtn = document.getElementById("exportUploadBtn");
 const statsBar = document.getElementById("statsBar");
 const searchInput = document.getElementById("searchInput");
 const suggestionsList = document.getElementById("suggestionsList");
+const clearSearchBtn = document.getElementById("clearSearchBtn");
 const runnerModeBtn = document.getElementById("runnerModeBtn");
 const viewerModeBtn = document.getElementById("viewerModeBtn");
 const recenterBtn = document.getElementById("recenterBtn");
@@ -141,6 +142,14 @@ const viewerGpxBtn = document.getElementById("viewerGpxBtn");
 const broadcastCheckbox = document.getElementById("broadcastCheckbox");
 const exportGpxBtn = document.getElementById("exportGpxBtn");
 const uploadStravaBtn = document.getElementById("uploadStravaBtn");
+
+function clearViewerSearch() {
+  searchRequestId++;
+  searchInput.value = "";
+  suggestionsList.innerHTML = "";
+  suggestionsList.style.display = "none";
+  if (clearSearchBtn) clearSearchBtn.style.display = "none";
+}
 
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
@@ -300,8 +309,7 @@ runnerModeBtn.onclick = () => {
   if (document.body.classList.contains("viewer-mode")) {
     resetRunDisplay();
     selectedRunner = null;
-    searchInput.value = "";
-    suggestionsList.style.display = "none";
+    clearViewerSearch();
     hideViewerStatus();
   }
   setMode("runner");
@@ -2101,12 +2109,21 @@ viewerGpxBtn.onclick = () => {
   window.open("https://kdidso.github.io/livestride-export/", "_blank");
 };
 
+if (clearSearchBtn) {
+  clearSearchBtn.onclick = () => {
+    selectedRunner = null;
+    clearViewerSearch();
+    searchInput.focus();
+  };
+}
+
 searchInput.oninput = async () => {
   const requestId = ++searchRequestId;
   const q = searchInput.value.trim();
 
   suggestionsList.innerHTML = "";
   suggestionsList.style.display = "none";
+  if (clearSearchBtn) clearSearchBtn.style.display = q ? "block" : "none";
 
   if (!q) return;
 
@@ -2146,6 +2163,7 @@ searchInput.oninput = async () => {
 
     li.onclick = () => {
       searchInput.value = run.runner_name;
+      if (clearSearchBtn) clearSearchBtn.style.display = "block";
       viewerFollowing = true;
       selectedRunner = run.id;
       trackRunnerSupabase(run.id, run.is_live, run.runner_name);

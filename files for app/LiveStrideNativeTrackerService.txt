@@ -37,6 +37,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private static final String CHANNEL_ID = "livestride_native_tracker_v2";
     private static final int NOTIFICATION_ID = 44221;
     private static final float MAX_ACCEPTED_ACCURACY_METERS = 10.0f;
+    private static final double METERS_PER_MILE = 1609.34;
     public static final String STATE_PREFS_NAME = "livestride_native_tracker_state";
     public static final String STATE_RUN_ID = "run_id";
     public static final String STATE_RUNNING = "running";
@@ -74,6 +75,9 @@ public class LiveStrideNativeTrackerService extends Service {
     private boolean serverMapContextActive = false;
     private final BridgeTunnelMatcher bridgeTunnelMatcher = new BridgeTunnelMatcher();
     private BridgeTunnelMatcher.State lastSavedMatchingState = null;
+    private int lastCompletedMile = 0;
+    private long lastMileSplitTimeMs = 0L;
+    private String latestMileSplitText = "Mile split: --";
     @Override
     public void onCreate() {
         super.onCreate();
@@ -136,11 +140,19 @@ public class LiveStrideNativeTrackerService extends Service {
             previousPointTimeMs = 0L;
             loadedMapContextUpdatedAtMs = 0L;
             serverMapContextActive = false;
+            lastCompletedMile = 0;
+            lastMileSplitTimeMs = 0L;
+            latestMileSplitText = "Mile split: --";
             bridgeTunnelMatcher.reset();
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             saveNativeTrackerState(true, 0L, 0L);
             
-            startForeground(NOTIFICATION_ID, buildNotification("Native tracking test active"));
+            startForeground(NOTIFICATION_ID, buildRunNotification(
+                    System.currentTimeMillis(),
+                    0.0,
+                    0.0,
+                    latestMileSplitText
+            ));
             startLocationUpdates();
 
             return START_STICKY;
@@ -321,9 +333,16 @@ private void uploadNativePoint(Location rawLocation) {
             return;
         }
 
+        double previousTotalDistanceMeters = totalDistanceMeters;
         totalDistanceMeters += segmentMeters;
+        updateMileSplit(
+                previousTotalDistanceMeters,
+                totalDistanceMeters,
+                previousPointTimeMs,
+                pointTimeMs
+        );
 
-        double segmentMiles = segmentMeters / 1609.34;
+        double segmentMiles = segmentMeters / METERS_PER_MILE;
         double elapsedMinutes = elapsedSeconds / 60.0;
 
         if (segmentMiles > 0) {
@@ -331,7 +350,7 @@ private void uploadNativePoint(Location rawLocation) {
         }
     }
 
-    double totalMiles = totalDistanceMeters / 1609.34;
+    double totalMiles = totalDistanceMeters / METERS_PER_MILE;
     double totalMinutes = (pointTimeMs - runStartTimeMs) / 60000.0;
 
     if (totalMiles > 0) {
@@ -345,6 +364,12 @@ private void uploadNativePoint(Location rawLocation) {
     final double finalDistanceMeters = totalDistanceMeters;
     final double finalInstPaceMinPerMile = instPaceMinPerMile;
     final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
+    updateRunNotification(
+            pointTimeMs,
+            finalDistanceMeters,
+            finalAvgPaceMinPerMile,
+            latestMileSplitText
+    );
     java.text.SimpleDateFormat recordedAtFormatter =
         new java.text.SimpleDateFormat(
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
@@ -554,7 +579,69 @@ private void kickPendingFlushIfNeeded() {
     }).start();
 }
 
-    private Notification buildNotification(String text) {
+private void updateMileSplit(
+        double previousTotalMeters,
+        double currentTotalMeters,
+        long segmentStartTimeMs,
+        long segmentEndTimeMs
+) {
+    if (runStartTimeMs <= 0L || segmentStartTimeMs <= 0L || segmentEndTimeMs <= segmentStartTimeMs) {
+        return;
+    }
+
+    int completedMile = (int) Math.floor(currentTotalMeters / METERS_PER_MILE);
+    if (completedMile <= lastCompletedMile) {
+        return;
+    }
+
+    double segmentMeters = currentTotalMeters - previousTotalMeters;
+    if (segmentMeters <= 0.0) {
+        return;
+    }
+
+    for (int mile = lastCompletedMile + 1; mile <= completedMile; mile++) {
+        double targetMeters = mile * METERS_PER_MILE;
+        double segmentFraction = (targetMeters - previousTotalMeters) / segmentMeters;
+        segmentFraction = Math.max(0.0, Math.min(1.0, segmentFraction));
+        long splitTimeMs = segmentStartTimeMs
+                + Math.round((segmentEndTimeMs - segmentStartTimeMs) * segmentFraction);
+        long previousSplitTimeMs = lastMileSplitTimeMs > 0L
+                ? lastMileSplitTimeMs
+                : runStartTimeMs;
+        double splitMinutes = (splitTimeMs - previousSplitTimeMs) / 60000.0;
+
+        if (splitMinutes > 0.0) {
+            latestMileSplitText = "Mile " + mile + ": " + formatPace(splitMinutes);
+        }
+
+        lastCompletedMile = mile;
+        lastMileSplitTimeMs = splitTimeMs;
+    }
+}
+
+private void updateRunNotification(
+        long pointTimeMs,
+        double distanceMeters,
+        double avgPaceMinPerMile,
+        String mileSplitText
+) {
+    NotificationManager manager = getSystemService(NotificationManager.class);
+    if (manager == null) {
+        return;
+    }
+
+    manager.notify(
+            NOTIFICATION_ID,
+            buildRunNotification(pointTimeMs, distanceMeters, avgPaceMinPerMile, mileSplitText)
+    );
+}
+
+    private Notification buildRunNotification(
+            long nowMs,
+            double distanceMeters,
+            double avgPaceMinPerMile,
+            String mileSplitText
+    ) {
         Intent stopIntent = new Intent(this, LiveStrideNativeTrackerService.class);
         stopIntent.setAction(ACTION_STOP);
 
@@ -570,9 +657,22 @@ private void kickPendingFlushIfNeeded() {
                 flags
         );
 
+        long elapsedMs = runStartTimeMs > 0L
+                ? Math.max(0L, nowMs - runStartTimeMs)
+                : 0L;
+        double distanceMiles = distanceMeters / METERS_PER_MILE;
+        String liveStats = "Time " + formatElapsedTime(elapsedMs)
+                + " | Dist " + String.format(java.util.Locale.US, "%.2f mi", distanceMiles)
+                + " | Avg " + formatPace(avgPaceMinPerMile);
+        String splitText = mileSplitText == null || mileSplitText.trim().isEmpty()
+                ? "Mile split: --"
+                : mileSplitText;
+
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("LiveStride Run in Progress")
-                .setContentText("Expand notification, then tap STOP RUN")
+                .setContentText(liveStats)
+                .setStyle(new NotificationCompat.BigTextStyle()
+                        .bigText(liveStats + "\n" + splitText))
                 .setSmallIcon(getApplicationInfo().icon)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -581,12 +681,39 @@ private void kickPendingFlushIfNeeded() {
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setColor(0xFFD32F2F)
                 .setColorized(true)
+                .setWhen(runStartTimeMs > 0L ? runStartTimeMs : System.currentTimeMillis())
+                .setShowWhen(true)
+                .setUsesChronometer(runStartTimeMs > 0L)
                 .addAction(
                         android.R.drawable.ic_media_pause,
                         "STOP RUN",
                         stopPendingIntent
                 )
                 .build();
+    }
+
+    private static String formatElapsedTime(long elapsedMs) {
+        long totalSeconds = Math.max(0L, Math.round(elapsedMs / 1000.0));
+        long hours = totalSeconds / 3600L;
+        long minutes = (totalSeconds % 3600L) / 60L;
+        long seconds = totalSeconds % 60L;
+
+        if (hours > 0L) {
+            return String.format(java.util.Locale.US, "%d:%02d:%02d", hours, minutes, seconds);
+        }
+
+        return String.format(java.util.Locale.US, "%d:%02d", minutes, seconds);
+    }
+
+    private static String formatPace(double paceMinPerMile) {
+        if (!Double.isFinite(paceMinPerMile) || paceMinPerMile <= 0.0) {
+            return "--/mi";
+        }
+
+        long totalSeconds = Math.round(paceMinPerMile * 60.0);
+        long minutes = totalSeconds / 60L;
+        long seconds = totalSeconds % 60L;
+        return String.format(java.util.Locale.US, "%d:%02d/mi", minutes, seconds);
     }
 
     private void createNotificationChannel() {

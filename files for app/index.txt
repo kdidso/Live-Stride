@@ -72,13 +72,39 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     body.viewer-mode #searchBar {
-      left: 160px;
+      left: 170px;
       right: 10px;
       transform: none;
     }
 
+    .searchInputWrap {
+      position: relative;
+    }
+
     body.viewer-mode #searchInput {
       width: 100%;
+      padding-right: 38px;
+    }
+
+    #clearSearchBtn {
+      position: absolute;
+      top: 50%;
+      right: 6px;
+      transform: translateY(-50%);
+      width: 30px;
+      min-width: 30px;
+      height: 30px;
+      padding: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: #666;
+      font-size: 22px;
+      line-height: 26px;
+      display: none;
+    }
+
+    #clearSearchBtn:hover {
+      background: rgba(0, 0, 0, 0.08);
     }
 
     button {
@@ -120,16 +146,20 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     #viewerGpxBtn {
       display: none;
       position: absolute;
-      top: calc(58px + var(--top-safe-offset));
-      right: 10px;
+      top: calc(64px + var(--top-safe-offset));
+      left: 10px;
       z-index: 999;
     }
 
     #runnerModeBtn.viewer-position {
       position: absolute;
-      top: calc(10px + var(--top-safe-offset));
+      top: calc(64px + var(--top-safe-offset));
       left: 10px;
       z-index: 999;
+    }
+
+    body.viewer-mode #viewerGpxBtn {
+      top: calc(116px + var(--top-safe-offset));
     }
 
     /* Stats bar: left-aligned, two-line layout */
@@ -182,6 +212,10 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       padding: 4px 6px;
       border-radius: 4px;
       border: 1px solid #ccc;
+    }
+
+    body.viewer-mode #layerToggle {
+      bottom: 96px;
     }
 
     /* Recenter button */
@@ -253,25 +287,37 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       }
 
       body.viewer-mode #searchBar {
-        left: 126px;
+        left: 8px;
         right: 8px;
       }
 
+      body.viewer-mode #searchInput {
+        height: 48px;
+      }
+
       #viewerGpxBtn {
-        top: calc(58px + var(--top-safe-offset));
-        right: 8px;
+        top: calc(124px + var(--top-safe-offset));
+        left: 8px;
         min-width: 115px;
       }
 
       #runnerModeBtn.viewer-position {
-        top: calc(8px + var(--top-safe-offset));
+        top: calc(70px + var(--top-safe-offset));
         left: 8px;
+      }
+
+      body.viewer-mode #viewerGpxBtn {
+        top: calc(124px + var(--top-safe-offset));
       }
 
       #layerToggle {
         bottom: 64px;
         left: 8px;
         font-size: 13px;
+      }
+
+      body.viewer-mode #layerToggle {
+        bottom: 110px;
       }
 
       #recenterBtn {
@@ -318,7 +364,10 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
   </div>
 
   <div id="searchBar">
-    <input type="text" id="searchInput" placeholder="Search runner..." autocomplete="off" />
+    <div class="searchInputWrap">
+      <input type="text" id="searchInput" placeholder="Search runner..." autocomplete="off" />
+      <button id="clearSearchBtn" type="button" aria-label="Clear search">&times;</button>
+    </div>
     <ul id="suggestionsList"></ul>
   </div>
 

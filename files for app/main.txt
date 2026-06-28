@@ -297,6 +297,13 @@ function setMode(mode) {
 }
 
 runnerModeBtn.onclick = () => {
+  if (document.body.classList.contains("viewer-mode")) {
+    resetRunDisplay();
+    selectedRunner = null;
+    searchInput.value = "";
+    suggestionsList.style.display = "none";
+    hideViewerStatus();
+  }
   setMode("runner");
   broadcastCheckbox.checked = true;
   isPrivateMode = false;
@@ -394,8 +401,12 @@ function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationF
   const avgHtml = `Avg Pace: ${formatPace(avgPace)}`;
 
   statsBar.innerHTML = `
-    <div>${timeHtml}<span style="margin:0 6px;color:white">|</span>${elevHtml}</div>
-    <div style="margin-top:4px;">${distHtml}<span style="margin:0 6px;color:white">|</span>${paceHtml}<span style="margin:0 6px;color:white">|</span>${avgHtml}</div>
+    <div class="stats-line">
+      <span>${timeHtml}</span><span class="stats-separator">|</span><span>${elevHtml}</span>
+    </div>
+    <div class="stats-line">
+      <span>${distHtml}</span><span class="stats-separator">|</span><span>${paceHtml}</span><span class="stats-separator">|</span><span>${avgHtml}</span>
+    </div>
   `;
 }
 

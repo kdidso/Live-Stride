@@ -740,14 +740,13 @@ final class BridgeTunnelMatcher {
             double entryDistanceMeters,
             EntryEvidence evidence
     ) {
-        if (entryDistanceMeters <= STRICT_ENTRY_RADIUS_METERS) return false;
-
         boolean excellentAccuracy = accuracyMeters >= 0.0f
                 && accuracyMeters <= EXCELLENT_ACCURACY_METERS;
         if (excellentAccuracy) {
-            return evidence.headingError > MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES
-                    && !evidence.strongApproachTrend;
+            return evidence.headingError > MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES;
         }
+
+        if (entryDistanceMeters <= STRICT_ENTRY_RADIUS_METERS) return false;
 
         if (evidence.observationSpanMs < ENTRY_LOOSE_MIN_OBSERVATION_MS) return true;
         if (!evidence.strongApproachTrend) return true;

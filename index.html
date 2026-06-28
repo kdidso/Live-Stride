@@ -169,10 +169,7 @@
     }
 
     #runnerModeBtn.viewer-position {
-      position: absolute;
-      top: 68px;
-      left: 10px;
-      z-index: 999;
+      position: static;
     }
 
     body.viewer-mode #runnerModeBtn,
@@ -182,14 +179,18 @@
     }
 
     body.viewer-mode #buttonWrapper {
-      gap: 8px;
+      top: 78px;
+      left: 20px;
+      gap: 10px;
+    }
+
+    body.viewer-mode #modeToggle {
+      flex-direction: column;
+      gap: 10px;
     }
 
     body.viewer-mode #viewerGpxBtn {
-      position: absolute;
-      top: 124px;
-      left: 10px;
-      z-index: 999;
+      display: inline-block;
     }
 
     body.viewer-mode #layerToggle {
@@ -217,19 +218,19 @@
       }
 
       #runnerModeBtn.viewer-position {
-        top: 72px;
-        left: 8px;
+        position: static;
+      }
+
+      body.viewer-mode #buttonWrapper {
+        top: 76px;
+        left: 20px;
+        gap: 10px;
       }
 
       body.viewer-mode #runnerModeBtn,
       body.viewer-mode #viewerGpxBtn {
-        min-width: 120px;
-        width: 120px;
-      }
-
-      body.viewer-mode #viewerGpxBtn {
-        top: 130px;
-        left: 8px;
+        min-width: 140px;
+        width: 140px;
       }
 
       body.viewer-mode #layerToggle {
@@ -257,6 +258,7 @@
       <button id="runnerModeBtn">Runner</button>
       <button id="viewerModeBtn">Viewer</button>
     </div>
+    <button id="viewerGpxBtn" style="display: none;">Get GPX File</button>
     <div id="controls">
       <button id="startBtn">Start</button>
       <button id="stopBtn" disabled>Stop</button>
@@ -273,8 +275,6 @@
     </div>
     <ul id="suggestionsList"></ul>
   </div>
-
-  <button id="viewerGpxBtn" style="display: none;">Get GPX File</button>
 
   <div id="layerToggle">
     <label for="layerSelect">Map:</label>

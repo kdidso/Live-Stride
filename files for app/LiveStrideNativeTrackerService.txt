@@ -38,6 +38,11 @@ public class LiveStrideNativeTrackerService extends Service {
     private static final int NOTIFICATION_ID = 44221;
     private static final float MAX_ACCEPTED_ACCURACY_METERS = 10.0f;
     private static final double METERS_PER_MILE = 1609.34;
+    private static final int ANDROID_16_API_LEVEL = 36;
+    private static final String EXTRA_REQUEST_PROMOTED_ONGOING =
+            "android.requestPromotedOngoing";
+    private static final String EXTRA_SHORT_CRITICAL_TEXT =
+            "android.shortCriticalText";
     public static final String STATE_PREFS_NAME = "livestride_native_tracker_state";
     public static final String STATE_RUN_ID = "run_id";
     public static final String STATE_RUNNING = "running";
@@ -668,7 +673,7 @@ private void updateRunNotification(
                 ? "Mile split: --"
                 : mileSplitText;
 
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("LiveStride Run in Progress")
                 .setContentText(liveStats)
                 .setStyle(new NotificationCompat.BigTextStyle()
@@ -680,7 +685,7 @@ private void updateRunNotification(
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setColor(0xFFD32F2F)
-                .setColorized(true)
+                .setColorized(!shouldRequestPromotedLiveUpdate())
                 .setWhen(runStartTimeMs > 0L ? runStartTimeMs : System.currentTimeMillis())
                 .setShowWhen(true)
                 .setUsesChronometer(runStartTimeMs > 0L)
@@ -688,8 +693,25 @@ private void updateRunNotification(
                         android.R.drawable.ic_media_pause,
                         "STOP RUN",
                         stopPendingIntent
-                )
-                .build();
+                );
+
+        if (shouldRequestPromotedLiveUpdate()) {
+            builder.getExtras().putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true);
+            builder.getExtras().putString(
+                    EXTRA_SHORT_CRITICAL_TEXT,
+                    formatLiveUpdateChipText(distanceMiles)
+            );
+        }
+
+        return builder.build();
+    }
+
+    private static boolean shouldRequestPromotedLiveUpdate() {
+        return Build.VERSION.SDK_INT >= ANDROID_16_API_LEVEL;
+    }
+
+    private static String formatLiveUpdateChipText(double distanceMiles) {
+        return String.format(java.util.Locale.US, "%.2f mi", Math.max(0.0, distanceMiles));
     }
 
     private static String formatElapsedTime(long elapsedMs) {

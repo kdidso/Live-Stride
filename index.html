@@ -33,10 +33,13 @@
     #searchBar {
       position: absolute;
       top: 10px;
-      left: 160px;
+      left: 170px;
       right: 10px;
       z-index: 999;
       display: none;
+    }
+    .searchInputWrap {
+      position: relative;
     }
     #searchInput {
       padding: 10px;
@@ -48,6 +51,26 @@
     }
     body.viewer-mode #searchInput {
       width: 100%;
+      padding-right: 38px;
+    }
+    #clearSearchBtn {
+      position: absolute;
+      top: 50%;
+      right: 6px;
+      transform: translateY(-50%);
+      width: 30px;
+      min-width: 30px;
+      height: 30px;
+      padding: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: #666;
+      font-size: 22px;
+      line-height: 26px;
+      display: none;
+    }
+    #clearSearchBtn:hover {
+      background: rgba(0, 0, 0, 0.08);
     }
     button {
       padding: 10px 20px;
@@ -108,6 +131,9 @@
       border-radius: 4px;
       border: 1px solid #ccc;
     }
+    body.viewer-mode #layerToggle {
+      bottom: 96px;
+    }
 
     /* Recenter button */
     #recenterBtn {
@@ -148,7 +174,7 @@
 
     #runnerModeBtn.viewer-position {
       position: absolute;
-      top: 10px;
+      top: 64px;
       left: 10px;
       z-index: 999;
     }
@@ -159,8 +185,8 @@
 
     body.viewer-mode #viewerGpxBtn {
       position: absolute;
-      top: 58px;
-      right: 10px;
+      top: 116px;
+      left: 10px;
       z-index: 999;
     }
 
@@ -177,19 +203,26 @@
       }
 
       body.viewer-mode #searchBar {
-        left: 126px;
+        left: 8px;
         right: 8px;
+      }
+      body.viewer-mode #searchInput {
+        height: 48px;
       }
 
       #runnerModeBtn.viewer-position {
-        top: 8px;
+        top: 70px;
         left: 8px;
       }
 
       body.viewer-mode #viewerGpxBtn {
-        top: 56px;
-        right: 8px;
+        top: 124px;
+        left: 8px;
         min-width: 115px;
+      }
+
+      body.viewer-mode #layerToggle {
+        bottom: 110px;
       }
 
       #statsBar {
@@ -223,7 +256,10 @@
   </div>
 
   <div id="searchBar">
-    <input type="text" id="searchInput" placeholder="Search runner...">
+    <div class="searchInputWrap">
+      <input type="text" id="searchInput" placeholder="Search runner...">
+      <button id="clearSearchBtn" type="button" aria-label="Clear search">&times;</button>
+    </div>
     <ul id="suggestionsList"></ul>
   </div>
 
@@ -364,10 +400,19 @@
     const statsBar = document.getElementById("statsBar");
     const searchInput = document.getElementById("searchInput");
     const suggestionsList = document.getElementById("suggestionsList");
+    const clearSearchBtn = document.getElementById("clearSearchBtn");
     const runnerModeBtn = document.getElementById("runnerModeBtn");
     const viewerModeBtn = document.getElementById("viewerModeBtn");
     const recenterBtn = document.getElementById("recenterBtn");
     const layerSelect = document.getElementById("layerSelect");
+
+    function clearViewerSearch() {
+      searchRequestId++;
+      searchInput.value = "";
+      suggestionsList.innerHTML = "";
+      suggestionsList.style.display = "none";
+      if (clearSearchBtn) clearSearchBtn.style.display = "none";
+    }
 
     function setMode(mode) {
       const controls = document.getElementById("controls");
@@ -406,8 +451,7 @@
       if (document.body.classList.contains("viewer-mode")) {
         resetRunDisplay();
         selectedRunner = null;
-        searchInput.value = "";
-        suggestionsList.style.display = "none";
+        clearViewerSearch();
         hideViewerStatus();
       }
       setMode("runner");
@@ -2005,12 +2049,21 @@ fetchElevation(coord[1], coord[0]).then(elev => {
       }
     };
 
+    if (clearSearchBtn) {
+      clearSearchBtn.onclick = () => {
+        selectedRunner = null;
+        clearViewerSearch();
+        searchInput.focus();
+      };
+    }
+
     searchInput.oninput = async () => {
       const requestId = ++searchRequestId;
       const q = searchInput.value.trim();
 
       suggestionsList.innerHTML = "";
       suggestionsList.style.display = "none";
+      if (clearSearchBtn) clearSearchBtn.style.display = q ? "block" : "none";
 
       if (!q) return;
 
@@ -2049,6 +2102,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
 
 li.onclick = () => {
   searchInput.value = run.runner_name;
+  if (clearSearchBtn) clearSearchBtn.style.display = "block";
   viewerFollowing = true;
   selectedRunner = run.id;
   updateViewerWakeLock();

@@ -480,6 +480,73 @@
       exportPageOverlay.style.display = "none";
       exportPageOverlay.setAttribute("aria-hidden", "true");
     }
+
+    function downloadGpxInBrowser(filename, content) {
+      const blob = new Blob([content], { type: "application/gpx+xml" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function handleExportPageMessage(event) {
+      if (event.origin !== "https://kdidso.github.io") return;
+
+      const data = event.data || {};
+      if (data.source !== "livestride-export") return;
+
+      const replyToExportPage = (payload) => {
+        if (!exportPageFrame?.contentWindow) return;
+        exportPageFrame.contentWindow.postMessage(
+          {
+            source: "livestride-app",
+            requestId: data.requestId || null,
+            ...payload
+          },
+          "https://kdidso.github.io"
+        );
+      };
+
+      if (data.type === "saveGpx") {
+        const filename = String(data.filename || "LiveStride.gpx");
+        const content = String(data.content || "");
+
+        if (!content) {
+          replyToExportPage({
+            type: "saveGpxResult",
+            ok: false,
+            message: "No GPX content was provided."
+          });
+          return;
+        }
+
+        try {
+          downloadGpxInBrowser(filename, content);
+          replyToExportPage({
+            type: "saveGpxResult",
+            ok: true,
+            filename
+          });
+        } catch (err) {
+          replyToExportPage({
+            type: "saveGpxResult",
+            ok: false,
+            message: err?.message || String(err)
+          });
+        }
+      } else if (data.type === "openInPanel") {
+        const url = String(data.url || "");
+        if (exportPageFrame && url.startsWith("https://www.strava.com/")) {
+          exportPageFrame.src = url;
+        }
+      }
+    }
+
+    window.addEventListener("message", handleExportPageMessage);
     const statsBar = document.getElementById("statsBar");
     const searchInput = document.getElementById("searchInput");
     const suggestionsList = document.getElementById("suggestionsList");

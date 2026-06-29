@@ -168,6 +168,45 @@
       background-color: #f0f0f0;
     }
 
+    #exportPageOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 5000;
+      background: white;
+      display: none;
+      flex-direction: column;
+    }
+
+    #exportPageHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      background: #0b2a55;
+      color: white;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+      z-index: 1;
+    }
+
+    #exportPageTitle {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    #closeExportPageBtn {
+      min-width: 80px;
+      background: #28a745;
+      padding: 8px 14px;
+      font-size: 14px;
+    }
+
+    #exportPageFrame {
+      flex: 1;
+      width: 100%;
+      border: 0;
+    }
+
     #runnerModeBtn.viewer-position {
       position: static;
     }
@@ -289,6 +328,14 @@
   <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
 
+  <div id="exportPageOverlay" aria-hidden="true">
+    <div id="exportPageHeader">
+      <span id="exportPageTitle">LiveStride GPX Export</span>
+      <button id="closeExportPageBtn" type="button">Close</button>
+    </div>
+    <iframe id="exportPageFrame" title="LiveStride GPX Export"></iframe>
+  </div>
+
   <script>
     // -> Firebase initialization
     const firebaseConfig = {
@@ -408,6 +455,31 @@
     const exportGpxBtn = document.getElementById("exportGpxBtn");
     const uploadStravaBtn = document.getElementById("uploadStravaBtn");
     const viewerGpxBtn = document.getElementById("viewerGpxBtn");
+    const exportPageOverlay = document.getElementById("exportPageOverlay");
+    const exportPageFrame = document.getElementById("exportPageFrame");
+    const closeExportPageBtn = document.getElementById("closeExportPageBtn");
+
+    const EXPORT_PAGE_URL = "https://kdidso.github.io/livestride-export/";
+
+    function openExportPageInApp() {
+      if (!exportPageOverlay || !exportPageFrame) {
+        window.open(EXPORT_PAGE_URL, "_blank");
+        return;
+      }
+
+      if (exportPageFrame.src !== EXPORT_PAGE_URL) {
+        exportPageFrame.src = EXPORT_PAGE_URL;
+      }
+
+      exportPageOverlay.style.display = "flex";
+      exportPageOverlay.setAttribute("aria-hidden", "false");
+    }
+
+    function closeExportPageInApp() {
+      if (!exportPageOverlay) return;
+      exportPageOverlay.style.display = "none";
+      exportPageOverlay.setAttribute("aria-hidden", "true");
+    }
     const statsBar = document.getElementById("statsBar");
     const searchInput = document.getElementById("searchInput");
     const suggestionsList = document.getElementById("suggestionsList");
@@ -2844,8 +2916,12 @@ if (viewerFollowing) {
     exportGpxBtn.onclick = convertToGPX;
     uploadStravaBtn.onclick = uploadToStrava;
     viewerGpxBtn.onclick = () => {
-      window.open("https://kdidso.github.io/livestride-export/", "_blank");
+      openExportPageInApp();
     };
+
+    if (closeExportPageBtn) {
+      closeExportPageBtn.onclick = closeExportPageInApp;
+    }
 
     map.on("load", () => setMode("runner"));
   </script>

@@ -269,6 +269,45 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       background-color: #f0f0f0;
     }
 
+    #exportPageOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 5000;
+      background: white;
+      display: none;
+      flex-direction: column;
+    }
+
+    #exportPageHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: calc(8px + var(--top-safe-offset)) 12px 8px;
+      background: #0b2a55;
+      color: white;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+      z-index: 1;
+    }
+
+    #exportPageTitle {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    #closeExportPageBtn {
+      min-width: 80px;
+      background: #28a745;
+      padding: 8px 14px;
+      font-size: 14px;
+    }
+
+    #exportPageFrame {
+      flex: 1;
+      width: 100%;
+      border: 0;
+    }
+
     @media (max-width: 600px) {
       #buttonWrapper {
         top: calc(8px + var(--top-safe-offset));
@@ -394,6 +433,14 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
 
   <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
+
+  <div id="exportPageOverlay" aria-hidden="true">
+    <div id="exportPageHeader">
+      <span id="exportPageTitle">LiveStride GPX Export</span>
+      <button id="closeExportPageBtn" type="button">Close</button>
+    </div>
+    <iframe id="exportPageFrame" title="LiveStride GPX Export"></iframe>
+  </div>
 
   <script src="https://unpkg.com/@capacitor/core@7.3.0"></script>
   <script src="capacitor.js"></script>

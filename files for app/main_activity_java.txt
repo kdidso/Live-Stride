@@ -15,6 +15,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(BackgroundGeolocation.class);
         registerPlugin(LiveStrideNativeTrackerPlugin.class);
+        registerPlugin(LiveStrideExportPlugin.class);
 
         super.onCreate(savedInstanceState);
 

@@ -18,6 +18,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(LiveStrideExportPlugin.class);
 
         super.onCreate(savedInstanceState);
+        new Thread(() -> LiveStridePendingPointUploadJobService.cleanupOldCompletedRuns(this)).start();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(

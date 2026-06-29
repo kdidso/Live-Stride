@@ -180,6 +180,15 @@ function downloadGpxInBrowser(filename, content) {
   URL.revokeObjectURL(url);
 }
 
+async function openExternalUrl(url) {
+  if (LiveStrideExport?.openExternalUrl) {
+    await LiveStrideExport.openExternalUrl({ url });
+    return;
+  }
+
+  window.open(url, "_blank");
+}
+
 async function handleExportPageMessage(event) {
   if (event.origin !== "https://kdidso.github.io") return;
 
@@ -234,10 +243,15 @@ async function handleExportPageMessage(event) {
         message: err?.message || String(err)
       });
     }
-  } else if (data.type === "openInPanel") {
+  } else if (data.type === "openExternal" || data.type === "openInPanel") {
     const url = String(data.url || "");
-    if (exportPageFrame && url.startsWith("https://www.strava.com/")) {
-      exportPageFrame.src = url;
+    if (url.startsWith("https://www.strava.com/") || url.startsWith("https://strava.com/")) {
+      try {
+        await openExternalUrl(url);
+      } catch (err) {
+        console.warn("Unable to open external URL:", err);
+        window.open(url, "_blank");
+      }
     }
   }
 }

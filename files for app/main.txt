@@ -142,6 +142,31 @@ const viewerGpxBtn = document.getElementById("viewerGpxBtn");
 const broadcastCheckbox = document.getElementById("broadcastCheckbox");
 const exportGpxBtn = document.getElementById("exportGpxBtn");
 const uploadStravaBtn = document.getElementById("uploadStravaBtn");
+const exportPageOverlay = document.getElementById("exportPageOverlay");
+const exportPageFrame = document.getElementById("exportPageFrame");
+const closeExportPageBtn = document.getElementById("closeExportPageBtn");
+
+const EXPORT_PAGE_URL = "https://kdidso.github.io/livestride-export/";
+
+function openExportPageInApp() {
+  if (!exportPageOverlay || !exportPageFrame) {
+    window.open(EXPORT_PAGE_URL, "_blank");
+    return;
+  }
+
+  if (exportPageFrame.src !== EXPORT_PAGE_URL) {
+    exportPageFrame.src = EXPORT_PAGE_URL;
+  }
+
+  exportPageOverlay.style.display = "flex";
+  exportPageOverlay.setAttribute("aria-hidden", "false");
+}
+
+function closeExportPageInApp() {
+  if (!exportPageOverlay) return;
+  exportPageOverlay.style.display = "none";
+  exportPageOverlay.setAttribute("aria-hidden", "true");
+}
 
 function clearViewerSearch() {
   searchRequestId++;
@@ -2027,7 +2052,7 @@ broadcastBtn.onclick = async () => {
 };
 
 exportUploadBtn.onclick = () => {
-  window.open("https://kdidso.github.io/livestride-export/", "_blank");
+  openExportPageInApp();
   resetRunDisplay();
   exportUploadBtn.style.display = "none";
 };
@@ -2106,8 +2131,12 @@ uploadStravaBtn.style.display = "none";
 };
 
 viewerGpxBtn.onclick = () => {
-  window.open("https://kdidso.github.io/livestride-export/", "_blank");
+  openExportPageInApp();
 };
+
+if (closeExportPageBtn) {
+  closeExportPageBtn.onclick = closeExportPageInApp;
+}
 
 if (clearSearchBtn) {
   clearSearchBtn.onclick = () => {

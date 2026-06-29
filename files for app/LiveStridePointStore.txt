@@ -479,6 +479,72 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         }
     }
 
+    public synchronized JSONObject cleanupCompletedUploadedRunsBefore(long cutoffMs) {
+        SQLiteDatabase db = getWritableDatabase();
+        List<String> runIds = new ArrayList<>();
+        int deletedPointRows = 0;
+        int deletedFinishRows = 0;
+        int skippedRuns = 0;
+
+        Cursor cursor = db.query(
+                TABLE_FINISH_EVENTS,
+                new String[]{"run_id"},
+                "completed = 1 AND created_at_ms < ?",
+                new String[]{String.valueOf(cutoffMs)},
+                "run_id",
+                null,
+                null
+        );
+
+        try {
+            while (cursor.moveToNext()) {
+                String runId = cursor.getString(0);
+                if (runId != null && !runId.trim().isEmpty()) {
+                    runIds.add(runId);
+                }
+            }
+        } finally {
+            cursor.close();
+        }
+
+        for (String cleanupRunId : runIds) {
+            if (countPendingForRun(cleanupRunId) > 0) {
+                skippedRuns++;
+                continue;
+            }
+
+            deletedPointRows += db.delete(
+                    TABLE_NATIVE_POINTS,
+                    "run_id = ? AND uploaded = 1",
+                    new String[]{cleanupRunId}
+            );
+
+            deletedFinishRows += db.delete(
+                    TABLE_FINISH_EVENTS,
+                    "run_id = ? AND completed = 1 AND created_at_ms < ?",
+                    new String[]{cleanupRunId, String.valueOf(cutoffMs)}
+            );
+        }
+
+        JSONObject result = new JSONObject();
+        try {
+            result.put("eligibleRuns", runIds.size());
+            result.put("skippedRuns", skippedRuns);
+            result.put("deletedPointRows", deletedPointRows);
+            result.put("deletedFinishRows", deletedFinishRows);
+            result.put("cutoffMs", cutoffMs);
+        } catch (JSONException e) {
+            Log.w(TAG, "Could not build cleanup result JSON: " + e.getMessage());
+        }
+
+        if (deletedPointRows > 0 || deletedFinishRows > 0) {
+            Log.i(TAG, "Cleaned old completed native run data: " + result);
+            exportDebugCopy();
+        }
+
+        return result;
+    }
+
     public synchronized JSONObject getRunSummaryFromNativePoints(String runId) {
         if (runId == null) return null;
 

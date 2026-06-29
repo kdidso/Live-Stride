@@ -14,6 +14,7 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Calendar;
 import java.util.List;
 
 public class LiveStridePendingPointUploadJobService extends JobService {
@@ -185,9 +186,49 @@ public class LiveStridePendingPointUploadJobService extends JobService {
 
         if (!noPendingPoints || !finishEventsDone) {
             schedule(appContext);
+        } else {
+            cleanupOldCompletedRuns(appContext);
         }
 
         return allUploaded && noPendingPoints && finishEventsDone;
+    }
+
+    public static JSONObject cleanupOldCompletedRuns(Context context) {
+        Context appContext = context.getApplicationContext();
+        if (isNativeRunActive(appContext)) {
+            JSONObject skipped = new JSONObject();
+            try {
+                skipped.put("skipped", true);
+                skipped.put("reason", "native_run_active");
+            } catch (Exception ignored) {
+            }
+            Log.i(TAG, "Daily native point cleanup skipped: " + skipped);
+            return skipped;
+        }
+
+        LiveStridePointStore pointStore = new LiveStridePointStore(appContext);
+        long cutoffMs = todayLocalMidnightMs();
+        JSONObject result = pointStore.cleanupCompletedUploadedRunsBefore(cutoffMs);
+        Log.i(TAG, "Daily native point cleanup checked: " + result);
+        return result;
+    }
+
+    private static boolean isNativeRunActive(Context appContext) {
+        return appContext
+                .getSharedPreferences(
+                        LiveStrideNativeTrackerService.STATE_PREFS_NAME,
+                        Context.MODE_PRIVATE
+                )
+                .getBoolean(LiveStrideNativeTrackerService.STATE_RUNNING, false);
+    }
+
+    private static long todayLocalMidnightMs() {
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(Calendar.HOUR_OF_DAY, 0);
+        calendar.set(Calendar.MINUTE, 0);
+        calendar.set(Calendar.SECOND, 0);
+        calendar.set(Calendar.MILLISECOND, 0);
+        return calendar.getTimeInMillis();
     }
 
     private static boolean flushPendingFinishEvents(LiveStridePointStore pointStore) {

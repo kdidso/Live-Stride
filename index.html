@@ -493,6 +493,10 @@
       URL.revokeObjectURL(url);
     }
 
+    function openExternalUrl(url) {
+      window.open(url, "_blank");
+    }
+
     function handleExportPageMessage(event) {
       if (event.origin !== "https://kdidso.github.io") return;
 
@@ -538,10 +542,10 @@
             message: err?.message || String(err)
           });
         }
-      } else if (data.type === "openInPanel") {
+      } else if (data.type === "openExternal" || data.type === "openInPanel") {
         const url = String(data.url || "");
-        if (exportPageFrame && url.startsWith("https://www.strava.com/")) {
-          exportPageFrame.src = url;
+        if (url.startsWith("https://www.strava.com/") || url.startsWith("https://strava.com/")) {
+          openExternalUrl(url);
         }
       }
     }

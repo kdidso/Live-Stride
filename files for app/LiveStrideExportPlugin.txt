@@ -2,6 +2,7 @@ package com.kdidso.livestride;
 
 import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
@@ -20,6 +21,30 @@ import java.nio.charset.StandardCharsets;
 
 @CapacitorPlugin(name = "LiveStrideExport")
 public class LiveStrideExportPlugin extends Plugin {
+
+    @PluginMethod
+    public void openExternalUrl(PluginCall call) {
+        String url = call.getString("url");
+
+        if (url == null || url.trim().isEmpty()) {
+            call.reject("Missing URL.");
+            return;
+        }
+
+        if (!url.startsWith("https://www.strava.com/") && !url.startsWith("https://strava.com/")) {
+            call.reject("Only Strava links can be opened from this action.");
+            return;
+        }
+
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("Could not open Strava: " + e.getMessage(), e);
+        }
+    }
 
     @PluginMethod
     public void saveGpxToDownloads(PluginCall call) {

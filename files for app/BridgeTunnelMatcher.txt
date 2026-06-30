@@ -142,6 +142,16 @@ final class BridgeTunnelMatcher {
         }
     }
 
+    private static final class StructurePath {
+        final List<Point> points;
+        final Set<String> segmentIds;
+
+        StructurePath(List<Point> points, Set<String> segmentIds) {
+            this.points = points;
+            this.segmentIds = segmentIds;
+        }
+    }
+
     private static final class EntryEvidence {
         final double movementBearing;
         final double headingError;
@@ -191,6 +201,7 @@ final class BridgeTunnelMatcher {
     private double heldDistanceMeters;
     private String structureType = "";
     private String activeStructureId = "";
+    private Set<String> activeStructureIds = new HashSet<>();
 
     void reset() {
         state = State.NORMAL;
@@ -424,7 +435,8 @@ final class BridgeTunnelMatcher {
             return;
         }
 
-        structureRoute = orientedStructure;
+        StructurePath structurePath = buildStructureContinuation(best, enterAtStart);
+        structureRoute = structurePath.points;
         activeRoute = new ArrayList<>(structureRoute);
         activeRouteLengthMeters = polylineLength(activeRoute);
         progressMeters = Math.min(
@@ -434,6 +446,7 @@ final class BridgeTunnelMatcher {
         lastMatchedTimeMs = timeMs;
         structureType = best.brunnel;
         activeStructureId = best.id;
+        activeStructureIds = structurePath.segmentIds;
         state = State.STRUCTURE;
     }
 
@@ -444,7 +457,7 @@ final class BridgeTunnelMatcher {
         Set<String> seen = new HashSet<>();
         for (Segment segment : context.segments) {
             if (segment.points.size() < 2
-                    || segment.id.equals(activeStructureId)
+                    || activeStructureIds.contains(segment.id)
                     || segment.isStructure()) {
                 continue;
             }
@@ -513,7 +526,7 @@ final class BridgeTunnelMatcher {
     private List<Point> buildBranchContinuation(Branch initialBranch) {
         List<Point> route = new ArrayList<>(initialBranch.points);
         Set<String> usedIds = new HashSet<>();
-        usedIds.add(activeStructureId);
+        usedIds.addAll(activeStructureIds);
         usedIds.add(initialBranch.segment.id);
 
         for (int depth = 0; depth < 3; depth++) {
@@ -569,6 +582,68 @@ final class BridgeTunnelMatcher {
             usedIds.add(best.id);
         }
         return route;
+    }
+
+    private StructurePath buildStructureContinuation(Segment initialSegment, boolean enterAtStart) {
+        List<Point> route = new ArrayList<>(orientedPoints(initialSegment, enterAtStart));
+        Set<String> usedIds = new HashSet<>();
+        usedIds.add(initialSegment.id);
+        String brunnel = initialSegment.brunnel;
+
+        for (int depth = 0; depth < 8; depth++) {
+            Point routeEnd = route.get(route.size() - 1);
+            double incomingBearing = bearingDegrees(route.get(route.size() - 2), routeEnd);
+            Segment best = null;
+            boolean startsAtEnd = true;
+            double bestScore = Double.MAX_VALUE;
+
+            for (Segment candidate : context.segments) {
+                if (candidate.points.size() < 2
+                        || usedIds.contains(candidate.id)
+                        || !brunnel.equals(candidate.brunnel)) {
+                    continue;
+                }
+
+                double startDistance = distanceMeters(routeEnd, candidate.points.get(0));
+                double endDistance = distanceMeters(
+                        routeEnd,
+                        candidate.points.get(candidate.points.size() - 1)
+                );
+
+                if (startDistance <= CONNECTION_RADIUS_METERS) {
+                    double score = startDistance + angleDifference(
+                            incomingBearing,
+                            bearingDegrees(candidate.points.get(0), candidate.points.get(1))
+                    ) / 20.0;
+                    if (score < bestScore) {
+                        best = candidate;
+                        startsAtEnd = true;
+                        bestScore = score;
+                    }
+                }
+                if (endDistance <= CONNECTION_RADIUS_METERS) {
+                    double score = endDistance + angleDifference(
+                            incomingBearing,
+                            bearingDegrees(
+                                    candidate.points.get(candidate.points.size() - 1),
+                                    candidate.points.get(candidate.points.size() - 2)
+                            )
+                    ) / 20.0;
+                    if (score < bestScore) {
+                        best = candidate;
+                        startsAtEnd = false;
+                        bestScore = score;
+                    }
+                }
+            }
+
+            if (best == null) break;
+            List<Point> continuation = orientedPoints(best, startsAtEnd);
+            route.addAll(continuation.subList(1, continuation.size()));
+            usedIds.add(best.id);
+        }
+
+        return new StructurePath(route, usedIds);
     }
 
     private void updateRecentSpeed(Point rawPoint, long timeMs, boolean accuracyIsGood) {
@@ -637,6 +712,7 @@ final class BridgeTunnelMatcher {
         heldDistanceMeters = 0.0;
         structureType = "";
         activeStructureId = "";
+        activeStructureIds = new HashSet<>();
     }
 
     private static boolean rawHandoffIsStrong(float accuracyMeters) {

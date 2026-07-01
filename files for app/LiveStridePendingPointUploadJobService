@@ -209,8 +209,24 @@ public class LiveStridePendingPointUploadJobService extends JobService {
         LiveStridePointStore pointStore = new LiveStridePointStore(appContext);
         long cutoffMs = todayLocalMidnightMs();
         JSONObject result = pointStore.cleanupCompletedUploadedRunsBefore(cutoffMs);
+        clearStaleNativeTrackerState(appContext, cutoffMs);
         Log.i(TAG, "Daily native point cleanup checked: " + result);
         return result;
+    }
+
+    private static void clearStaleNativeTrackerState(Context appContext, long cutoffMs) {
+        android.content.SharedPreferences prefs = appContext.getSharedPreferences(
+                LiveStrideNativeTrackerService.STATE_PREFS_NAME,
+                Context.MODE_PRIVATE
+        );
+
+        boolean running = prefs.getBoolean(LiveStrideNativeTrackerService.STATE_RUNNING, false);
+        long stoppedAtMs = prefs.getLong(LiveStrideNativeTrackerService.STATE_STOPPED_AT_MS, 0L);
+
+        if (!running && stoppedAtMs > 0L && stoppedAtMs < cutoffMs) {
+            prefs.edit().clear().apply();
+            Log.i(TAG, "Cleared stale native tracker restore state stoppedAtMs=" + stoppedAtMs);
+        }
     }
 
     private static boolean isNativeRunActive(Context appContext) {

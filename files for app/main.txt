@@ -1516,14 +1516,23 @@ async function restoreRunnerFromNativeState() {
     const finalTimeMs = Number(state.finalTimeMs || 0);
     statsBar.style.display = "block";
 
-    const hydrated = pathCoords.length === 0
-      ? await hydrateRunnerFromNativeSqliteInBatches({ finalTimeMs, focusLatestPoint: true })
-      : await refreshRunnerFromNativeSqlite({
-          includeFullPath: false,
-          finalTimeMs,
-          focusLatestPoint: true,
-          limit: NATIVE_HYDRATION_BATCH_SIZE
-        });
+    let hydrated = false;
+    if (!isNativeRunning && stoppedAtMs > 0) {
+      clearRunnerNativeRestoreDisplay();
+      hydrated = await hydrateRunnerFromNativeSqliteInBatches({
+        finalTimeMs,
+        focusLatestPoint: true
+      });
+    } else {
+      hydrated = pathCoords.length === 0
+        ? await hydrateRunnerFromNativeSqliteInBatches({ finalTimeMs, focusLatestPoint: true })
+        : await refreshRunnerFromNativeSqlite({
+            includeFullPath: false,
+            finalTimeMs,
+            focusLatestPoint: true,
+            limit: NATIVE_HYDRATION_BATCH_SIZE
+          });
+    }
 
     if (!isNativeRunning && stoppedAtMs > 0) {
       settleRunnerAfterNativeStop(finalTimeMs);
@@ -1560,6 +1569,20 @@ function stopRunnerNativeSnapshotPolling() {
     clearInterval(runnerNativeSnapshotTimerId);
     runnerNativeSnapshotTimerId = null;
   }
+}
+
+function clearRunnerNativeRestoreDisplay() {
+  pathCoords = [];
+  runnerNativeLastSequenceNum = -1;
+  runnerNativeDisplayActive = false;
+  totalDistanceMeters = 0;
+  latestRunnerDistance = 0;
+  latestRunnerPace = 0;
+  latestRunnerAvgPace = 0;
+  latestRunnerElevFt = null;
+  lastPointTime = null;
+  startTime = null;
+  clearRunPathLayer();
 }
 
 function clearLegacyQueuedRunPoints() {

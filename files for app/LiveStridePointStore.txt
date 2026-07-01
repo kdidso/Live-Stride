@@ -37,6 +37,10 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
 
     public static final String TABLE_NATIVE_POINTS = "native_run_points";
     public static final String TABLE_FINISH_EVENTS = "pending_finish_events";
+    private static final String ACCEPTED_ROUTE_POINT_WHERE =
+            "(app_state IS NULL OR LOWER(app_state) NOT LIKE '%reject%')"
+                    + " AND (note IS NULL OR (LOWER(note) NOT LIKE '%reject%'"
+                    + " AND LOWER(note) NOT LIKE '%ignored%'))";
 
     private final Context appContext;
 
@@ -552,6 +556,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         Cursor cursor = db.rawQuery(
                 "SELECT lat, lon, recorded_at, distance_m FROM " + TABLE_NATIVE_POINTS
                         + " WHERE run_id = ?"
+                        + " AND " + ACCEPTED_ROUTE_POINT_WHERE
                         + " ORDER BY sequence_num ASC, recorded_at ASC, local_id ASC",
                 new String[]{runId}
         );
@@ -599,7 +604,8 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             String runId,
             int afterSequenceNum,
             int beforeSequenceNum,
-            boolean includeFullPath
+            boolean includeFullPath,
+            int limit
     ) {
         if (runId == null) return null;
 
@@ -613,17 +619,18 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         String[] pointArgs;
 
         if (includeFullPath) {
-            pointWhere = "run_id = ?";
+            pointWhere = "run_id = ? AND " + ACCEPTED_ROUTE_POINT_WHERE;
             pointArgs = new String[]{runId};
         } else if (beforeSequenceNum >= 0) {
-            pointWhere = "run_id = ? AND sequence_num > ? AND sequence_num < ?";
+            pointWhere = "run_id = ? AND sequence_num > ? AND sequence_num < ?"
+                    + " AND " + ACCEPTED_ROUTE_POINT_WHERE;
             pointArgs = new String[]{
                     runId,
                     String.valueOf(afterSequenceNum),
                     String.valueOf(beforeSequenceNum)
             };
         } else {
-            pointWhere = "run_id = ? AND sequence_num > ?";
+            pointWhere = "run_id = ? AND sequence_num > ? AND " + ACCEPTED_ROUTE_POINT_WHERE;
             pointArgs = new String[]{runId, String.valueOf(afterSequenceNum)};
         }
 
@@ -634,7 +641,8 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                 pointArgs,
                 null,
                 null,
-                "sequence_num ASC, recorded_at ASC, local_id ASC"
+                "sequence_num ASC, recorded_at ASC, local_id ASC",
+                limit > 0 ? String.valueOf(limit) : null
         );
 
         try {
@@ -648,7 +656,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         Cursor latestCursor = db.query(
                 TABLE_NATIVE_POINTS,
                 null,
-                "run_id = ?",
+                "run_id = ? AND " + ACCEPTED_ROUTE_POINT_WHERE,
                 new String[]{runId},
                 null,
                 null,
@@ -671,7 +679,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         Cursor firstCursor = db.query(
                 TABLE_NATIVE_POINTS,
                 new String[]{"recorded_at"},
-                "run_id = ?",
+                "run_id = ? AND " + ACCEPTED_ROUTE_POINT_WHERE,
                 new String[]{runId},
                 null,
                 null,

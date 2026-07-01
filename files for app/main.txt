@@ -268,6 +268,7 @@ function clearViewerSearch() {
 
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
 const NATIVE_HYDRATION_BATCH_SIZE = 500;
+const STOPPED_NATIVE_RESTORE_GRACE_MS = 30 * 60 * 1000;
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
 
@@ -1158,6 +1159,16 @@ function isRunnerNativeSnapshotAllowed() {
   );
 }
 
+async function clearNativeTrackerRestoreState() {
+  if (!LiveStrideNativeTracker?.clearNativeTrackerState) return;
+
+  try {
+    await LiveStrideNativeTracker.clearNativeTrackerState();
+  } catch (err) {
+    console.warn("Native tracker state clear failed:", err);
+  }
+}
+
 function upsertRunnerNativeDisplayPoint(point) {
   const normalized = normalizeNativeRunPoint(point);
   if (normalized.sequenceNum == null) return;
@@ -1180,6 +1191,7 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
   if (!snapshot) return false;
 
   const finalTimeMs = Number(options.finalTimeMs || 0);
+  const focusLatestPoint = Boolean(options.focusLatestPoint);
   const points = Array.isArray(snapshot.points) ? snapshot.points : [];
   const latestRaw = snapshot.latestPoint && typeof snapshot.latestPoint === "object"
     ? snapshot.latestPoint
@@ -1241,7 +1253,16 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
   );
 
   if (isFollowing && Number.isFinite(latestPoint.lon) && Number.isFinite(latestPoint.lat)) {
-    map.setCenter([latestPoint.lon, latestPoint.lat]);
+    const latestCenter = [latestPoint.lon, latestPoint.lat];
+    if (focusLatestPoint && map?.flyTo) {
+      map.flyTo({
+        center: latestCenter,
+        zoom: Math.max(map.getZoom?.() || 0, 16),
+        essential: true
+      });
+    } else {
+      map.setCenter(latestCenter);
+    }
   }
 
   return true;
@@ -1272,7 +1293,10 @@ async function refreshRunnerFromNativeSqlite(options = {}) {
     });
 
     const snapshot = JSON.parse(result?.snapshotJson || "{}");
-    return applyRunnerNativeSnapshot(snapshot, includeFullPath, { finalTimeMs });
+    return applyRunnerNativeSnapshot(snapshot, includeFullPath, {
+      finalTimeMs,
+      focusLatestPoint: Boolean(options.focusLatestPoint)
+    });
   } catch (err) {
     console.warn("Native SQLite runner snapshot failed:", err);
     return false;
@@ -1306,7 +1330,10 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
     const points = Array.isArray(snapshot.points) ? snapshot.points : [];
     if (points.length === 0) break;
 
-    applyRunnerNativeSnapshot(snapshot, firstBatch, { finalTimeMs });
+    applyRunnerNativeSnapshot(snapshot, firstBatch, {
+      finalTimeMs,
+      focusLatestPoint: Boolean(options.focusLatestPoint) && firstBatch
+    });
     loadedAny = true;
     firstBatch = false;
 
@@ -1470,6 +1497,16 @@ async function restoreRunnerFromNativeState() {
     const nativeRunId = state?.runId;
     if (!nativeRunId) return false;
 
+    const stoppedAtMs = Number(state.stoppedAtMs || 0);
+    const isNativeRunning = state.running === true;
+    const stoppedRecently = stoppedAtMs > 0
+      && Date.now() - stoppedAtMs <= STOPPED_NATIVE_RESTORE_GRACE_MS;
+
+    if (!isNativeRunning && !stoppedRecently) {
+      await clearNativeTrackerRestoreState();
+      return false;
+    }
+
     if (!activeRunId) {
       activeRunId = nativeRunId;
     } else if (activeRunId !== nativeRunId) {
@@ -1480,18 +1517,20 @@ async function restoreRunnerFromNativeState() {
     statsBar.style.display = "block";
 
     const hydrated = pathCoords.length === 0
-      ? await hydrateRunnerFromNativeSqliteInBatches({ finalTimeMs })
+      ? await hydrateRunnerFromNativeSqliteInBatches({ finalTimeMs, focusLatestPoint: true })
       : await refreshRunnerFromNativeSqlite({
           includeFullPath: false,
           finalTimeMs,
+          focusLatestPoint: true,
           limit: NATIVE_HYDRATION_BATCH_SIZE
         });
 
-    if (state.running === false && Number(state.stoppedAtMs || 0) > 0) {
+    if (!isNativeRunning && stoppedAtMs > 0) {
       settleRunnerAfterNativeStop(finalTimeMs);
       showConnectionStatus("Run stopped - background sync will finish if needed", "good");
       hideConnectionStatusSoon();
-    } else if (state.running === true) {
+      await clearNativeTrackerRestoreState();
+    } else if (isNativeRunning) {
       startBtn.disabled = true;
       stopBtn.disabled = false;
       ensureRunnerTimerRunning();

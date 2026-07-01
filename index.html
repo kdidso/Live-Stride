@@ -2252,7 +2252,7 @@ fetchElevation(coord[1], coord[0]).then(elev => {
           ? new Date(run.started_at).toLocaleTimeString()
           : "";
 
-        li.textContent = `${run.runner_name} - ${status} - ${started}`;
+        li.textContent = `${run.runner_name} - ${status} - Started ${started}`;
 
 li.onclick = () => {
   searchInput.value = run.runner_name;

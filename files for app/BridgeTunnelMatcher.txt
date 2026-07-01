@@ -33,6 +33,7 @@ final class BridgeTunnelMatcher {
     static final double ENTRY_MIN_MOVEMENT_METERS = 2.0;
     static final double ENTRY_MAX_LOOSE_HEADING_ERROR_DEGREES = 55.0;
     static final double ENTRY_MAX_APPROACH_TO_ENTRANCE_ERROR_DEGREES = 75.0;
+    static final double ENTRY_MAX_LATE_STEP_HEADING_ERROR_DEGREES = 25.0;
     static final double ENTRY_SHARP_REVERSAL_DEGREES = 135.0;
     static final long ENTRY_LOOSE_MIN_OBSERVATION_MS = 1_500L;
 
@@ -158,6 +159,7 @@ final class BridgeTunnelMatcher {
         final double entranceApproachError;
         final boolean approachTrend;
         final boolean strongApproachTrend;
+        final boolean recentAlignedStructureStep;
         final boolean recentSharpReversal;
         final long observationSpanMs;
 
@@ -167,6 +169,7 @@ final class BridgeTunnelMatcher {
                 double entranceApproachError,
                 boolean approachTrend,
                 boolean strongApproachTrend,
+                boolean recentAlignedStructureStep,
                 boolean recentSharpReversal,
                 long observationSpanMs
         ) {
@@ -175,6 +178,7 @@ final class BridgeTunnelMatcher {
             this.entranceApproachError = entranceApproachError;
             this.approachTrend = approachTrend;
             this.strongApproachTrend = strongApproachTrend;
+            this.recentAlignedStructureStep = recentAlignedStructureStep;
             this.recentSharpReversal = recentSharpReversal;
             this.observationSpanMs = observationSpanMs;
         }
@@ -388,6 +392,7 @@ final class BridgeTunnelMatcher {
         Segment best = null;
         boolean enterAtStart = true;
         double bestDistance = Double.MAX_VALUE;
+        boolean bestUsesStructureLine = false;
 
         for (Segment segment : context.segments) {
             if (!segment.isStructure() || segment.points.size() < 2) continue;
@@ -402,11 +407,31 @@ final class BridgeTunnelMatcher {
                 best = segment;
                 enterAtStart = true;
                 bestDistance = startDistance;
+                bestUsesStructureLine = false;
             }
             if (endDistance < bestDistance) {
                 best = segment;
                 enterAtStart = false;
                 bestDistance = endDistance;
+                bestUsesStructureLine = false;
+            }
+
+            List<Point> startToEnd = orientedPoints(segment, true);
+            Projection structureProjection = project(startToEnd, rawPoint);
+            if (bestDistance > ENTRY_RADIUS_METERS
+                    && structureProjection.distanceMeters <= STRICT_ENTRY_RADIUS_METERS) {
+                double movementBearing = bearingDegrees(lastRawPoint, rawPoint);
+                double startHeading = bearingDegrees(startToEnd.get(0), startToEnd.get(1));
+                double endHeading = bearingDegrees(
+                        startToEnd.get(startToEnd.size() - 1),
+                        startToEnd.get(startToEnd.size() - 2)
+                );
+
+                best = segment;
+                enterAtStart = angleDifference(movementBearing, startHeading)
+                        <= angleDifference(movementBearing, endHeading);
+                bestDistance = structureProjection.distanceMeters;
+                bestUsesStructureLine = true;
             }
         }
 
@@ -423,10 +448,19 @@ final class BridgeTunnelMatcher {
         EntryEvidence entryEvidence = entryEvidence(
                 rawPoint,
                 entrance,
-                structureBearing
+                structureBearing,
+                orientedStructure
         );
-        if (entryEvidence == null || !entryEvidence.approachTrend) return;
-        if (entryEvidence.headingError > 75.0) return;
+        if (entryEvidence == null) return;
+        if (!entryEvidence.approachTrend
+                && !entryEvidence.recentAlignedStructureStep) {
+            return;
+        }
+        if (entryEvidence.headingError > 75.0
+                && !entryEvidence.recentAlignedStructureStep) {
+            return;
+        }
+        if (bestUsesStructureLine && !entryEvidence.recentAlignedStructureStep) return;
         if (entryNeedsStrongerEvidence(
                 accuracyMeters,
                 bestDistance,
@@ -753,7 +787,8 @@ final class BridgeTunnelMatcher {
     private EntryEvidence entryEvidence(
             Point rawPoint,
             Point entrance,
-            double structureBearing
+            double structureBearing,
+            List<Point> orientedStructure
     ) {
         if (entryObservations.size() < 2) return null;
 
@@ -762,6 +797,7 @@ final class BridgeTunnelMatcher {
         Double previousHeading = null;
         double firstDistance = Double.MAX_VALUE;
         int closingSteps = 0;
+        boolean recentAlignedStructureStep = false;
         boolean recentSharpReversal = false;
 
         for (Observation observation : entryObservations) {
@@ -778,7 +814,15 @@ final class BridgeTunnelMatcher {
                     closingSteps++;
                 }
 
+                double stepDistance = distanceMeters(previous.point, observation.point);
                 double heading = bearingDegrees(previous.point, observation.point);
+                Projection structureProjection = project(orientedStructure, observation.point);
+                if (stepDistance >= ENTRY_MIN_MOVEMENT_METERS
+                        && structureProjection.distanceMeters <= STRICT_ENTRY_RADIUS_METERS
+                        && angleDifference(heading, structureBearing)
+                        <= ENTRY_MAX_LATE_STEP_HEADING_ERROR_DEGREES) {
+                    recentAlignedStructureStep = true;
+                }
                 if (previousHeading != null
                         && angleDifference(previousHeading, heading)
                         >= ENTRY_SHARP_REVERSAL_DEGREES) {
@@ -806,6 +850,7 @@ final class BridgeTunnelMatcher {
                 angleDifference(movementBearing, entranceBearing),
                 approachTrend,
                 strongApproachTrend,
+                recentAlignedStructureStep,
                 recentSharpReversal,
                 previous == null ? 0L : previous.timeMs - first.timeMs
         );
@@ -819,6 +864,10 @@ final class BridgeTunnelMatcher {
         boolean excellentAccuracy = accuracyMeters >= 0.0f
                 && accuracyMeters <= EXCELLENT_ACCURACY_METERS;
         if (excellentAccuracy) {
+            if (entryDistanceMeters <= ENTRY_RADIUS_METERS
+                    && evidence.recentAlignedStructureStep) {
+                return false;
+            }
             return evidence.headingError > MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES;
         }
 

@@ -164,6 +164,22 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void clearNativeTrackerState(PluginCall call) {
+        getContext()
+                .getSharedPreferences(
+                        LiveStrideNativeTrackerService.STATE_PREFS_NAME,
+                        android.content.Context.MODE_PRIVATE
+                )
+                .edit()
+                .clear()
+                .apply();
+
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        call.resolve(result);
+    }
+
+    @PluginMethod
     public void getNativeRunSnapshot(PluginCall call) {
         String runId = call.getString("runId");
         int afterSequenceNum = call.getInt("afterSequenceNum", -1);

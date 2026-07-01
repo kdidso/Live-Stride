@@ -169,6 +169,7 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         int afterSequenceNum = call.getInt("afterSequenceNum", -1);
         int beforeSequenceNum = call.getInt("beforeSequenceNum", -1);
         boolean includeFullPath = call.getBoolean("includeFullPath", false);
+        int limit = call.getInt("limit", 0);
 
         if (runId == null || runId.trim().isEmpty()) {
             call.reject("Missing runId.");
@@ -182,7 +183,8 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                         runId,
                         afterSequenceNum,
                         beforeSequenceNum,
-                        includeFullPath
+                        includeFullPath,
+                        limit
                 );
 
                 JSObject result = new JSObject();

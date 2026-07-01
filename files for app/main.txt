@@ -267,6 +267,7 @@ function clearViewerSearch() {
 }
 
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
+const NATIVE_HYDRATION_BATCH_SIZE = 500;
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
 
@@ -1175,9 +1176,10 @@ function upsertRunnerNativeDisplayPoint(point) {
   }
 }
 
-function applyRunnerNativeSnapshot(snapshot, includeFullPath = false) {
+function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = {}) {
   if (!snapshot) return false;
 
+  const finalTimeMs = Number(options.finalTimeMs || 0);
   const points = Array.isArray(snapshot.points) ? snapshot.points : [];
   const latestRaw = snapshot.latestPoint && typeof snapshot.latestPoint === "object"
     ? snapshot.latestPoint
@@ -1224,9 +1226,11 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false) {
     pointSequence = Math.max(pointSequence, latestPoint.sequenceNum + 1);
   }
 
-  const elapsedMs = startTime
-    ? Math.max(0, (latestPoint.timestamp || Date.now()) - startTime)
-    : 0;
+  const elapsedMs = finalTimeMs > 0
+    ? finalTimeMs
+    : startTime
+      ? Math.max(0, (latestPoint.timestamp || Date.now()) - startTime)
+      : 0;
 
   updateStatsDisplay(
     latestRunnerDistance,
@@ -1247,6 +1251,8 @@ async function refreshRunnerFromNativeSqlite(options = {}) {
   if (!isRunnerNativeSnapshotAllowed()) return false;
 
   const includeFullPath = Boolean(options.includeFullPath);
+  const finalTimeMs = Number(options.finalTimeMs || 0);
+  const limit = Number.isFinite(options.limit) ? options.limit : 0;
   const afterSequenceNum = includeFullPath
     ? -1
     : Number.isFinite(options.afterSequenceNum)
@@ -1261,15 +1267,61 @@ async function refreshRunnerFromNativeSqlite(options = {}) {
       runId: activeRunId,
       afterSequenceNum,
       beforeSequenceNum,
-      includeFullPath
+      includeFullPath,
+      limit
     });
 
     const snapshot = JSON.parse(result?.snapshotJson || "{}");
-    return applyRunnerNativeSnapshot(snapshot, includeFullPath);
+    return applyRunnerNativeSnapshot(snapshot, includeFullPath, { finalTimeMs });
   } catch (err) {
     console.warn("Native SQLite runner snapshot failed:", err);
     return false;
   }
+}
+
+async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
+  if (!isRunnerNativeSnapshotAllowed()) return false;
+
+  const finalTimeMs = Number(options.finalTimeMs || 0);
+  let afterSequenceNum = -1;
+  let loadedAny = false;
+  let firstBatch = pathCoords.length === 0;
+
+  for (let i = 0; i < 40; i++) {
+    let snapshot;
+    try {
+      const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
+        runId: activeRunId,
+        afterSequenceNum,
+        beforeSequenceNum: -1,
+        includeFullPath: false,
+        limit: NATIVE_HYDRATION_BATCH_SIZE
+      });
+      snapshot = JSON.parse(result?.snapshotJson || "{}");
+    } catch (err) {
+      console.warn("Native SQLite batched hydration failed:", err);
+      return loadedAny;
+    }
+
+    const points = Array.isArray(snapshot.points) ? snapshot.points : [];
+    if (points.length === 0) break;
+
+    applyRunnerNativeSnapshot(snapshot, firstBatch, { finalTimeMs });
+    loadedAny = true;
+    firstBatch = false;
+
+    const latestBatchPoint = points
+      .map(normalizeNativeRunPoint)
+      .filter(point => point.sequenceNum != null)
+      .sort((a, b) => b.sequenceNum - a.sequenceNum)[0];
+
+    if (!latestBatchPoint) break;
+    afterSequenceNum = latestBatchPoint.sequenceNum;
+
+    if (points.length < NATIVE_HYDRATION_BATCH_SIZE) break;
+  }
+
+  return loadedAny;
 }
 
 function getSequenceGaps(points) {
@@ -1352,10 +1404,21 @@ async function recoverRunnerPathOnWake() {
   runnerWakeRecoveryInFlight = true;
 
   try {
+    const loadedFromNative = pathCoords.length === 0
+      ? await hydrateRunnerFromNativeSqliteInBatches()
+      : await refreshRunnerFromNativeSqlite({
+          includeFullPath: false,
+          limit: NATIVE_HYDRATION_BATCH_SIZE
+        });
+
+    if (loadedFromNative) {
+      return true;
+    }
+
     const loadedFromSupabase = await loadRunnerPathFromSupabaseNative();
 
     if (!loadedFromSupabase) {
-      return refreshRunnerFromNativeSqlite({ includeFullPath: pathCoords.length === 0 });
+      return false;
     }
 
     const supabaseLatestSequence = getLatestSequencePoint(pathCoords)?.sequenceNum ?? runnerNativeLastSequenceNum;
@@ -1377,6 +1440,68 @@ async function recoverRunnerPathOnWake() {
     return true;
   } finally {
     runnerWakeRecoveryInFlight = false;
+  }
+}
+
+function ensureRunnerTimerRunning() {
+  if (runnerTimerId !== null) return;
+
+  runnerTimerId = setInterval(() => {
+    if (!startTime) return;
+
+    const elapsedMs = Date.now() - startTime;
+    updateStatsDisplay(
+      latestRunnerDistance,
+      latestRunnerPace,
+      latestRunnerAvgPace,
+      elapsedMs,
+      latestRunnerElevFt
+    );
+  }, 1000);
+}
+
+async function restoreRunnerFromNativeState() {
+  if (!LiveStrideNativeTracker || document.body.classList.contains("viewer-mode")) {
+    return false;
+  }
+
+  try {
+    const state = await LiveStrideNativeTracker.getNativeTrackerState();
+    const nativeRunId = state?.runId;
+    if (!nativeRunId) return false;
+
+    if (!activeRunId) {
+      activeRunId = nativeRunId;
+    } else if (activeRunId !== nativeRunId) {
+      return false;
+    }
+
+    const finalTimeMs = Number(state.finalTimeMs || 0);
+    statsBar.style.display = "block";
+
+    const hydrated = pathCoords.length === 0
+      ? await hydrateRunnerFromNativeSqliteInBatches({ finalTimeMs })
+      : await refreshRunnerFromNativeSqlite({
+          includeFullPath: false,
+          finalTimeMs,
+          limit: NATIVE_HYDRATION_BATCH_SIZE
+        });
+
+    if (state.running === false && Number(state.stoppedAtMs || 0) > 0) {
+      settleRunnerAfterNativeStop(finalTimeMs);
+      showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+      hideConnectionStatusSoon();
+    } else if (state.running === true) {
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      ensureRunnerTimerRunning();
+      startRunnerNativeSnapshotPolling();
+    }
+
+    return hydrated;
+  } catch (err) {
+    console.warn("Native runner restore failed:", err);
+    return false;
   }
 }
 
@@ -1441,15 +1566,23 @@ window.addEventListener("offline", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    syncRunnerUiWithNativeStop();
-    recoverRunnerPathOnWake();
+    restoreRunnerFromNativeState().then(restored => {
+      if (!restored) {
+        syncRunnerUiWithNativeStop();
+        recoverRunnerPathOnWake();
+      }
+    });
     flushSupabaseQueue();
   }
 });
 
 window.addEventListener("focus", () => {
-  syncRunnerUiWithNativeStop();
-  recoverRunnerPathOnWake();
+  restoreRunnerFromNativeState().then(restored => {
+    if (!restored) {
+      syncRunnerUiWithNativeStop();
+      recoverRunnerPathOnWake();
+    }
+  });
   flushSupabaseQueue();
 });
 
@@ -2278,7 +2411,7 @@ searchInput.oninput = async () => {
       ? new Date(run.started_at).toLocaleTimeString()
       : "";
 
-    li.textContent = `${run.runner_name} - ${status} - ${started}`;
+    li.textContent = `${run.runner_name} - ${status} - Started ${started}`;
 
     li.onclick = () => {
       searchInput.value = run.runner_name;
@@ -2965,4 +3098,7 @@ layerSelect.addEventListener("change", () => {
   map.setStyle(newStyle);
 });
 
-map.on("load", () => setMode("runner"));
+map.on("load", () => {
+  setMode("runner");
+  restoreRunnerFromNativeState();
+});

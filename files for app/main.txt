@@ -536,6 +536,25 @@ function ensureSplitsPanel() {
   document.body.appendChild(splitsPanelEl);
 }
 
+function positionSplitsPanel() {
+  if (!splitsPanelEl) return;
+
+  const isMobileViewer = document.body.classList.contains("viewer-mode") &&
+    window.matchMedia("(max-width: 600px)").matches;
+
+  if (isMobileViewer && runnerModeBtn) {
+    const runnerButtonRect = runnerModeBtn.getBoundingClientRect();
+    splitsPanelEl.style.top = `${Math.max(8, runnerButtonRect.top)}px`;
+    splitsPanelEl.style.right = "12px";
+    splitsPanelEl.style.width = "min(190px, calc(100vw - 180px))";
+    return;
+  }
+
+  splitsPanelEl.style.top = "155px";
+  splitsPanelEl.style.right = "12px";
+  splitsPanelEl.style.width = "min(190px, calc(100vw - 24px))";
+}
+
 function hideSplitsPanel() {
   lastSplitsSignature = "";
   if (splitsListEl) {
@@ -648,6 +667,7 @@ function updateSplitsPanel(points = null) {
   }
 
   ensureSplitsPanel();
+  positionSplitsPanel();
 
   const signature = splits
     .map(split => `${split.mile}:${Math.round(split.durationMs)}`)

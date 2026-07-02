@@ -259,11 +259,6 @@ public class LiveStridePendingPointUploadJobService extends JobService {
             long finishId = event.optLong("finish_id", -1L);
             String runId = event.optString("run_id", null);
 
-            if (pointStore.countPendingForRun(runId) > 0) {
-                Log.i(TAG, "Finish event waiting for pending native points run_id=" + runId);
-                return false;
-            }
-
             String finishPayloadJson = event.optString("finish_payload_json", "{}");
             finishPayloadJson = mergeNativePointSummary(pointStore, runId, finishPayloadJson);
 

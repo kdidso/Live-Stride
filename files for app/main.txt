@@ -107,6 +107,7 @@ let lastPointReceivedTime = null;
 let viewerConnectionLost = false;
 let viewerConnectionWarning = false;
 let nativeRouteGapActive = false;
+let currentViewerRunIsLive = null;
 let viewerStatusEl = null;
 let viewerStatusHideTimerId = null;
 let lastViewerStatusMessage = null;
@@ -565,7 +566,7 @@ function hideSplitsPanel() {
   }
 }
 
-function calculateMileSplits(points) {
+function calculateMileSplits(points, options = {}) {
   const sorted = (Array.isArray(points) ? points : [])
     .filter(point =>
       Number.isFinite(point?.timestamp) &&
@@ -605,6 +606,38 @@ function calculateMileSplits(points) {
     });
   });
 
+  const interpolateTimeAtDistance = (targetDistanceM) => {
+    if (targetDistanceM < 0) return null;
+
+    for (let i = 1; i < pointsWithDistance.length; i++) {
+      const previous = pointsWithDistance[i - 1];
+      const current = pointsWithDistance[i];
+
+      if (
+        !Number.isFinite(previous.distanceM) ||
+        !Number.isFinite(current.distanceM) ||
+        !Number.isFinite(previous.timestamp) ||
+        !Number.isFinite(current.timestamp) ||
+        current.distanceM <= previous.distanceM ||
+        current.timestamp <= previous.timestamp
+      ) {
+        continue;
+      }
+
+      if (targetDistanceM <= current.distanceM) {
+        if (targetDistanceM <= previous.distanceM) {
+          return previous.timestamp;
+        }
+
+        const ratio = (targetDistanceM - previous.distanceM) /
+          (current.distanceM - previous.distanceM);
+        return previous.timestamp + ratio * (current.timestamp - previous.timestamp);
+      }
+    }
+
+    return null;
+  };
+
   const splits = [];
   const mileMeters = 1609.34;
   const startPoint = pointsWithDistance[0];
@@ -639,6 +672,10 @@ function calculateMileSplits(points) {
 
       if (splitDurationMs > 0) {
         splits.push({
+          key: `mile-${nextMile}`,
+          distanceM: boundaryDistance,
+          label: `Mile ${nextMile}`,
+          value: formatPace(splitDurationMs / 60000),
           mile: nextMile,
           durationMs: splitDurationMs,
           pace: splitDurationMs / 60000
@@ -650,16 +687,65 @@ function calculateMileSplits(points) {
     }
   }
 
-  return splits;
+  const finalPoint = pointsWithDistance[pointsWithDistance.length - 1];
+  const totalDistanceM = finalPoint.distanceM;
+  const totalElapsedMs = finalPoint.timestamp - startPoint.timestamp;
+
+  [
+    { label: "Half 13.1", distanceM: 13.1 * mileMeters, key: "half-marathon" },
+    { label: "Marathon 26.2", distanceM: 26.2 * mileMeters, key: "marathon" }
+  ].forEach(milestone => {
+    if (totalDistanceM < milestone.distanceM) return;
+
+    const milestoneTime = interpolateTimeAtDistance(milestone.distanceM);
+    if (!Number.isFinite(milestoneTime)) return;
+
+    splits.push({
+      ...milestone,
+      value: formatTime(Math.max(0, milestoneTime - startPoint.timestamp))
+    });
+  });
+
+  if (options.includeFinalPartial && totalDistanceM > 0 && totalElapsedMs > 0) {
+    const totalMiles = metersToMiles(totalDistanceM);
+    const finalPartialMiles = totalMiles - Math.floor(totalMiles);
+
+    if (finalPartialMiles >= 0.01) {
+      const partialStartDistanceM = Math.floor(totalMiles) * mileMeters;
+      const partialStartTime = interpolateTimeAtDistance(partialStartDistanceM);
+
+      if (Number.isFinite(partialStartTime) && finalPoint.timestamp > partialStartTime) {
+        const partialDurationMs = finalPoint.timestamp - partialStartTime;
+        const partialPace = (partialDurationMs / 60000) / finalPartialMiles;
+
+        splits.push({
+          key: "finish-partial",
+          distanceM: totalDistanceM + 0.001,
+          label: `Finish +${finalPartialMiles.toFixed(2)} mi`,
+          value: formatPace(partialPace)
+        });
+      }
+    }
+  }
+
+  return splits.sort((a, b) => {
+    if (a.distanceM !== b.distanceM) return a.distanceM - b.distanceM;
+    return String(a.key).localeCompare(String(b.key));
+  });
 }
 
-function updateSplitsPanel(points = null) {
+function updateSplitsPanel(points = null, options = {}) {
   const sourcePoints = points || (
     document.body.classList.contains("viewer-mode") && nativePathCoords.length > 0
       ? nativePathCoords
       : pathCoords
   );
-  const splits = calculateMileSplits(sourcePoints);
+  const includeFinalPartial = options.includeFinalPartial ?? (
+    document.body.classList.contains("viewer-mode")
+      ? currentViewerRunIsLive === false
+      : stopBtn?.disabled === true
+  );
+  const splits = calculateMileSplits(sourcePoints, { includeFinalPartial });
 
   if (splits.length === 0) {
     hideSplitsPanel();
@@ -670,7 +756,7 @@ function updateSplitsPanel(points = null) {
   positionSplitsPanel();
 
   const signature = splits
-    .map(split => `${split.mile}:${Math.round(split.durationMs)}`)
+    .map(split => `${split.key}:${split.value}`)
     .join("|");
 
   if (signature === lastSplitsSignature) {
@@ -689,7 +775,7 @@ function updateSplitsPanel(points = null) {
     row.style.padding = "6px 10px";
     row.style.fontSize = "13px";
     row.style.borderBottom = "1px solid rgba(0,0,0,0.08)";
-    row.innerHTML = `<span>Mile ${split.mile}</span><strong>${formatPace(split.pace)}</strong>`;
+    row.innerHTML = `<span>${split.label}</span><strong>${split.value}</strong>`;
     splitsListEl.appendChild(row);
   });
 
@@ -2452,6 +2538,7 @@ if (broadcastRef) {
 }
 
 broadcasting = false;
+updateSplitsPanel(pathCoords, { includeFinalPartial: true });
 
   if (isPrivateMode) {
     savePrivateRunToFile();
@@ -2996,6 +3083,8 @@ async function startNativePathComparison(runId) {
 }
 
 async function trackRunnerSupabase(runId, isLive = false, trackedRunnerName = null) {
+  currentViewerRunIsLive = Boolean(isLive);
+
   if (activeListener) {
     activeListener.off();
     activeListener = null;
@@ -3113,6 +3202,8 @@ activeRunStatusChannel = supabaseClient
       const run = payload.new;
 
       if (run && run.is_live === false) {
+        currentViewerRunIsLive = false;
+        updateSplitsPanel(nativePathCoords, { includeFinalPartial: true });
       
 if (run.final_time_ms != null && lastViewerData) {
   lastViewerElapsed = run.final_time_ms;
@@ -3258,6 +3349,8 @@ viewerConnectionWatchId = setInterval(() => {
 
 // -> Firebase legacy fallback viewer function kept for older Firebase-only runs
 function trackRunner(key) {
+  currentViewerRunIsLive = null;
+
   if (activeSupabaseChannel) {
     supabaseClient.removeChannel(activeSupabaseChannel);
     activeSupabaseChannel = null;
@@ -3302,7 +3395,7 @@ function trackRunner(key) {
     }));
 
     addOrUpdatePath();
-    updateSplitsPanel(pathCoords);
+    updateSplitsPanel(pathCoords, { includeFinalPartial: Boolean(data.finished) });
 
     lastViewerData = {
       distance: data.distance || 0,

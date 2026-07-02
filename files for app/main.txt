@@ -2402,6 +2402,16 @@ runnerHeartbeatId = setInterval(() => {
   sendRunnerHeartbeat();
 }, 10000);
 
+  if (activeRunId && runnerName) {
+    const nativeStarted = await startNativeComparisonRun(broadcastRef?.toString?.() ?? null);
+    if (nativeStarted && pathCoords.length > 0) {
+      const latestPoint = pathCoords[pathCoords.length - 1];
+      updateNativeMapMatchingContext([latestPoint.lon, latestPoint.lat]);
+    }
+    await refreshRunnerFromNativeSqlite({ includeFullPath: true });
+    startRunnerNativeSnapshotPolling();
+    await startNativePathComparison(activeRunId);
+  }
 
   if (isPrivateMode) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2592,14 +2602,16 @@ broadcastBtn.onclick = async () => {
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
   broadcastRef = db.ref(`runners/${safeName}`);
 
-  const nativeStarted = await startNativeComparisonRun(broadcastRef.toString());
-  if (nativeStarted && pathCoords.length > 0) {
-    const latestPoint = pathCoords[pathCoords.length - 1];
-    updateNativeMapMatchingContext([latestPoint.lon, latestPoint.lat]);
+  if (startTime !== null && stopBtn.disabled === false) {
+    const nativeStarted = await startNativeComparisonRun(broadcastRef.toString());
+    if (nativeStarted && pathCoords.length > 0) {
+      const latestPoint = pathCoords[pathCoords.length - 1];
+      updateNativeMapMatchingContext([latestPoint.lon, latestPoint.lat]);
+    }
+    await refreshRunnerFromNativeSqlite({ includeFullPath: true });
+    startRunnerNativeSnapshotPolling();
+    await startNativePathComparison(activeRunId);
   }
-  await refreshRunnerFromNativeSqlite({ includeFullPath: true });
-  startRunnerNativeSnapshotPolling();
-  await startNativePathComparison(activeRunId);
 
   await broadcastRef.set({
     run_id: activeRunId,

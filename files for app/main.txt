@@ -446,6 +446,37 @@ function showPublicFinishedExportControls() {
   viewerGpxBtn.style.display = "none";
 }
 
+async function markPreparedPublicRunLive() {
+  if (isPrivateMode || !activeRunId || !runnerName || !broadcastRef) return true;
+
+  const startedAt = new Date().toISOString();
+  const { error } = await supabaseClient
+    .from("runs")
+    .update({
+      is_live: true,
+      started_at: startedAt
+    })
+    .eq("id", activeRunId);
+
+  if (error) {
+    console.error("Could not mark run live:", error);
+    alert("Could not start live broadcast. Please check your connection and try again.");
+    return false;
+  }
+
+  await broadcastRef.set({
+    run_id: activeRunId,
+    name: runnerName,
+    finished: false,
+    started_at: startedAt,
+    timestamp: Date.now(),
+    last_seen_at: new Date().toISOString(),
+    startTime: null
+  });
+
+  return true;
+}
+
 runnerModeBtn.onclick = () => {
   if (document.body.classList.contains("viewer-mode")) {
     resetRunDisplay();
@@ -2379,6 +2410,10 @@ async function startTracking() {
     return;
   }
 
+  if (!(await markPreparedPublicRunLive())) {
+    return;
+  }
+
   pathCoords = [];
   nativePathCoords = [];
   totalDistanceMeters = 0;
@@ -2631,7 +2666,7 @@ broadcastBtn.onclick = async () => {
     .from("runs")
     .insert({
       runner_name: runnerName,
-      is_live: true
+      is_live: false
     })
     .select()
     .single();
@@ -2647,48 +2682,10 @@ broadcastBtn.onclick = async () => {
   const safeName = `${first}-${last}`.toLowerCase().replace(/[^a-z0-9]/g, "-");
   broadcastRef = db.ref(`runners/${safeName}`);
 
-  if (startTime !== null && stopBtn.disabled === false) {
-    const nativeStarted = await startNativeComparisonRun(broadcastRef.toString());
-    if (nativeStarted && pathCoords.length > 0) {
-      const latestPoint = pathCoords[pathCoords.length - 1];
-      updateNativeMapMatchingContext([latestPoint.lon, latestPoint.lat]);
-    }
-    await refreshRunnerFromNativeSqlite({ includeFullPath: true });
-    startRunnerNativeSnapshotPolling();
-    await startNativePathComparison(activeRunId);
-  }
-
-  await broadcastRef.set({
-    run_id: activeRunId,
-    name: runnerName,
-    finished: false,
-    started_at: new Date().toISOString(),
-    timestamp: Date.now(),
-    last_seen_at: new Date().toISOString(),
-    startTime
-  });
-
   broadcastBtn.style.display = "none";
   broadcastLabel.style.display = "none";
   publicRunReadyToStart = true;
   updateRunnerStartAvailability();
-
-  if (startTime !== null) {
-    broadcastRef.update({
-      current: pathCoords.length > 0
-        ? [pathCoords[pathCoords.length - 1].lon, pathCoords[pathCoords.length - 1].lat]
-        : null,
-      distance: metersToMiles(totalDistanceMeters),
-      pace: latestRunnerPace,
-      avgPace: latestRunnerAvgPace,
-      elevation: latestRunnerElevFt,
-      timestamp: Date.now(),
-      last_seen_at: new Date().toISOString(),
-      startTime
-    }).catch(err => {
-      console.warn("Firebase lightweight start summary failed:", err);
-    });
-  }
 };
 
 exportUploadBtn.onclick = () => {

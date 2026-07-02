@@ -15,6 +15,7 @@ final class BridgeTunnelMatcher {
     static final double CONNECTION_RADIUS_METERS = 4.0;
     static final double STRONG_RAW_HANDOFF_ACCURACY_METERS = 5.0;
     static final double RELAXED_RAW_HANDOFF_ACCURACY_METERS = 10.0;
+    static final double BRIDGE_ENTRY_MIN_ACCURACY_METERS = 3.0;
     static final double EXCELLENT_ACCURACY_METERS = 4.0;
     static final double MAX_EARLY_HANDOFF_SPEED_MPS = 10.0;
     static final double MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES = 35.0;
@@ -436,6 +437,10 @@ final class BridgeTunnelMatcher {
         }
 
         if (best == null || bestDistance > ENTRY_RADIUS_METERS) return;
+        if (isBridge(best) && accuracyMeters >= 0.0f
+                && accuracyMeters <= BRIDGE_ENTRY_MIN_ACCURACY_METERS) {
+            return;
+        }
 
         Point entrance = enterAtStart
                 ? best.points.get(0)
@@ -752,6 +757,10 @@ final class BridgeTunnelMatcher {
     private static boolean rawHandoffIsStrong(float accuracyMeters) {
         return accuracyMeters >= 0.0f
                 && accuracyMeters <= STRONG_RAW_HANDOFF_ACCURACY_METERS;
+    }
+
+    private static boolean isBridge(Segment segment) {
+        return "bridge".equals(segment.brunnel);
     }
 
     private boolean noExitRelaxedHandoffIsAllowed(float accuracyMeters, long timeMs) {

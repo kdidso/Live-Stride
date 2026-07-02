@@ -48,6 +48,13 @@ public class LiveStrideNativeTrackerService extends Service {
     public static final String STATE_RUNNING = "running";
     public static final String STATE_STOPPED_AT_MS = "stopped_at_ms";
     public static final String STATE_FINAL_TIME_MS = "final_time_ms";
+    public static final String STATE_SUPABASE_URL = "supabase_url";
+    public static final String STATE_SUPABASE_ANON_KEY = "supabase_anon_key";
+    public static final String STATE_RUNNER_NAME = "runner_name";
+    public static final String STATE_NATIVE_SESSION_ID = "native_session_id";
+    public static final String STATE_FIREBASE_DATABASE_URL = "firebase_database_url";
+    public static final String STATE_FIREBASE_RUNNER_PATH = "firebase_runner_path";
+    public static final String STATE_RUN_START_TIME_MS = "run_start_time_ms";
     public static final String STATE_MAP_CONTEXT_JSON = "map_context_json";
     public static final String STATE_MAP_CONTEXT_RUN_ID = "map_context_run_id";
     public static final String STATE_MAP_CONTEXT_UPDATED_AT_MS = "map_context_updated_at_ms";
@@ -150,6 +157,7 @@ public class LiveStrideNativeTrackerService extends Service {
             latestMileSplitText = "Mile split: --";
             bridgeTunnelMatcher.reset();
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
+            saveNativeRunConfig();
             saveNativeTrackerState(true, 0L, 0L);
             
             startForeground(NOTIFICATION_ID, buildRunNotification(
@@ -165,6 +173,7 @@ public class LiveStrideNativeTrackerService extends Service {
         }
 
         if (ACTION_STOP.equals(intent.getAction())) {
+            restoreNativeRunConfig(intent);
             stopLocationUpdates();
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             queueNativeFinishEvent();
@@ -311,6 +320,7 @@ private void uploadNativePoint(Location rawLocation) {
 
     if (runStartTimeMs == 0L) {
         runStartTimeMs = pointTimeMs;
+        saveNativeTrackerState(true, 0L, 0L);
     }
 
     if (previousLocation != null && previousPointTimeMs > 0L) {
@@ -659,6 +669,13 @@ private void updateRunNotification(
     ) {
         Intent stopIntent = new Intent(this, LiveStrideNativeTrackerService.class);
         stopIntent.setAction(ACTION_STOP);
+        putStringExtraIfPresent(stopIntent, "supabaseUrl", supabaseUrl);
+        putStringExtraIfPresent(stopIntent, "supabaseAnonKey", supabaseAnonKey);
+        putStringExtraIfPresent(stopIntent, "runId", runId);
+        putStringExtraIfPresent(stopIntent, "runnerName", runnerName);
+        putStringExtraIfPresent(stopIntent, "nativeSessionId", nativeSessionId);
+        putStringExtraIfPresent(stopIntent, "firebaseDatabaseUrl", firebaseDatabaseUrl);
+        putStringExtraIfPresent(stopIntent, "firebaseRunnerPath", firebaseRunnerPath);
 
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -802,12 +819,95 @@ private void updateRunNotification(
                 .edit()
                 .putBoolean(STATE_RUNNING, running)
                 .putLong(STATE_STOPPED_AT_MS, stoppedAtMs)
-                .putLong(STATE_FINAL_TIME_MS, finalTimeMs);
+                .putLong(STATE_FINAL_TIME_MS, finalTimeMs)
+                .putLong(STATE_RUN_START_TIME_MS, runStartTimeMs);
 
         if (runId != null) {
             editor.putString(STATE_RUN_ID, runId);
         }
 
+        putStringPreferenceIfPresent(editor, STATE_SUPABASE_URL, supabaseUrl);
+        putStringPreferenceIfPresent(editor, STATE_SUPABASE_ANON_KEY, supabaseAnonKey);
+        putStringPreferenceIfPresent(editor, STATE_RUNNER_NAME, runnerName);
+        putStringPreferenceIfPresent(editor, STATE_NATIVE_SESSION_ID, nativeSessionId);
+        putStringPreferenceIfPresent(editor, STATE_FIREBASE_DATABASE_URL, firebaseDatabaseUrl);
+        putStringPreferenceIfPresent(editor, STATE_FIREBASE_RUNNER_PATH, firebaseRunnerPath);
+
         editor.apply();
+    }
+
+    private void saveNativeRunConfig() {
+        SharedPreferences.Editor editor = getSharedPreferences(STATE_PREFS_NAME, MODE_PRIVATE).edit();
+        putStringPreferenceIfPresent(editor, STATE_RUN_ID, runId);
+        putStringPreferenceIfPresent(editor, STATE_SUPABASE_URL, supabaseUrl);
+        putStringPreferenceIfPresent(editor, STATE_SUPABASE_ANON_KEY, supabaseAnonKey);
+        putStringPreferenceIfPresent(editor, STATE_RUNNER_NAME, runnerName);
+        putStringPreferenceIfPresent(editor, STATE_NATIVE_SESSION_ID, nativeSessionId);
+        putStringPreferenceIfPresent(editor, STATE_FIREBASE_DATABASE_URL, firebaseDatabaseUrl);
+        putStringPreferenceIfPresent(editor, STATE_FIREBASE_RUNNER_PATH, firebaseRunnerPath);
+        if (runStartTimeMs > 0L) {
+            editor.putLong(STATE_RUN_START_TIME_MS, runStartTimeMs);
+        }
+        editor.apply();
+    }
+
+    private void restoreNativeRunConfig(Intent intent) {
+        SharedPreferences prefs = getSharedPreferences(STATE_PREFS_NAME, MODE_PRIVATE);
+
+        supabaseUrl = firstNonBlank(
+                intent.getStringExtra("supabaseUrl"),
+                firstNonBlank(supabaseUrl, prefs.getString(STATE_SUPABASE_URL, null))
+        );
+        supabaseAnonKey = firstNonBlank(
+                intent.getStringExtra("supabaseAnonKey"),
+                firstNonBlank(supabaseAnonKey, prefs.getString(STATE_SUPABASE_ANON_KEY, null))
+        );
+        runId = firstNonBlank(
+                intent.getStringExtra("runId"),
+                firstNonBlank(runId, prefs.getString(STATE_RUN_ID, null))
+        );
+        runnerName = firstNonBlank(
+                intent.getStringExtra("runnerName"),
+                firstNonBlank(runnerName, prefs.getString(STATE_RUNNER_NAME, null))
+        );
+        nativeSessionId = firstNonBlank(
+                intent.getStringExtra("nativeSessionId"),
+                firstNonBlank(nativeSessionId, prefs.getString(STATE_NATIVE_SESSION_ID, null))
+        );
+        firebaseDatabaseUrl = firstNonBlank(
+                intent.getStringExtra("firebaseDatabaseUrl"),
+                firstNonBlank(firebaseDatabaseUrl, prefs.getString(STATE_FIREBASE_DATABASE_URL, null))
+        );
+        firebaseRunnerPath = firstNonBlank(
+                intent.getStringExtra("firebaseRunnerPath"),
+                firstNonBlank(firebaseRunnerPath, prefs.getString(STATE_FIREBASE_RUNNER_PATH, null))
+        );
+
+        if (runStartTimeMs <= 0L) {
+            runStartTimeMs = prefs.getLong(STATE_RUN_START_TIME_MS, 0L);
+        }
+    }
+
+    private static String firstNonBlank(String preferred, String fallback) {
+        if (preferred != null && !preferred.trim().isEmpty()) {
+            return preferred;
+        }
+        return fallback;
+    }
+
+    private static void putStringPreferenceIfPresent(
+            SharedPreferences.Editor editor,
+            String key,
+            String value
+    ) {
+        if (value != null && !value.trim().isEmpty()) {
+            editor.putString(key, value);
+        }
+    }
+
+    private static void putStringExtraIfPresent(Intent intent, String key, String value) {
+        if (value != null && !value.trim().isEmpty()) {
+            intent.putExtra(key, value);
+        }
     }
 }

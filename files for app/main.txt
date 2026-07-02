@@ -83,6 +83,7 @@ let runnerName = null;
 let broadcastRef = null;
 let broadcasting = false;
 let activeRunId = null;
+let publicRunReadyToStart = false;
 let pointSequence = 0;
 
 let viewerMarker = null;
@@ -434,14 +435,15 @@ function updateRunnerStartAvailability() {
   const isActivelyRunning = stopBtn.disabled === false;
   if (isActivelyRunning) return;
 
-  startBtn.disabled = !isPrivateMode && !(broadcasting && activeRunId && runnerName);
+  startBtn.disabled = !isPrivateMode && !publicRunReadyToStart;
 }
 
 function showPublicFinishedExportControls() {
-  exportUploadBtn.style.display = "none";
+  exportUploadBtn.textContent = "Get GPX File";
+  exportUploadBtn.style.display = "inline-block";
   exportGpxBtn.style.display = "none";
   uploadStravaBtn.style.display = "none";
-  viewerGpxBtn.style.display = "inline-block";
+  viewerGpxBtn.style.display = "none";
 }
 
 runnerModeBtn.onclick = () => {
@@ -454,7 +456,9 @@ runnerModeBtn.onclick = () => {
   setMode("runner");
   broadcastCheckbox.checked = true;
   isPrivateMode = false;
+  publicRunReadyToStart = false;
   broadcastBtn.style.display = "block";
+  broadcastLabel.style.display = "flex";
   exportUploadBtn.style.display = "none";
   exportGpxBtn.style.display = "none";
   uploadStravaBtn.style.display = "none";
@@ -1380,6 +1384,7 @@ async function stopNativeComparisonRun() {
 }
 
 function settleRunnerAfterNativeStop(finalTimeMs = null) {
+  publicRunReadyToStart = false;
   if (runnerTimerId !== null) {
     clearInterval(runnerTimerId);
     runnerTimerId = null;
@@ -2368,7 +2373,7 @@ updateQueuedPointElevation(activeRunId, thisSequenceNum, elevMeters);
 }
 }
 async function startTracking() {
-  if (!isPrivateMode && !(broadcasting && activeRunId && runnerName)) {
+  if (!isPrivateMode && !publicRunReadyToStart) {
     updateRunnerStartAvailability();
     alert("Press Broadcast and enter a runner name before starting a public run.");
     return;
@@ -2401,6 +2406,10 @@ async function startTracking() {
   exportGpxBtn.style.display = "none";
   uploadStravaBtn.style.display = "none";
   viewerGpxBtn.style.display = "none";
+  broadcasting = !isPrivateMode && !!broadcastRef;
+  publicRunReadyToStart = false;
+  broadcastBtn.style.display = "none";
+  broadcastLabel.style.display = "none";
 
   if (runnerTimerId !== null) {
     clearInterval(runnerTimerId);
@@ -2573,6 +2582,7 @@ if (broadcastRef) {
 }
 
 broadcasting = false;
+publicRunReadyToStart = false;
 updateSplitsPanel(pathCoords, { includeFinalPartial: true });
 
   if (isPrivateMode) {
@@ -2592,7 +2602,9 @@ updateRunnerStartAvailability();
 
 broadcastCheckbox.onchange = () => {
   isPrivateMode = !broadcastCheckbox.checked;
+  publicRunReadyToStart = false;
   broadcastBtn.style.display = isPrivateMode ? "none" : "block";
+  broadcastLabel.style.display = "flex";
   exportUploadBtn.style.display = "none";
   exportGpxBtn.style.display = "none";
   uploadStravaBtn.style.display = "none";
@@ -2601,6 +2613,7 @@ broadcastCheckbox.onchange = () => {
     activeRunId = null;
     broadcastRef = null;
     broadcasting = false;
+    publicRunReadyToStart = false;
   }
   updateRunnerStartAvailability();
 };
@@ -2655,8 +2668,9 @@ broadcastBtn.onclick = async () => {
     startTime
   });
 
-  broadcasting = true;
   broadcastBtn.style.display = "none";
+  broadcastLabel.style.display = "none";
+  publicRunReadyToStart = true;
   updateRunnerStartAvailability();
 
   if (startTime !== null) {
@@ -2679,8 +2693,6 @@ broadcastBtn.onclick = async () => {
 
 exportUploadBtn.onclick = () => {
   openExportPageInApp();
-  resetRunDisplay();
-  exportUploadBtn.style.display = "none";
 };
 
 exportGpxBtn.onclick = async () => {

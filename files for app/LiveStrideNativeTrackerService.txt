@@ -34,7 +34,7 @@ import java.util.List;
 
 public class LiveStrideNativeTrackerService extends Service {
 
-    private static final String CHANNEL_ID = "livestride_native_tracker_v2";
+    private static final String CHANNEL_ID = "livestride_native_tracker_v3";
     private static final int NOTIFICATION_ID = 44221;
     private static final float MAX_ACCEPTED_ACCURACY_METERS = 10.0f;
     private static final double METERS_PER_MILE = 1609.34;
@@ -156,7 +156,8 @@ public class LiveStrideNativeTrackerService extends Service {
                     System.currentTimeMillis(),
                     0.0,
                     0.0,
-                    latestMileSplitText
+                    latestMileSplitText,
+                    false
             ));
             startLocationUpdates();
 
@@ -306,6 +307,7 @@ private void uploadNativePoint(Location rawLocation) {
     double segmentMeters = 0.0;
     double instPaceMinPerMile = 0.0;
     double avgPaceMinPerMile = 0.0;
+    boolean alertNotificationForMileSplit = false;
 
     if (runStartTimeMs == 0L) {
         runStartTimeMs = pointTimeMs;
@@ -340,7 +342,7 @@ private void uploadNativePoint(Location rawLocation) {
 
         double previousTotalDistanceMeters = totalDistanceMeters;
         totalDistanceMeters += segmentMeters;
-        updateMileSplit(
+        alertNotificationForMileSplit = updateMileSplit(
                 previousTotalDistanceMeters,
                 totalDistanceMeters,
                 previousPointTimeMs,
@@ -373,7 +375,8 @@ private void uploadNativePoint(Location rawLocation) {
             pointTimeMs,
             finalDistanceMeters,
             finalAvgPaceMinPerMile,
-            latestMileSplitText
+            latestMileSplitText,
+            alertNotificationForMileSplit
     );
     java.text.SimpleDateFormat recordedAtFormatter =
         new java.text.SimpleDateFormat(
@@ -584,25 +587,27 @@ private void kickPendingFlushIfNeeded() {
     }).start();
 }
 
-private void updateMileSplit(
+private boolean updateMileSplit(
         double previousTotalMeters,
         double currentTotalMeters,
         long segmentStartTimeMs,
         long segmentEndTimeMs
 ) {
     if (runStartTimeMs <= 0L || segmentStartTimeMs <= 0L || segmentEndTimeMs <= segmentStartTimeMs) {
-        return;
+        return false;
     }
 
     int completedMile = (int) Math.floor(currentTotalMeters / METERS_PER_MILE);
     if (completedMile <= lastCompletedMile) {
-        return;
+        return false;
     }
 
     double segmentMeters = currentTotalMeters - previousTotalMeters;
     if (segmentMeters <= 0.0) {
-        return;
+        return false;
     }
+
+    boolean completedNewMile = false;
 
     for (int mile = lastCompletedMile + 1; mile <= completedMile; mile++) {
         double targetMeters = mile * METERS_PER_MILE;
@@ -617,18 +622,22 @@ private void updateMileSplit(
 
         if (splitMinutes > 0.0) {
             latestMileSplitText = "Mile " + mile + ": " + formatPace(splitMinutes);
+            completedNewMile = true;
         }
 
         lastCompletedMile = mile;
         lastMileSplitTimeMs = splitTimeMs;
     }
+
+    return completedNewMile;
 }
 
 private void updateRunNotification(
         long pointTimeMs,
         double distanceMeters,
         double avgPaceMinPerMile,
-        String mileSplitText
+        String mileSplitText,
+        boolean alertThisUpdate
 ) {
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) {
@@ -637,7 +646,7 @@ private void updateRunNotification(
 
     manager.notify(
             NOTIFICATION_ID,
-            buildRunNotification(pointTimeMs, distanceMeters, avgPaceMinPerMile, mileSplitText)
+            buildRunNotification(pointTimeMs, distanceMeters, avgPaceMinPerMile, mileSplitText, alertThisUpdate)
     );
 }
 
@@ -645,7 +654,8 @@ private void updateRunNotification(
             long nowMs,
             double distanceMeters,
             double avgPaceMinPerMile,
-            String mileSplitText
+            String mileSplitText,
+            boolean alertThisUpdate
     ) {
         Intent stopIntent = new Intent(this, LiveStrideNativeTrackerService.class);
         stopIntent.setAction(ACTION_STOP);
@@ -680,10 +690,12 @@ private void updateRunNotification(
                         .bigText(liveStats + "\n" + splitText))
                 .setSmallIcon(getApplicationInfo().icon)
                 .setOngoing(true)
-                .setOnlyAlertOnce(true)
+                .setOnlyAlertOnce(!alertThisUpdate)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setPriority(alertThisUpdate
+                        ? NotificationCompat.PRIORITY_MAX
+                        : NotificationCompat.PRIORITY_HIGH)
                 .setColor(0xFFD32F2F)
                 .setColorized(!shouldRequestPromotedLiveUpdate())
                 .setWhen(runStartTimeMs > 0L ? runStartTimeMs : System.currentTimeMillis())
@@ -694,6 +706,11 @@ private void updateRunNotification(
                         "STOP RUN",
                         stopPendingIntent
                 );
+
+        if (alertThisUpdate) {
+            builder.setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+                    .setVibrate(new long[]{0L, 180L, 90L, 180L});
+        }
 
         if (shouldRequestPromotedLiveUpdate()) {
             builder.getExtras().putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true);
@@ -743,9 +760,11 @@ private void updateRunNotification(
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
                     "LiveStride Run Controls",
-                    NotificationManager.IMPORTANCE_DEFAULT
+                    NotificationManager.IMPORTANCE_HIGH
             );
             channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            channel.enableVibration(true);
+            channel.setVibrationPattern(new long[]{0L, 180L, 90L, 180L});
 
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {

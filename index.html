@@ -447,6 +447,9 @@
     let viewerWakeLock = null;
     let bridgeTunnelMatcher = null;
     let lastPublishedMatchingState = "normal";
+    let splitsPanelEl = null;
+    let splitsListEl = null;
+    let lastSplitsSignature = "";
 
     // -> DOM
     const startBtn = document.getElementById("startBtn");
@@ -1269,6 +1272,187 @@ setTimeout(() => {
       return `${minutes}:${seconds.toString().padStart(2, "0")} /mi`;
     }
 
+    function ensureSplitsPanel() {
+      if (splitsPanelEl && splitsListEl) return;
+
+      splitsPanelEl = document.createElement("div");
+      splitsPanelEl.id = "mileSplitsPanel";
+      splitsPanelEl.style.position = "absolute";
+      splitsPanelEl.style.zIndex = "900";
+      splitsPanelEl.style.top = "155px";
+      splitsPanelEl.style.right = "12px";
+      splitsPanelEl.style.width = "min(190px, calc(100vw - 24px))";
+      splitsPanelEl.style.maxHeight = "150px";
+      splitsPanelEl.style.background = "rgba(255,255,255,0.92)";
+      splitsPanelEl.style.borderRadius = "10px";
+      splitsPanelEl.style.boxShadow = "0 2px 10px rgba(0,0,0,0.25)";
+      splitsPanelEl.style.overflow = "hidden";
+      splitsPanelEl.style.display = "none";
+      splitsPanelEl.style.fontFamily = "system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+      splitsPanelEl.style.color = "#111";
+
+      const title = document.createElement("div");
+      title.textContent = "Mile Splits";
+      title.style.fontWeight = "700";
+      title.style.fontSize = "13px";
+      title.style.padding = "7px 10px 5px";
+      title.style.borderBottom = "1px solid rgba(0,0,0,0.12)";
+      splitsPanelEl.appendChild(title);
+
+      splitsListEl = document.createElement("div");
+      splitsListEl.style.maxHeight = "113px";
+      splitsListEl.style.overflowY = "auto";
+      splitsListEl.style.webkitOverflowScrolling = "touch";
+      splitsPanelEl.appendChild(splitsListEl);
+
+      document.body.appendChild(splitsPanelEl);
+    }
+
+    function hideSplitsPanel() {
+      lastSplitsSignature = "";
+      if (splitsListEl) {
+        splitsListEl.innerHTML = "";
+      }
+      if (splitsPanelEl) {
+        splitsPanelEl.style.display = "none";
+      }
+    }
+
+    function calculateMileSplits(points) {
+      const sorted = (Array.isArray(points) ? points : [])
+        .filter(point =>
+          Number.isFinite(point?.timestamp) &&
+          Number.isFinite(point?.lat) &&
+          Number.isFinite(point?.lon)
+        )
+        .slice()
+        .sort((a, b) => {
+          if (a.sequenceNum != null && b.sequenceNum != null) {
+            return a.sequenceNum - b.sequenceNum;
+          }
+
+          return a.timestamp - b.timestamp;
+        });
+
+      if (sorted.length < 2) return [];
+
+      const pointsWithDistance = [];
+
+      sorted.forEach((point, index) => {
+        if (Number.isFinite(point.distanceM)) {
+          pointsWithDistance.push(point);
+          return;
+        }
+
+        const previous = index > 0 ? sorted[index - 1] : null;
+        const previousDistance = index > 0
+          ? pointsWithDistance[index - 1].distanceM
+          : 0;
+        const segmentMeters = previous
+          ? haversineDistance([previous.lon, previous.lat], [point.lon, point.lat])
+          : 0;
+
+        pointsWithDistance.push({
+          ...point,
+          distanceM: previousDistance + segmentMeters
+        });
+      });
+
+      const splits = [];
+      const mileMeters = 1609.34;
+      const startPoint = pointsWithDistance[0];
+      let previousBoundaryTime = startPoint.timestamp;
+      let nextMile = 1;
+
+      for (let i = 1; i < pointsWithDistance.length; i++) {
+        const previous = pointsWithDistance[i - 1];
+        const current = pointsWithDistance[i];
+
+        if (
+          !Number.isFinite(previous.distanceM) ||
+          !Number.isFinite(current.distanceM) ||
+          !Number.isFinite(previous.timestamp) ||
+          !Number.isFinite(current.timestamp) ||
+          current.distanceM <= previous.distanceM ||
+          current.timestamp <= previous.timestamp
+        ) {
+          continue;
+        }
+
+        while (current.distanceM >= nextMile * mileMeters) {
+          const boundaryDistance = nextMile * mileMeters;
+          const ratio = (boundaryDistance - previous.distanceM) /
+            (current.distanceM - previous.distanceM);
+
+          if (ratio < 0 || ratio > 1) break;
+
+          const boundaryTime = previous.timestamp +
+            ratio * (current.timestamp - previous.timestamp);
+          const splitDurationMs = boundaryTime - previousBoundaryTime;
+
+          if (splitDurationMs > 0) {
+            splits.push({
+              mile: nextMile,
+              durationMs: splitDurationMs,
+              pace: splitDurationMs / 60000
+            });
+          }
+
+          previousBoundaryTime = boundaryTime;
+          nextMile += 1;
+        }
+      }
+
+      return splits;
+    }
+
+    function updateSplitsPanel(points = null) {
+      const sourcePoints = points || (
+        document.body.classList.contains("viewer-mode") && nativePathCoords.length > 0
+          ? nativePathCoords
+          : pathCoords
+      );
+      const splits = calculateMileSplits(sourcePoints);
+
+      if (splits.length === 0) {
+        hideSplitsPanel();
+        return;
+      }
+
+      ensureSplitsPanel();
+
+      const signature = splits
+        .map(split => `${split.mile}:${Math.round(split.durationMs)}`)
+        .join("|");
+
+      if (signature === lastSplitsSignature) {
+        splitsPanelEl.style.display = "block";
+        return;
+      }
+
+      const shouldScrollToLatest = splits.length > (lastSplitsSignature ? lastSplitsSignature.split("|").length : 0);
+      splitsListEl.innerHTML = "";
+
+      splits.forEach(split => {
+        const row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.justifyContent = "space-between";
+        row.style.gap = "10px";
+        row.style.padding = "6px 10px";
+        row.style.fontSize = "13px";
+        row.style.borderBottom = "1px solid rgba(0,0,0,0.08)";
+        row.innerHTML = `<span>Mile ${split.mile}</span><strong>${formatPace(split.pace)}</strong>`;
+        splitsListEl.appendChild(row);
+      });
+
+      splitsPanelEl.style.display = "block";
+      lastSplitsSignature = signature;
+
+      if (shouldScrollToLatest) {
+        splitsListEl.scrollTop = splitsListEl.scrollHeight;
+      }
+    }
+
     async function fetchElevation(lat, lon) {
       try {
         const response = await fetch(
@@ -1722,6 +1906,7 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
 
       clearRunPathLayer();
       clearNativeRunPathLayer();
+      hideSplitsPanel();
       if (viewerMarker) {
         viewerMarker.remove();
         viewerMarker = null;
@@ -1888,12 +2073,14 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
         elevation: elevMeters,
         elevationFt,
         distance: metersToMiles(totalDistanceMeters),
+        distanceM: totalDistanceMeters,
         instPace,
         avgPace
       };
 
       pathCoords.push(newPoint);
       addOrUpdatePath();
+      updateSplitsPanel(pathCoords);
 
       latestRunnerDistance = metersToMiles(totalDistanceMeters);
       latestRunnerPace = instPace;
@@ -2336,6 +2523,7 @@ async function startNativePathComparison(runId) {
 
   if (document.body.classList.contains("viewer-mode")) {
     addOrUpdateNativePath();
+    updateSplitsPanel(nativePathCoords);
 
     if (nativePathCoords.length > 0) {
       const lastNativePoint = getLatestSequencePoint(nativePathCoords);
@@ -2401,6 +2589,7 @@ async function startNativePathComparison(runId) {
         // Only render purple native path and red marker in viewer mode.
         if (document.body.classList.contains("viewer-mode")) {
           addOrUpdateNativePath();
+          updateSplitsPanel(nativePathCoords);
           const latestNativePoint = getLatestSequencePoint(nativePathCoords);
           if (latestNativePoint) {
             updateViewerFromNativePoint(latestNativePoint);
@@ -2592,6 +2781,7 @@ viewerConnectionLost = false;
 nativeRouteGapActive = false;
 clearRunPathLayer();
 clearNativeRunPathLayer();
+hideSplitsPanel();
 
 if (trackedRunnerName) {
   const safeName = trackedRunnerName
@@ -2855,6 +3045,7 @@ if (activeNativeSupabaseChannel) {
         }));
 
         addOrUpdatePath();
+        updateSplitsPanel(pathCoords);
 
         lastViewerData = {
           distance: data.distance || 0,

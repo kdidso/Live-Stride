@@ -37,6 +37,9 @@ public class LiveStrideNativeTrackerService extends Service {
     private static final String CHANNEL_ID = "livestride_native_tracker_v3";
     private static final int NOTIFICATION_ID = 44221;
     private static final float MAX_ACCEPTED_ACCURACY_METERS = 10.0f;
+    private static final double RESUME_ANCHOR_GAP_SECONDS = 45.0;
+    private static final double RESUME_ANCHOR_MIN_DISTANCE_METERS = 25.0;
+    private static final double PRESUMED_DRIVER_AVG_SPEED_MPS = 8.9408;
     private static final double METERS_PER_MILE = 1609.34;
     private static final int ANDROID_16_API_LEVEL = 36;
     private static final String EXTRA_REQUEST_PROMOTED_ONGOING =
@@ -270,6 +273,7 @@ private void uploadNativePoint(Location rawLocation) {
                         + serverContext.segments.size() + " segments"
         );
     }
+    final boolean presumedDriverMode = isPresumedDriver(pointTimeMs);
     BridgeTunnelMatcher.Result matchResult = bridgeTunnelMatcher.process(
             new BridgeTunnelMatcher.Point(
                     rawLocation.getLatitude(),
@@ -277,7 +281,8 @@ private void uploadNativePoint(Location rawLocation) {
             ),
             accuracy,
             pointTimeMs,
-            accuracyIsGood
+            accuracyIsGood,
+            presumedDriverMode
     );
     saveMatchingState(matchResult.state);
 
@@ -327,6 +332,16 @@ private void uploadNativePoint(Location rawLocation) {
         segmentMeters = previousLocation.distanceTo(location);
 
         double elapsedSeconds = (pointTimeMs - previousPointTimeMs) / 1000.0;
+        boolean resumeAfterLongGap = elapsedSeconds > RESUME_ANCHOR_GAP_SECONDS
+                && segmentMeters > RESUME_ANCHOR_MIN_DISTANCE_METERS;
+
+        if (resumeAfterLongGap) {
+            segmentMeters = 0.0;
+            System.out.println(
+                    "LiveStride native anchored resume after long GPS gap: "
+                            + elapsedSeconds + " s"
+            );
+        } else {
         double speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0.0;
         double speedMph = speedMps * 2.23694;
 
@@ -364,6 +379,7 @@ private void uploadNativePoint(Location rawLocation) {
 
         if (segmentMiles > 0) {
             instPaceMinPerMile = elapsedMinutes / segmentMiles;
+        }
         }
     }
 
@@ -595,6 +611,19 @@ private void kickPendingFlushIfNeeded() {
         Log.i("LiveStrideNative", "Immediate pending native point flush kicked after reconnect");
         LiveStridePendingPointUploadJobService.flushPendingPoints(this);
     }).start();
+}
+
+private boolean isPresumedDriver(long pointTimeMs) {
+    if (runStartTimeMs <= 0L || totalDistanceMeters <= 0.0) {
+        return false;
+    }
+
+    double elapsedSeconds = (pointTimeMs - runStartTimeMs) / 1000.0;
+    if (elapsedSeconds <= 0.0) {
+        return false;
+    }
+
+    return totalDistanceMeters / elapsedSeconds > PRESUMED_DRIVER_AVG_SPEED_MPS;
 }
 
 private boolean updateMileSplit(

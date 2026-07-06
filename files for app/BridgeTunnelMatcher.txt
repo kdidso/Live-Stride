@@ -16,6 +16,12 @@ final class BridgeTunnelMatcher {
     static final double STRONG_RAW_HANDOFF_ACCURACY_METERS = 5.0;
     static final double RELAXED_RAW_HANDOFF_ACCURACY_METERS = 10.0;
     static final double BRIDGE_ENTRY_MIN_ACCURACY_METERS = 3.0;
+    static final double RUNNING_SPEED_SAMPLE_MIN_MPS = 0.5;
+    static final double RUNNING_SPEED_SAMPLE_MAX_MPS = 8.0;
+    static final double RUNNING_FALLBACK_SPEED_MPS = 2.5;
+    static final double DRIVING_SPEED_SAMPLE_MIN_MPS = 2.2352;
+    static final double DRIVING_SPEED_SAMPLE_MAX_MPS = 62.5878;
+    static final double DRIVING_FALLBACK_SPEED_MPS = 20.1168;
     static final double EXCELLENT_ACCURACY_METERS = 4.0;
     static final double MAX_EARLY_HANDOFF_SPEED_MPS = 10.0;
     static final double MAX_EXCELLENT_ACCURACY_ENTRY_HEADING_ERROR_DEGREES = 35.0;
@@ -207,6 +213,7 @@ final class BridgeTunnelMatcher {
     private String structureType = "";
     private String activeStructureId = "";
     private Set<String> activeStructureIds = new HashSet<>();
+    private boolean presumedDriverMode = false;
 
     void reset() {
         state = State.NORMAL;
@@ -232,7 +239,18 @@ final class BridgeTunnelMatcher {
             long timeMs,
             boolean accuracyIsGood
     ) {
-        updateRecentSpeed(rawPoint, timeMs, accuracyIsGood);
+        return process(rawPoint, accuracyMeters, timeMs, accuracyIsGood, false);
+    }
+
+    Result process(
+            Point rawPoint,
+            float accuracyMeters,
+            long timeMs,
+            boolean accuracyIsGood,
+            boolean presumedDriverMode
+    ) {
+        this.presumedDriverMode = presumedDriverMode;
+        updateRecentSpeed(rawPoint, timeMs, accuracyIsGood, presumedDriverMode);
         updateEntryObservations(rawPoint, timeMs);
 
         if (state == State.RAW_RECOVERY) {
@@ -437,6 +455,7 @@ final class BridgeTunnelMatcher {
         }
 
         if (best == null || bestDistance > ENTRY_RADIUS_METERS) return;
+        if (presumedDriverMode && isBridge(best)) return;
         if (isBridge(best) && accuracyMeters >= 0.0f
                 && accuracyMeters <= BRIDGE_ENTRY_MIN_ACCURACY_METERS) {
             return;
@@ -685,12 +704,23 @@ final class BridgeTunnelMatcher {
         return new StructurePath(route, usedIds);
     }
 
-    private void updateRecentSpeed(Point rawPoint, long timeMs, boolean accuracyIsGood) {
+    private void updateRecentSpeed(
+            Point rawPoint,
+            long timeMs,
+            boolean accuracyIsGood,
+            boolean presumedDriverMode
+    ) {
         if (lastRawPoint != null && lastRawTimeMs > 0L && accuracyIsGood) {
             double elapsedSeconds = (timeMs - lastRawTimeMs) / 1000.0;
             if (elapsedSeconds > 0.0 && elapsedSeconds <= 5.0) {
                 double speedMps = distanceMeters(lastRawPoint, rawPoint) / elapsedSeconds;
-                if (speedMps >= 0.5 && speedMps <= 8.0) {
+                double minSpeedMps = presumedDriverMode
+                        ? DRIVING_SPEED_SAMPLE_MIN_MPS
+                        : RUNNING_SPEED_SAMPLE_MIN_MPS;
+                double maxSpeedMps = presumedDriverMode
+                        ? DRIVING_SPEED_SAMPLE_MAX_MPS
+                        : RUNNING_SPEED_SAMPLE_MAX_MPS;
+                if (speedMps >= minSpeedMps && speedMps <= maxSpeedMps) {
                     recentSpeeds.addLast(new SpeedSample(timeMs, speedMps));
                 }
             }
@@ -725,7 +755,11 @@ final class BridgeTunnelMatcher {
     }
 
     private double estimatedSpeedMps() {
-        if (recentSpeeds.isEmpty()) return 2.5;
+        if (recentSpeeds.isEmpty()) {
+            return presumedDriverMode
+                    ? DRIVING_FALLBACK_SPEED_MPS
+                    : RUNNING_FALLBACK_SPEED_MPS;
+        }
 
         List<Double> speeds = new ArrayList<>();
         for (SpeedSample sample : recentSpeeds) {
@@ -787,7 +821,10 @@ final class BridgeTunnelMatcher {
         if (elapsedSeconds <= 0.0 || elapsedSeconds > 5.0) return false;
 
         double speedMps = distanceMeters(lastMatchedOutputPoint, rawPoint) / elapsedSeconds;
-        if (speedMps > MAX_EARLY_HANDOFF_SPEED_MPS) return true;
+        double maxEarlyHandoffSpeedMps = presumedDriverMode
+                ? DRIVING_SPEED_SAMPLE_MAX_MPS
+                : MAX_EARLY_HANDOFF_SPEED_MPS;
+        if (speedMps > maxEarlyHandoffSpeedMps) return true;
 
         Projection rawProjection = project(activeRoute, rawPoint);
         return rawProjection.alongMeters < progressMeters - BACKWARD_PROGRESS_TOLERANCE_METERS;

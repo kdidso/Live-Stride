@@ -91,6 +91,8 @@ let activeListener = null;
 let activeSupabaseChannel = null;
 let activeNativeSupabaseChannel = null;
 let nativePathCoords = [];
+const NATIVE_PATH_BREAK_GAP_MS = 45 * 1000;
+const NATIVE_PATH_BREAK_DISTANCE_METERS = 25;
 let viewerTimerId = null;;
 let lastViewerData = null;
 let lastViewerElapsed = 0;
@@ -978,16 +980,31 @@ function buildSequenceLineSegments(points) {
   const segments = [];
   let currentSegment = [];
   let previousSequence = null;
+  let previousTimestamp = null;
 
   points.forEach(point => {
     const pointCoords = [point.lon, point.lat];
     const sequence = point.sequenceNum;
+    const timestamp = Number.isFinite(point.timestamp) ? point.timestamp : null;
 
     if (
       currentSegment.length > 0 &&
-      previousSequence != null &&
-      sequence != null &&
-      sequence - previousSequence > 1
+      (
+        (
+          previousSequence != null &&
+          sequence != null &&
+          sequence - previousSequence > 1
+        ) ||
+        (
+          previousTimestamp != null &&
+          timestamp != null &&
+          timestamp - previousTimestamp > NATIVE_PATH_BREAK_GAP_MS &&
+          haversineDistance(
+            { lat: currentSegment[currentSegment.length - 1][1], lon: currentSegment[currentSegment.length - 1][0] },
+            point
+          ) > NATIVE_PATH_BREAK_DISTANCE_METERS
+        )
+      )
     ) {
       if (currentSegment.length > 1) {
         segments.push(currentSegment);
@@ -998,6 +1015,7 @@ function buildSequenceLineSegments(points) {
 
     currentSegment.push(pointCoords);
     previousSequence = sequence;
+    previousTimestamp = timestamp;
   });
 
   if (currentSegment.length > 1) {
@@ -1011,11 +1029,21 @@ function hasSequenceGap(points) {
   for (let i = 1; i < points.length; i++) {
     const previousSequence = points[i - 1].sequenceNum;
     const currentSequence = points[i].sequenceNum;
+    const previousTimestamp = points[i - 1].timestamp;
+    const currentTimestamp = points[i].timestamp;
 
     if (
-      previousSequence != null &&
-      currentSequence != null &&
-      currentSequence - previousSequence > 1
+      (
+        previousSequence != null &&
+        currentSequence != null &&
+        currentSequence - previousSequence > 1
+      ) ||
+      (
+        Number.isFinite(previousTimestamp) &&
+        Number.isFinite(currentTimestamp) &&
+        currentTimestamp - previousTimestamp > NATIVE_PATH_BREAK_GAP_MS &&
+        haversineDistance(points[i - 1], points[i]) > NATIVE_PATH_BREAK_DISTANCE_METERS
+      )
     ) {
       return true;
     }

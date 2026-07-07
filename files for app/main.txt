@@ -275,6 +275,7 @@ function clearViewerSearch() {
 
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
 const NATIVE_HYDRATION_BATCH_SIZE = 500;
+const NATIVE_HYDRATION_RENDER_EVERY_BATCHES = 4;
 const STOPPED_NATIVE_RESTORE_GRACE_MS = 30 * 60 * 1000;
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
@@ -1559,11 +1560,29 @@ function upsertRunnerNativeDisplayPoint(point) {
   }
 }
 
+function appendRunnerNativeDisplayPoints(points) {
+  points
+    .map(normalizeNativeRunPoint)
+    .filter(point =>
+      point.sequenceNum != null && Number.isFinite(point.lat) && Number.isFinite(point.lon)
+    )
+    .forEach(point => {
+      pathCoords.push(point);
+    });
+}
+
+function yieldToBrowser() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = {}) {
   if (!snapshot) return false;
 
   const finalTimeMs = Number(options.finalTimeMs || 0);
   const focusLatestPoint = Boolean(options.focusLatestPoint);
+  const appendOnly = Boolean(options.appendOnly);
+  const renderPath = options.renderPath !== false;
+  const updateSplits = options.updateSplits !== false;
   const points = Array.isArray(snapshot.points) ? snapshot.points : [];
   const latestRaw = snapshot.latestPoint && typeof snapshot.latestPoint === "object"
     ? snapshot.latestPoint
@@ -1573,14 +1592,22 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
     pathCoords = points.map(normalizeNativeRunPoint).filter(point =>
       point.sequenceNum != null && Number.isFinite(point.lat) && Number.isFinite(point.lon)
     );
+  } else if (appendOnly) {
+    appendRunnerNativeDisplayPoints(points);
   } else {
     points.forEach(upsertRunnerNativeDisplayPoint);
   }
 
   if (pathCoords.length > 0) {
-    sortRunPoints(pathCoords);
-    addOrUpdatePath();
-    updateSplitsPanel(pathCoords);
+    if (!appendOnly) {
+      sortRunPoints(pathCoords);
+    }
+    if (renderPath) {
+      addOrUpdatePath();
+    }
+    if (updateSplits) {
+      updateSplitsPanel(pathCoords);
+    }
     runnerNativeDisplayActive = true;
   }
 
@@ -1703,9 +1730,16 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
     const points = Array.isArray(snapshot.points) ? snapshot.points : [];
     if (points.length === 0) break;
 
+    const shouldRenderThisBatch = firstBatch
+      || (i + 1) % NATIVE_HYDRATION_RENDER_EVERY_BATCHES === 0
+      || points.length < NATIVE_HYDRATION_BATCH_SIZE;
+
     applyRunnerNativeSnapshot(snapshot, firstBatch, {
       finalTimeMs,
-      focusLatestPoint: Boolean(options.focusLatestPoint) && firstBatch
+      focusLatestPoint: Boolean(options.focusLatestPoint) && firstBatch,
+      appendOnly: !firstBatch,
+      renderPath: shouldRenderThisBatch,
+      updateSplits: shouldRenderThisBatch
     });
     loadedAny = true;
     firstBatch = false;
@@ -1719,6 +1753,13 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
     afterSequenceNum = latestBatchPoint.sequenceNum;
 
     if (points.length < NATIVE_HYDRATION_BATCH_SIZE) break;
+    await yieldToBrowser();
+  }
+
+  if (loadedAny) {
+    sortRunPoints(pathCoords);
+    addOrUpdatePath();
+    updateSplitsPanel(pathCoords);
   }
 
   return loadedAny;

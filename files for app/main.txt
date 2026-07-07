@@ -149,6 +149,10 @@ const uploadStravaBtn = document.getElementById("uploadStravaBtn");
 const exportPageOverlay = document.getElementById("exportPageOverlay");
 const exportPageFrame = document.getElementById("exportPageFrame");
 const closeExportPageBtn = document.getElementById("closeExportPageBtn");
+const choiceModal = document.getElementById("choiceModal");
+const choiceModalTitle = document.getElementById("choiceModalTitle");
+const choiceModalOptions = document.getElementById("choiceModalOptions");
+const choiceModalCancel = document.getElementById("choiceModalCancel");
 let splitsPanelEl = null;
 let splitsListEl = null;
 let lastSplitsSignature = "";
@@ -185,6 +189,53 @@ function downloadGpxInBrowser(filename, content) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+function showChoiceModal(title, options = []) {
+  if (!choiceModal || !choiceModalTitle || !choiceModalOptions) {
+    return Promise.resolve(null);
+  }
+
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      choiceModal.style.display = "none";
+      choiceModal.setAttribute("aria-hidden", "true");
+      choiceModalOptions.innerHTML = "";
+      if (choiceModalCancel) choiceModalCancel.onclick = null;
+      resolve(value);
+    };
+
+    choiceModalTitle.textContent = title;
+    choiceModalOptions.innerHTML = "";
+
+    options.forEach(option => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "choice-option";
+      const label = document.createElement("strong");
+      label.textContent = option.label;
+      button.appendChild(label);
+
+      if (option.description) {
+        const description = document.createElement("span");
+        description.textContent = option.description;
+        button.appendChild(description);
+      }
+
+      button.onclick = () => finish(option.value);
+      choiceModalOptions.appendChild(button);
+    });
+
+    if (choiceModalCancel) {
+      choiceModalCancel.onclick = () => finish(null);
+    }
+
+    choiceModal.style.display = "flex";
+    choiceModal.setAttribute("aria-hidden", "false");
+  });
 }
 
 async function openExternalUrl(url) {
@@ -2311,7 +2362,7 @@ async function chooseAndExportLocalRun() {
     return;
   }
 
-  const choices = runs.slice(0, 20).map((run, index) => {
+  const options = runs.slice(0, 20).map(run => {
     const start = run.started_at ? new Date(run.started_at) : null;
     const finish = run.finished_at ? new Date(run.finished_at) : null;
     const dateText = start
@@ -2321,21 +2372,17 @@ async function chooseAndExportLocalRun() {
       ? finish.toLocaleTimeString()
       : "unknown finish";
     const miles = Number(run.distance_m || 0) / METERS_PER_MILE;
-    return `${index + 1}. ${dateText} - ${finishText}, ${miles.toFixed(2)} mi, ${run.point_count || 0} pts`;
+    return {
+      label: dateText,
+      description: `${finishText} | ${miles.toFixed(2)} mi | ${run.point_count || 0} pts`,
+      value: run.run_id
+    };
   });
 
-  const answer = prompt(
-    `Choose a local private run to export:\n\n${choices.join("\n")}\n\nEnter a number:`
-  );
-  if (!answer) return;
+  const selectedRunId = await showChoiceModal("Choose Local Run", options);
+  if (!selectedRunId) return;
 
-  const index = Number(answer.trim()) - 1;
-  if (!Number.isInteger(index) || index < 0 || index >= runs.length) {
-    alert("That run number was not recognized.");
-    return;
-  }
-
-  await exportPrivateRunById(runs[index].run_id);
+  await exportPrivateRunById(selectedRunId);
 }
 
 function collectCoordinateLines(value, lines = []) {
@@ -3009,12 +3056,21 @@ uploadStravaBtn.style.display = "none";
 };
 
 viewerGpxBtn.onclick = async () => {
-  const choice = prompt(
-    "Get GPX file from:\n\n1. Broadcast run\n2. Local private run\n\nEnter 1 or 2:"
-  );
+  const choice = await showChoiceModal("Get GPX File", [
+    {
+      label: "Broadcast Run",
+      description: "Use the online GPX export page for a public run.",
+      value: "broadcast"
+    },
+    {
+      label: "Local Private Run",
+      description: "Choose a private run saved on this phone.",
+      value: "local"
+    }
+  ]);
   if (!choice) return;
 
-  if (choice.trim() === "2") {
+  if (choice === "local") {
     try {
       await chooseAndExportLocalRun();
     } catch (err) {

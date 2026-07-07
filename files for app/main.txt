@@ -2225,6 +2225,119 @@ function convertToGpx(runData) {
   return gpx;
 }
 
+function privateRunFilename(runData) {
+  const start = runData.startTime
+    ? new Date(runData.startTime)
+    : new Date();
+  const stamp = start.toISOString().replace(/[:.]/g, "-");
+  return `LiveStride_Private_${stamp}.gpx`;
+}
+
+async function saveAndShareGpx(filename, gpx) {
+  let shareUrl = null;
+
+  if (LiveStrideExport?.saveGpxToDownloads) {
+    const result = await LiveStrideExport.saveGpxToDownloads({
+      filename,
+      content: gpx
+    });
+    shareUrl = result?.uri || null;
+  } else {
+    downloadGpxInBrowser(filename, gpx);
+  }
+
+  if (Share?.share) {
+    try {
+      await Share.share({
+        title: "LiveStride GPX Export",
+        text: "Your LiveStride GPX file has been saved to Downloads.",
+        url: shareUrl || undefined,
+        dialogTitle: "Share your run GPX"
+      });
+    } catch (err) {
+      console.warn("Share cancelled or failed:", err);
+    }
+  }
+}
+
+async function exportPrivateRunById(runId) {
+  if (!LiveStrideNativeTracker?.getNativeRunSnapshot || !runId) {
+    alert("No local run is available to export.");
+    return;
+  }
+
+  const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
+    runId,
+    afterSequenceNum: -1,
+    beforeSequenceNum: -1,
+    includeFullPath: true,
+    limit: 0
+  });
+  const snapshot = JSON.parse(result?.snapshotJson || "{}");
+  const points = Array.isArray(snapshot.points)
+    ? snapshot.points.map(normalizeNativeRunPoint).filter(point =>
+        Number.isFinite(point.lat) && Number.isFinite(point.lon)
+      )
+    : [];
+
+  if (points.length === 0) {
+    alert("That local run has no points to export.");
+    return;
+  }
+
+  sortRunPoints(points);
+  const firstTimestamp = points[0]?.timestamp || Date.now();
+  const runData = {
+    startTime: firstTimestamp,
+    pathCoords: points,
+    totalDistanceMiles: metersToMiles(points[points.length - 1]?.distanceM || 0),
+    lastUpdated: Date.now()
+  };
+
+  await saveAndShareGpx(privateRunFilename(runData), convertToGpx(runData));
+  alert("GPX saved to Downloads.");
+}
+
+async function chooseAndExportLocalRun() {
+  if (!LiveStrideNativeTracker?.listLocalRuns) {
+    alert("Local run lookup is only available in the Android app.");
+    return;
+  }
+
+  const result = await LiveStrideNativeTracker.listLocalRuns();
+  const runs = JSON.parse(result?.runsJson || "[]");
+  if (!Array.isArray(runs) || runs.length === 0) {
+    alert("No saved private runs were found on this phone.");
+    return;
+  }
+
+  const choices = runs.slice(0, 20).map((run, index) => {
+    const start = run.started_at ? new Date(run.started_at) : null;
+    const finish = run.finished_at ? new Date(run.finished_at) : null;
+    const dateText = start
+      ? start.toLocaleString()
+      : "Unknown start";
+    const finishText = finish
+      ? finish.toLocaleTimeString()
+      : "unknown finish";
+    const miles = Number(run.distance_m || 0) / METERS_PER_MILE;
+    return `${index + 1}. ${dateText} - ${finishText}, ${miles.toFixed(2)} mi, ${run.point_count || 0} pts`;
+  });
+
+  const answer = prompt(
+    `Choose a local private run to export:\n\n${choices.join("\n")}\n\nEnter a number:`
+  );
+  if (!answer) return;
+
+  const index = Number(answer.trim()) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= runs.length) {
+    alert("That run number was not recognized.");
+    return;
+  }
+
+  await exportPrivateRunById(runs[index].run_id);
+}
+
 function collectCoordinateLines(value, lines = []) {
   if (!Array.isArray(value) || value.length === 0) return lines;
 
@@ -2859,36 +2972,8 @@ exportGpxBtn.onclick = async () => {
       runData = JSON.parse(readResult.data);
     }
 
-    const gpx = convertToGpx(runData);
-    const runDate = runData.startTime
-      ? new Date(runData.startTime).toISOString().replace(/[:.]/g, "-")
-      : new Date().toISOString().replace(/[:.]/g, "-");
-    const gpxFilename = localRunFilename
-      ? localRunFilename.replace(".json", ".gpx")
-      : `livestride_private_${runDate}.gpx`;
-
-    await Filesystem.writeFile({
-      path: gpxFilename,
-      data: gpx,
-      directory: "CACHE",
-      encoding: "utf8"
-    });
-
-    const { uri } = await Filesystem.getUri({
-      directory: "CACHE",
-      path: gpxFilename
-    });
-
-    try {
-      await Share.share({
-        title: "LiveStride GPX Export",
-        text: "Here's my run in GPX format.",
-        url: uri,
-        dialogTitle: "Save or share your run GPX"
-      });
-    } catch (err) {
-      console.warn("Share cancelled or failed:", err);
-    }
+    await saveAndShareGpx(privateRunFilename(runData), convertToGpx(runData));
+    alert("GPX saved to Downloads.");
   } catch (err) {
     console.error("Unexpected export error:", err);
     alert(`Export failed:\n${err.message}`);
@@ -2923,7 +3008,22 @@ exportGpxBtn.style.display = "none";
 uploadStravaBtn.style.display = "none";
 };
 
-viewerGpxBtn.onclick = () => {
+viewerGpxBtn.onclick = async () => {
+  const choice = prompt(
+    "Get GPX file from:\n\n1. Broadcast run\n2. Local private run\n\nEnter 1 or 2:"
+  );
+  if (!choice) return;
+
+  if (choice.trim() === "2") {
+    try {
+      await chooseAndExportLocalRun();
+    } catch (err) {
+      console.error("Local GPX export failed:", err);
+      alert(`Local GPX export failed:\n${err.message || err}`);
+    }
+    return;
+  }
+
   openExportPageInApp();
 };
 

@@ -486,9 +486,11 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
     public synchronized JSONObject cleanupCompletedUploadedRunsBefore(long cutoffMs) {
         SQLiteDatabase db = getWritableDatabase();
         List<String> runIds = new ArrayList<>();
+        List<String> pointRunIds = new ArrayList<>();
         int deletedPointRows = 0;
         int deletedFinishRows = 0;
         int skippedRuns = 0;
+        int skippedPointRuns = 0;
 
         Cursor cursor = db.query(
                 TABLE_FINISH_EVENTS,
@@ -511,6 +513,26 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             cursor.close();
         }
 
+        Cursor pointCursor = db.rawQuery(
+                "SELECT run_id FROM " + TABLE_NATIVE_POINTS
+                        + " WHERE run_id IS NOT NULL AND TRIM(run_id) != ''"
+                        + " GROUP BY run_id"
+                        + " HAVING MAX(created_at_ms) < ?"
+                        + " AND SUM(CASE WHEN uploaded = 0 THEN 1 ELSE 0 END) = 0",
+                new String[]{String.valueOf(cutoffMs)}
+        );
+
+        try {
+            while (pointCursor.moveToNext()) {
+                String runId = pointCursor.getString(0);
+                if (runId != null && !runId.trim().isEmpty() && !runIds.contains(runId)) {
+                    pointRunIds.add(runId);
+                }
+            }
+        } finally {
+            pointCursor.close();
+        }
+
         for (String cleanupRunId : runIds) {
             if (countPendingForRun(cleanupRunId) > 0) {
                 skippedRuns++;
@@ -530,10 +552,31 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             );
         }
 
+        for (String cleanupRunId : pointRunIds) {
+            if (hasPendingFinishEvent(cleanupRunId)) {
+                skippedPointRuns++;
+                continue;
+            }
+
+            deletedPointRows += db.delete(
+                    TABLE_NATIVE_POINTS,
+                    "run_id = ? AND uploaded = 1 AND created_at_ms < ?",
+                    new String[]{cleanupRunId, String.valueOf(cutoffMs)}
+            );
+
+            deletedFinishRows += db.delete(
+                    TABLE_FINISH_EVENTS,
+                    "run_id = ? AND completed = 1 AND created_at_ms < ?",
+                    new String[]{cleanupRunId, String.valueOf(cutoffMs)}
+            );
+        }
+
         JSONObject result = new JSONObject();
         try {
-            result.put("eligibleRuns", runIds.size());
+            result.put("finishEventEligibleRuns", runIds.size());
+            result.put("pointEligibleRuns", pointRunIds.size());
             result.put("skippedRuns", skippedRuns);
+            result.put("skippedPointRuns", skippedPointRuns);
             result.put("deletedPointRows", deletedPointRows);
             result.put("deletedFinishRows", deletedFinishRows);
             result.put("cutoffMs", cutoffMs);
@@ -547,6 +590,23 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         }
 
         return result;
+    }
+
+    private boolean hasPendingFinishEvent(String runId) {
+        if (runId == null) return false;
+
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM " + TABLE_FINISH_EVENTS
+                        + " WHERE run_id = ? AND completed = 0",
+                new String[]{runId}
+        );
+
+        try {
+            return cursor.moveToFirst() && cursor.getInt(0) > 0;
+        } finally {
+            cursor.close();
+        }
     }
 
     public synchronized JSONObject getRunSummaryFromNativePoints(String runId) {

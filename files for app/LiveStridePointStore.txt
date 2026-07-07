@@ -203,6 +203,24 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         exportDebugCopy();
     }
 
+    public synchronized void markLocalOnly(long localId) {
+        ContentValues values = new ContentValues();
+        values.put("uploaded", 1);
+        values.put("upload_status", "local_only");
+        values.put("uploaded_at", isoNow());
+
+        SQLiteDatabase db = getWritableDatabase();
+        db.update(
+                TABLE_NATIVE_POINTS,
+                values,
+                "local_id = ?",
+                new String[]{String.valueOf(localId)}
+        );
+
+        Log.i(TAG, "Marked native point local-only local_id=" + localId);
+        exportDebugCopy();
+    }
+
     public synchronized void markUploadInProgress(long localId) {
         ContentValues values = new ContentValues();
         values.put("upload_status", "uploading");

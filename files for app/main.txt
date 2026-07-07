@@ -1575,6 +1575,16 @@ function yieldToBrowser() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+async function requestStartupPermissions() {
+  if (!LiveStrideNativeTracker?.requestStartupPermissions) return;
+
+  try {
+    await LiveStrideNativeTracker.requestStartupPermissions();
+  } catch (err) {
+    console.warn("Startup permission request failed:", err);
+  }
+}
+
 function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = {}) {
   if (!snapshot) return false;
 
@@ -2473,6 +2483,8 @@ updateQueuedPointElevation(activeRunId, thisSequenceNum, elevMeters);
 }
 }
 async function startTracking() {
+  await requestStartupPermissions();
+
   if (!isPrivateMode && !publicRunReadyToStart) {
     updateRunnerStartAvailability();
     alert("Press Broadcast and enter a runner name before starting a public run.");
@@ -3591,5 +3603,6 @@ layerSelect.addEventListener("change", () => {
 
 map.on("load", () => {
   setMode("runner");
+  requestStartupPermissions();
   restoreRunnerFromNativeState();
 });

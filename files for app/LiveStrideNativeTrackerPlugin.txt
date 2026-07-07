@@ -151,8 +151,9 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                 "nativeSessionId",
                 "native_" + System.currentTimeMillis()
         );
+        boolean localOnly = call.getBoolean("localOnly", false);
 
-        if (supabaseUrl == null || supabaseAnonKey == null) {
+        if (!localOnly && (supabaseUrl == null || supabaseAnonKey == null)) {
             call.reject("Missing Supabase URL or anon key.");
             return;
         }
@@ -166,6 +167,7 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         intent.putExtra("nativeSessionId", nativeSessionId);
         intent.putExtra("firebaseDatabaseUrl", firebaseDatabaseUrl);
         intent.putExtra("firebaseRunnerPath", firebaseRunnerPath);
+        intent.putExtra("localOnly", localOnly);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getContext().startForegroundService(intent);
@@ -177,6 +179,7 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         result.put("ok", true);
         result.put("message", "Native GPS test service started.");
         result.put("nativeSessionId", nativeSessionId);
+        result.put("localOnly", localOnly);
         call.resolve(result);
     }
 
@@ -204,6 +207,7 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         result.put("ok", true);
         result.put("runId", prefs.getString(LiveStrideNativeTrackerService.STATE_RUN_ID, null));
         result.put("running", prefs.getBoolean(LiveStrideNativeTrackerService.STATE_RUNNING, false));
+        result.put("localOnly", prefs.getBoolean(LiveStrideNativeTrackerService.STATE_LOCAL_ONLY, false));
         result.put("stoppedAtMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_STOPPED_AT_MS, 0L));
         result.put("finalTimeMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_FINAL_TIME_MS, 0L));
         result.put(

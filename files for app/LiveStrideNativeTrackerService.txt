@@ -62,6 +62,7 @@ public class LiveStrideNativeTrackerService extends Service {
     public static final String STATE_MAP_CONTEXT_RUN_ID = "map_context_run_id";
     public static final String STATE_MAP_CONTEXT_UPDATED_AT_MS = "map_context_updated_at_ms";
     public static final String STATE_MATCHING_STATE = "matching_state";
+    public static final String STATE_LOCAL_ONLY = "local_only";
 
     public static final String ACTION_START = "START_NATIVE_TEST_RUN";
     public static final String ACTION_STOP = "STOP_NATIVE_TEST_RUN";
@@ -76,6 +77,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private String nativeSessionId;
     private String firebaseDatabaseUrl;
     private String firebaseRunnerPath;
+    private boolean localOnly = false;
 
     private int sequenceNum = 0;
     private boolean isTracking = false;
@@ -129,18 +131,21 @@ public class LiveStrideNativeTrackerService extends Service {
             nativeSessionId = intent.getStringExtra("nativeSessionId");
             firebaseDatabaseUrl = intent.getStringExtra("firebaseDatabaseUrl");
             firebaseRunnerPath = intent.getStringExtra("firebaseRunnerPath");
-            LiveStridePendingPointUploadJobService.saveSupabaseConfig(
-                    this,
-                    supabaseUrl,
-                    supabaseAnonKey
-            );
+            localOnly = intent.getBooleanExtra("localOnly", false);
+            if (!localOnly) {
+                LiveStridePendingPointUploadJobService.saveSupabaseConfig(
+                        this,
+                        supabaseUrl,
+                        supabaseAnonKey
+                );
+            }
 
             if (runnerName == null || runnerName.trim().isEmpty()) {
-                runnerName = "Native Test Runner";
+                runnerName = localOnly ? "Private Run" : "Native Test Runner";
             }
 
             if (nativeSessionId == null || nativeSessionId.trim().isEmpty()) {
-                nativeSessionId = "native_" + System.currentTimeMillis();
+                nativeSessionId = (localOnly ? "private_" : "native_") + System.currentTimeMillis();
             }  
 
             Log.i("LiveStrideNative", "SQLite native point storage active. Pending before run=" + pointStore.countPending());
@@ -177,9 +182,12 @@ public class LiveStrideNativeTrackerService extends Service {
 
         if (ACTION_STOP.equals(intent.getAction())) {
             restoreNativeRunConfig(intent);
+            localOnly = intent.getBooleanExtra("localOnly", localOnly);
             stopLocationUpdates();
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
-            queueNativeFinishEvent();
+            if (!localOnly) {
+                queueNativeFinishEvent();
+            }
             long stoppedAtMs = System.currentTimeMillis();
             long finalTimeMs = runStartTimeMs > 0L ? stoppedAtMs - runStartTimeMs : 0L;
             saveNativeTrackerState(false, stoppedAtMs, finalTimeMs);
@@ -196,7 +204,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private void startLocationUpdates() {
         if (isTracking) return;
 
-        if (supabaseUrl == null || supabaseAnonKey == null) {
+        if (!localOnly && (supabaseUrl == null || supabaseAnonKey == null)) {
             stopSelf();
             return;
         }
@@ -415,7 +423,7 @@ private void uploadNativePoint(Location rawLocation) {
     new Thread(() -> {
         try {
             Double elevationMeters =
-                    LiveStrideServerClient.fetchElevationMeters(lat, lon);
+                    localOnly ? null : LiveStrideServerClient.fetchElevationMeters(lat, lon);
             JSONObject body = new JSONObject();
 
             if (runId != null && !runId.trim().isEmpty()) {
@@ -423,7 +431,7 @@ private void uploadNativePoint(Location rawLocation) {
             }
 
             body.put("runner_name", runnerName);
-            body.put("source", "native");
+            body.put("source", localOnly ? "native_private" : "native");
             body.put("native_session_id", nativeSessionId);
             body.put("sequence_num", thisSequence);
             body.put("lat", lat);
@@ -436,13 +444,22 @@ private void uploadNativePoint(Location rawLocation) {
             body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
             body.put(
                     "app_state",
-                    wasMapMatched
+                    localOnly
+                            ? (wasMapMatched
+                            ? "private_native_map_matched"
+                            : "private_native")
+                            : wasMapMatched
                             ? "foreground_service_map_matched"
                             : "foreground_service"
             );
             body.put(
                     "note",
-                    wasMapMatched
+                    localOnly
+                            ? (wasMapMatched
+                            ? "Private local run point map matched to connected "
+                                    + matchedStructureType + " route during " + matchingState
+                            : "Private local run point stored only on this phone")
+                            : wasMapMatched
                             ? "Map matched to connected " + matchedStructureType
                                     + " route during " + matchingState
                             : "Inserted from native Android GPS service with SQLite-backed local storage"
@@ -452,6 +469,17 @@ private void uploadNativePoint(Location rawLocation) {
             // Save every native point locally first. This makes the phone-side record durable
             // before any Supabase network attempt is made.
             long localId = pointStore.insertNativePoint(body);
+            if (localOnly) {
+                pointStore.markLocalOnly(localId);
+                Double privateElevationMeters =
+                        LiveStrideServerClient.fetchElevationMeters(lat, lon);
+                if (privateElevationMeters != null) {
+                    pointStore.updateElevation(localId, privateElevationMeters);
+                }
+                Log.i("LiveStrideNative", "Private local point saved seq=" + thisSequence
+                        + " local_id=" + localId);
+                return;
+            }
             pointStore.markUploadInProgress(localId);
 
             LiveStridePendingPointUploadJobService.UploadResult uploadResult =
@@ -849,7 +877,8 @@ private void updateRunNotification(
                 .putBoolean(STATE_RUNNING, running)
                 .putLong(STATE_STOPPED_AT_MS, stoppedAtMs)
                 .putLong(STATE_FINAL_TIME_MS, finalTimeMs)
-                .putLong(STATE_RUN_START_TIME_MS, runStartTimeMs);
+                .putLong(STATE_RUN_START_TIME_MS, runStartTimeMs)
+                .putBoolean(STATE_LOCAL_ONLY, localOnly);
 
         if (runId != null) {
             editor.putString(STATE_RUN_ID, runId);
@@ -877,6 +906,7 @@ private void updateRunNotification(
         if (runStartTimeMs > 0L) {
             editor.putLong(STATE_RUN_START_TIME_MS, runStartTimeMs);
         }
+        editor.putBoolean(STATE_LOCAL_ONLY, localOnly);
         editor.apply();
     }
 
@@ -915,6 +945,10 @@ private void updateRunNotification(
         if (runStartTimeMs <= 0L) {
             runStartTimeMs = prefs.getLong(STATE_RUN_START_TIME_MS, 0L);
         }
+        localOnly = intent.getBooleanExtra(
+                "localOnly",
+                localOnly || prefs.getBoolean(STATE_LOCAL_ONLY, false)
+        );
     }
 
     private static String firstNonBlank(String preferred, String fallback) {

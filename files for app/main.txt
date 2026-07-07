@@ -1408,18 +1408,22 @@ async function syncFinishNow(runId, finishPayload) {
   }
 }
 
-async function startNativeComparisonRun(firebaseRunnerPath = null) {
-  if (!LiveStrideNativeTracker || !activeRunId || !runnerName) return false;
+async function startNativeComparisonRun(firebaseRunnerPath = null, options = {}) {
+  if (!LiveStrideNativeTracker || !activeRunId) return false;
+
+  const localOnly = Boolean(options.localOnly);
+  const nativeRunnerName = runnerName || (localOnly ? "Private Run" : "Native Test Runner");
 
   try {
     const result = await LiveStrideNativeTracker.startNativeTestRun({
-      supabaseUrl: SUPABASE_URL,
-      supabaseAnonKey: SUPABASE_ANON_KEY,
+      supabaseUrl: localOnly ? null : SUPABASE_URL,
+      supabaseAnonKey: localOnly ? null : SUPABASE_ANON_KEY,
       runId: activeRunId,
-      runnerName,
-      firebaseDatabaseUrl: firebaseConfig.databaseURL,
-      firebaseRunnerPath,
-      nativeSessionId: `native_compare_${activeRunId}`
+      runnerName: nativeRunnerName,
+      firebaseDatabaseUrl: localOnly ? null : firebaseConfig.databaseURL,
+      firebaseRunnerPath: localOnly ? null : firebaseRunnerPath,
+      nativeSessionId: `${localOnly ? "private" : "native_compare"}_${activeRunId}`,
+      localOnly
     });
 
     console.log("Native comparison tracker started:", result);
@@ -1492,9 +1496,18 @@ async function syncRunnerUiWithNativeStop() {
       runnerTimerId !== null
     ) {
       settleRunnerAfterNativeStop(Number(state.finalTimeMs || 0));
-      showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+      if (state.localOnly === true) {
+        isPrivateMode = true;
+        exportGpxBtn.textContent = "Export GPX";
+        exportGpxBtn.style.display = "inline-block";
+        uploadStravaBtn.style.display = "none";
+        exportUploadBtn.style.display = "none";
+        showConnectionStatus("Private run stopped - GPX is ready to export", "good");
+      } else {
+        showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+        flushSupabaseQueue();
+      }
       hideConnectionStatusSoon();
-      flushSupabaseQueue();
       return true;
     }
   } catch (err) {
@@ -1924,6 +1937,7 @@ async function restoreRunnerFromNativeState() {
 
     const stoppedAtMs = Number(state.stoppedAtMs || 0);
     const isNativeRunning = state.running === true;
+    const isNativeLocalOnly = state.localOnly === true;
     const stoppedRecently = stoppedAtMs > 0
       && Date.now() - stoppedAtMs <= STOPPED_NATIVE_RESTORE_GRACE_MS;
 
@@ -1939,6 +1953,11 @@ async function restoreRunnerFromNativeState() {
     }
 
     const finalTimeMs = Number(state.finalTimeMs || 0);
+    if (isNativeLocalOnly) {
+      isPrivateMode = true;
+      runnerName = "Private Run";
+      if (broadcastCheckbox) broadcastCheckbox.checked = false;
+    }
     statsBar.style.display = "block";
 
     let hydrated = false;
@@ -1961,7 +1980,15 @@ async function restoreRunnerFromNativeState() {
 
     if (!isNativeRunning && stoppedAtMs > 0) {
       settleRunnerAfterNativeStop(finalTimeMs);
-      showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+      if (isNativeLocalOnly) {
+        exportGpxBtn.textContent = "Export GPX";
+        exportGpxBtn.style.display = "inline-block";
+        uploadStravaBtn.style.display = "none";
+        exportUploadBtn.style.display = "none";
+        showConnectionStatus("Private run stopped - GPX is ready to export", "good");
+      } else {
+        showConnectionStatus("Run stopped - background sync will finish if needed", "good");
+      }
       hideConnectionStatusSoon();
       await clearNativeTrackerRestoreState();
     } else if (isNativeRunning) {
@@ -1986,7 +2013,7 @@ function startRunnerNativeSnapshotPolling() {
   runnerNativeSnapshotTimerId = setInterval(() => {
     refreshRunnerFromNativeSqlite({ includeFullPath: false });
     syncNativeMatchingStatus();
-  }, 2000);
+  }, 1000);
 }
 
 function stopRunnerNativeSnapshotPolling() {
@@ -2495,6 +2522,11 @@ async function startTracking() {
     return;
   }
 
+  if (isPrivateMode) {
+    activeRunId = `private_${Date.now()}`;
+    runnerName = "Private Run";
+  }
+
   pathCoords = [];
   nativePathCoords = [];
   totalDistanceMeters = 0;
@@ -2544,13 +2576,28 @@ async function startTracking() {
     );
   }, 1000);
 
-if (runnerHeartbeatId !== null) {
-  clearInterval(runnerHeartbeatId);
-}
+  if (runnerHeartbeatId !== null) {
+    clearInterval(runnerHeartbeatId);
+  }
 
-runnerHeartbeatId = setInterval(() => {
-  sendRunnerHeartbeat();
-}, 10000);
+  if (!isPrivateMode) {
+    runnerHeartbeatId = setInterval(() => {
+      sendRunnerHeartbeat();
+    }, 10000);
+  }
+
+  if (isPrivateMode && activeRunId) {
+    const nativeStarted = await startNativeComparisonRun(null, { localOnly: true });
+    if (!nativeStarted) {
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      alert("Could not start private GPS tracking. Please check location permission and try again.");
+      return;
+    }
+
+    startRunnerNativeSnapshotPolling();
+    return;
+  }
 
   if (activeRunId && runnerName) {
     const nativeStarted = await startNativeComparisonRun(broadcastRef?.toString?.() ?? null);
@@ -2635,6 +2682,21 @@ await stopNativeComparisonRun();
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
+
+  if (isPrivateMode) {
+    await hydrateRunnerFromNativeSqliteInBatches({
+      finalTimeMs: stoppedElapsedMs,
+      focusLatestPoint: true
+    });
+    updateSplitsPanel(pathCoords, { includeFinalPartial: true });
+    savePrivateRunToFile();
+    exportGpxBtn.textContent = "Export GPX";
+    exportGpxBtn.style.display = "inline-block";
+    uploadStravaBtn.style.display = "none";
+    exportUploadBtn.style.display = "none";
+    updateRunnerStartAvailability();
+    return;
+  }
 
   if (viewerTimerId !== null) {
     clearInterval(viewerTimerId);
@@ -2774,21 +2836,36 @@ exportUploadBtn.onclick = () => {
 };
 
 exportGpxBtn.onclick = async () => {
-  if (!localRunFilename) {
+  if (!pathCoords.length && !localRunFilename) {
     alert("No run to export.");
     return;
   }
 
   try {
-    const readResult = await Filesystem.readFile({
-      path: localRunFilename,
-      directory: "DATA",
-      encoding: "utf8"
-    });
+    let runData;
+    if (pathCoords.length > 0) {
+      runData = {
+        startTime,
+        pathCoords,
+        totalDistanceMiles: metersToMiles(totalDistanceMeters),
+        lastUpdated: Date.now()
+      };
+    } else {
+      const readResult = await Filesystem.readFile({
+        path: localRunFilename,
+        directory: "DATA",
+        encoding: "utf8"
+      });
+      runData = JSON.parse(readResult.data);
+    }
 
-    const runData = JSON.parse(readResult.data);
     const gpx = convertToGpx(runData);
-    const gpxFilename = localRunFilename.replace(".json", ".gpx");
+    const runDate = runData.startTime
+      ? new Date(runData.startTime).toISOString().replace(/[:.]/g, "-")
+      : new Date().toISOString().replace(/[:.]/g, "-");
+    const gpxFilename = localRunFilename
+      ? localRunFilename.replace(".json", ".gpx")
+      : `livestride_private_${runDate}.gpx`;
 
     await Filesystem.writeFile({
       path: gpxFilename,

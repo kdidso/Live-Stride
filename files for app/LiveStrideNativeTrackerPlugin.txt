@@ -1,8 +1,13 @@
 package com.kdidso.livestride;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Build;
+
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -10,14 +15,59 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @CapacitorPlugin(name = "LiveStrideNativeTracker")
 public class LiveStrideNativeTrackerPlugin extends Plugin {
+    private static final int STARTUP_PERMISSION_REQUEST_CODE = 44510;
 
     @PluginMethod
     public void ping(PluginCall call) {
         JSObject result = new JSObject();
         result.put("ok", true);
         result.put("message", "LiveStrideNativeTracker native plugin is loaded.");
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void requestStartupPermissions(PluginCall call) {
+        List<String> permissions = new ArrayList<>();
+
+        if (ContextCompat.checkSelfPermission(
+                getContext(),
+                Manifest.permission.ACCESS_FINE_LOCATION
+        ) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+
+        if (ContextCompat.checkSelfPermission(
+                getContext(),
+                Manifest.permission.ACCESS_COARSE_LOCATION
+        ) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(
+                getContext(),
+                Manifest.permission.POST_NOTIFICATIONS
+        ) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        result.put("requested", permissions.size());
+
+        if (!permissions.isEmpty() && getActivity() != null) {
+            ActivityCompat.requestPermissions(
+                    getActivity(),
+                    permissions.toArray(new String[0]),
+                    STARTUP_PERMISSION_REQUEST_CODE
+            );
+        }
+
         call.resolve(result);
     }
 

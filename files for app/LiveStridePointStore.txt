@@ -789,6 +789,43 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         }
     }
 
+    public synchronized JSONArray getLocalRunSummaries() {
+        SQLiteDatabase db = getReadableDatabase();
+        JSONArray runs = new JSONArray();
+        Cursor cursor = db.rawQuery(
+                "SELECT run_id, MIN(recorded_at), MAX(recorded_at), "
+                        + "MAX(distance_m), COUNT(*) FROM " + TABLE_NATIVE_POINTS
+                        + " WHERE upload_status = ?"
+                        + " AND run_id IS NOT NULL AND TRIM(run_id) != ''"
+                        + " AND " + ACCEPTED_ROUTE_POINT_WHERE
+                        + " GROUP BY run_id"
+                        + " ORDER BY MAX(created_at_ms) DESC",
+                new String[]{"local_only"}
+        );
+
+        try {
+            while (cursor.moveToNext()) {
+                JSONObject run = new JSONObject();
+                run.put("run_id", cursor.getString(0));
+                run.put("started_at", cursor.getString(1));
+                run.put("finished_at", cursor.getString(2));
+                if (cursor.isNull(3)) {
+                    run.put("distance_m", JSONObject.NULL);
+                } else {
+                    run.put("distance_m", cursor.getDouble(3));
+                }
+                run.put("point_count", cursor.getInt(4));
+                runs.put(run);
+            }
+        } catch (JSONException e) {
+            Log.w(TAG, "Could not build local run summary JSON: " + e.getMessage());
+        } finally {
+            cursor.close();
+        }
+
+        return runs;
+    }
+
     public synchronized List<JSONObject> getPendingUploadBodies(int limit) {
         List<JSONObject> rows = new ArrayList<>();
 

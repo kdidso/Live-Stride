@@ -147,6 +147,71 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       display: none;
     }
 
+    #choiceModal {
+      position: absolute;
+      inset: 0;
+      z-index: 3000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(0, 0, 0, 0.45);
+      box-sizing: border-box;
+    }
+
+    #choiceModalPanel {
+      width: min(92vw, 430px);
+      max-height: 78vh;
+      overflow: auto;
+      background: white;
+      color: #111;
+      border-radius: 8px;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3);
+      padding: 16px;
+      box-sizing: border-box;
+    }
+
+    #choiceModalTitle {
+      margin: 0 0 12px;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    #choiceModalOptions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .choice-option {
+      width: 100%;
+      min-width: 0;
+      text-align: left;
+      background: #f4f7fb;
+      color: #111;
+      border: 1px solid #d5deea;
+      padding: 12px;
+      white-space: normal;
+    }
+
+    .choice-option strong,
+    .choice-option span {
+      display: block;
+    }
+
+    .choice-option span {
+      margin-top: 4px;
+      color: #4b5563;
+      font-size: 13px;
+    }
+
+    #choiceModalCancel {
+      margin-top: 14px;
+      width: 100%;
+      min-width: 0;
+      background: #5c6675;
+    }
+
     #runnerModeBtn.viewer-position {
       position: static;
     }
@@ -433,6 +498,14 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
 
   <div id="statsBar"></div>
   <button id="recenterBtn">Recenter</button>
+
+  <div id="choiceModal" aria-hidden="true">
+    <div id="choiceModalPanel">
+      <h2 id="choiceModalTitle"></h2>
+      <div id="choiceModalOptions"></div>
+      <button id="choiceModalCancel" type="button">Cancel</button>
+    </div>
+  </div>
 
   <div id="exportPageOverlay" aria-hidden="true">
     <div id="exportPageHeader">

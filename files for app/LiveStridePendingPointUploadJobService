@@ -11,6 +11,7 @@ import android.util.Log;
 
 import org.json.JSONObject;
 
+import java.io.File;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -209,6 +210,16 @@ public class LiveStridePendingPointUploadJobService extends JobService {
         LiveStridePointStore pointStore = new LiveStridePointStore(appContext);
         long cutoffMs = todayLocalMidnightMs();
         JSONObject result = pointStore.cleanupCompletedUploadedRunsBefore(cutoffMs);
+        int deletedMapCacheFiles = LiveStrideMapContextProvider.cleanupOldCacheFiles(
+                appContext,
+                cutoffMs
+        );
+        int deletedAppCacheFiles = deleteOldCacheFiles(appContext.getCacheDir(), cutoffMs);
+        try {
+            result.put("deletedMapCacheFiles", deletedMapCacheFiles);
+            result.put("deletedAppCacheFiles", deletedAppCacheFiles);
+        } catch (Exception ignored) {
+        }
         clearStaleNativeTrackerState(appContext, cutoffMs);
         Log.i(TAG, "Daily native point cleanup checked: " + result);
         return result;
@@ -236,6 +247,28 @@ public class LiveStridePendingPointUploadJobService extends JobService {
                         Context.MODE_PRIVATE
                 )
                 .getBoolean(LiveStrideNativeTrackerService.STATE_RUNNING, false);
+    }
+
+    private static int deleteOldCacheFiles(File directory, long cutoffMs) {
+        if (directory == null || !directory.isDirectory()) return 0;
+
+        int deleted = 0;
+        File[] files = directory.listFiles();
+        if (files == null) return 0;
+
+        for (File file : files) {
+            if (file.isDirectory()) {
+                deleted += deleteOldCacheFiles(file, cutoffMs);
+                File[] remaining = file.listFiles();
+                if ((remaining == null || remaining.length == 0) && file.delete()) {
+                    deleted++;
+                }
+            } else if (file.lastModified() < cutoffMs && file.delete()) {
+                deleted++;
+            }
+        }
+
+        return deleted;
     }
 
     private static long todayLocalMidnightMs() {

@@ -20,6 +20,7 @@ final class LiveStrideMapContextProvider {
     private static final int PREFETCH_RADIUS_METERS = 1_000;
     private static final long SUCCESS_REFRESH_MS = 5 * 60 * 1_000L;
     private static final long FAILURE_RETRY_MS = 60_000L;
+    private static final String CACHE_DIRECTORY_NAME = "map_context_cache";
 
     private final File cacheDirectory;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -36,7 +37,15 @@ final class LiveStrideMapContextProvider {
     private boolean workerRunning;
 
     LiveStrideMapContextProvider(Context context) {
-        cacheDirectory = new File(context.getFilesDir(), "map_context_cache");
+        cacheDirectory = new File(context.getFilesDir(), CACHE_DIRECTORY_NAME);
+    }
+
+    static int cleanupOldCacheFiles(Context context, long cutoffMs) {
+        File directory = new File(
+                context.getApplicationContext().getFilesDir(),
+                CACHE_DIRECTORY_NAME
+        );
+        return deleteOldFiles(directory, cutoffMs);
     }
 
     void requestForLocation(double latitude, double longitude) {
@@ -178,6 +187,27 @@ final class LiveStrideMapContextProvider {
 
     private File cacheFile(String tileKey) {
         return new File(cacheDirectory, tileKey + ".json");
+    }
+
+    private static int deleteOldFiles(File directory, long cutoffMs) {
+        if (directory == null || !directory.isDirectory()) return 0;
+
+        int deleted = 0;
+        File[] files = directory.listFiles();
+        if (files == null) return 0;
+
+        for (File file : files) {
+            if (file.isDirectory()) {
+                deleted += deleteOldFiles(file, cutoffMs);
+                File[] remaining = file.listFiles();
+                if ((remaining == null || remaining.length == 0) && file.delete()) {
+                    deleted++;
+                }
+            } else if (file.lastModified() < cutoffMs && file.delete()) {
+                deleted++;
+            }
+        }
+        return deleted;
     }
 
     private static String message(Exception error) {

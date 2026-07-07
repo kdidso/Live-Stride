@@ -268,6 +268,21 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void listLocalRuns(PluginCall call) {
+        new Thread(() -> {
+            try {
+                LiveStridePointStore pointStore = new LiveStridePointStore(getContext());
+                JSObject result = new JSObject();
+                result.put("ok", true);
+                result.put("runsJson", pointStore.getLocalRunSummaries().toString());
+                call.resolve(result);
+            } catch (Exception e) {
+                call.reject("Local run list failed: " + e.getMessage(), e);
+            }
+        }).start();
+    }
+
+    @PluginMethod
     public void updateMapMatchingContext(PluginCall call) {
         String runId = call.getString("runId");
         String contextJson = call.getString("contextJson");

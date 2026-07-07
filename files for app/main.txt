@@ -2288,13 +2288,30 @@ async function saveAndShareGpx(filename, gpx) {
   let shareUrl = null;
 
   if (LiveStrideExport?.saveGpxToDownloads) {
-    const result = await LiveStrideExport.saveGpxToDownloads({
+    await LiveStrideExport.saveGpxToDownloads({
       filename,
       content: gpx
     });
-    shareUrl = result?.uri || null;
   } else {
     downloadGpxInBrowser(filename, gpx);
+  }
+
+  if (Filesystem?.writeFile && Filesystem?.getUri) {
+    try {
+      await Filesystem.writeFile({
+        path: filename,
+        data: gpx,
+        directory: "CACHE",
+        encoding: "utf8"
+      });
+      const result = await Filesystem.getUri({
+        directory: "CACHE",
+        path: filename
+      });
+      shareUrl = result?.uri || null;
+    } catch (err) {
+      console.warn("Temporary GPX share file could not be created:", err);
+    }
   }
 
   if (Share?.share) {
@@ -2371,7 +2388,7 @@ async function chooseAndExportLocalRun() {
     const finishText = finish
       ? finish.toLocaleTimeString()
       : "unknown finish";
-    const miles = Number(run.distance_m || 0) / METERS_PER_MILE;
+    const miles = metersToMiles(Number(run.distance_m || 0));
     return {
       label: dateText,
       description: `${finishText} | ${miles.toFixed(2)} mi | ${run.point_count || 0} pts`,

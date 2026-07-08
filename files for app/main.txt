@@ -1011,11 +1011,11 @@ function addOrUpdatePath() {
     return false;
   }
 
-  const coords = pathCoords.map(pt => [pt.lon, pt.lat]);
+  const coords = buildSequenceLineSegments(pathCoords);
   const data = {
     type: "Feature",
     geometry: {
-      type: "LineString",
+      type: "MultiLineString",
       coordinates: coords
     }
   };

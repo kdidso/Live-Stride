@@ -42,6 +42,8 @@ let map = new maplibregl.Map({
   center: [-98.6, 39.8],
   zoom: 3.2
 });
+let mapStyleReady = false;
+let runPathRenderPending = false;
 
 // -> Re-add geolocation control after style changes
 let geoControl;
@@ -63,7 +65,11 @@ function addControls() {
 
   map.addControl(geoControl, "bottom-right");
 }
-map.on("style.load", addControls);
+map.on("style.load", () => {
+  mapStyleReady = true;
+  addControls();
+  renderPendingRunPathIfReady();
+});
 
 // -> Tracking state
 let pathCoords = [];
@@ -122,8 +128,12 @@ let lastRunnerHeartbeatTime = null;
 let runnerConnectionWarningEnabledAtMs = 0;
 let runnerNativeSnapshotTimerId = null;
 let runnerNativeLastSequenceNum = -1;
+let runnerNativeHydrationLoadedThroughSequenceNum = -1;
 let runnerNativeDisplayActive = false;
 let runnerWakeRecoveryInFlight = false;
+let runnerNativeRestoreInFlight = false;
+let runnerNativeRestoreStarted = false;
+let startupPermissionsRequested = false;
 let lastMapMatchingContextSentAt = 0;
 let lastMapMatchingContextSignature = "";
 let lastPublishedMatchingState = "normal";
@@ -327,6 +337,7 @@ function clearViewerSearch() {
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
 const NATIVE_HYDRATION_BATCH_SIZE = 500;
 const NATIVE_HYDRATION_RENDER_EVERY_BATCHES = 4;
+const NATIVE_HYDRATION_FIRST_PAINT_BATCHES = 1;
 const STOPPED_NATIVE_RESTORE_GRACE_MS = 30 * 60 * 1000;
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
@@ -995,6 +1006,11 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
 }
 
 function addOrUpdatePath() {
+  if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+    runPathRenderPending = true;
+    return false;
+  }
+
   const coords = pathCoords.map(pt => [pt.lon, pt.lat]);
   const data = {
     type: "Feature",
@@ -1004,28 +1020,41 @@ function addOrUpdatePath() {
     }
   };
 
-  if (!map.getSource("run-path")) {
-    map.addSource("run-path", {
-      type: "geojson",
-      data
-    });
+  try {
+    if (!map.getSource("run-path")) {
+      map.addSource("run-path", {
+        type: "geojson",
+        data
+      });
 
-    map.addLayer({
-      id: "run-line",
-      type: "line",
-      source: "run-path",
-      layout: {
-        "line-join": "round",
-        "line-cap": "round"
-      },
-      paint: {
-        "line-color": "#00FFFF",
-        "line-width": 4
-      }
-    });
-  } else {
-    map.getSource("run-path").setData(data);
+      map.addLayer({
+        id: "run-line",
+        type: "line",
+        source: "run-path",
+        layout: {
+          "line-join": "round",
+          "line-cap": "round"
+        },
+        paint: {
+          "line-color": "#00FFFF",
+          "line-width": 4
+        }
+      });
+    } else {
+      map.getSource("run-path").setData(data);
+    }
+    runPathRenderPending = false;
+    return true;
+  } catch (err) {
+    runPathRenderPending = true;
+    console.warn("Run path render deferred until map style is ready:", err);
+    return false;
   }
+}
+
+function renderPendingRunPathIfReady() {
+  if (!runPathRenderPending || pathCoords.length === 0) return;
+  addOrUpdatePath();
 }
 
 function buildSequenceLineSegments(points) {
@@ -1155,6 +1184,11 @@ function addOrUpdateNativePath() {
 }
 
 function clearRunPathLayer() {
+  if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+    runPathRenderPending = false;
+    return;
+  }
+
   if (map.getLayer("run-line")) {
     map.removeLayer("run-line");
   }
@@ -1641,6 +1675,8 @@ function yieldToBrowser() {
 
 async function requestStartupPermissions() {
   if (!LiveStrideNativeTracker?.requestStartupPermissions) return;
+  if (startupPermissionsRequested) return;
+  startupPermissionsRequested = true;
 
   try {
     await LiveStrideNativeTracker.requestStartupPermissions();
@@ -1781,11 +1817,16 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
   if (!isRunnerNativeSnapshotAllowed()) return false;
 
   const finalTimeMs = Number(options.finalTimeMs || 0);
-  let afterSequenceNum = -1;
+  const maxBatches = Number.isFinite(options.maxBatches)
+    ? Math.max(1, Math.floor(options.maxBatches))
+    : 40;
+  let afterSequenceNum = Number.isFinite(options.afterSequenceNum)
+    ? options.afterSequenceNum
+    : -1;
   let loadedAny = false;
-  let firstBatch = pathCoords.length === 0;
+  let firstBatch = pathCoords.length === 0 && afterSequenceNum < 0;
 
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < maxBatches; i++) {
     let snapshot;
     try {
       const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
@@ -1825,6 +1866,10 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
 
     if (!latestBatchPoint) break;
     afterSequenceNum = latestBatchPoint.sequenceNum;
+    runnerNativeHydrationLoadedThroughSequenceNum = Math.max(
+      runnerNativeHydrationLoadedThroughSequenceNum,
+      latestBatchPoint.sequenceNum
+    );
 
     if (points.length < NATIVE_HYDRATION_BATCH_SIZE) break;
     await yieldToBrowser();
@@ -1837,6 +1882,21 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
   }
 
   return loadedAny;
+}
+
+function continueRunnerNativeHydrationInBackground(finalTimeMs = 0) {
+  if (!isRunnerNativeSnapshotAllowed()) return;
+
+  const afterSequenceNum = runnerNativeHydrationLoadedThroughSequenceNum;
+  if (afterSequenceNum < 0) return;
+
+  setTimeout(() => {
+    hydrateRunnerFromNativeSqliteInBatches({
+      finalTimeMs,
+      afterSequenceNum,
+      focusLatestPoint: false
+    });
+  }, 0);
 }
 
 function getSequenceGaps(points) {
@@ -1980,6 +2040,11 @@ async function restoreRunnerFromNativeState() {
   if (!LiveStrideNativeTracker || document.body.classList.contains("viewer-mode")) {
     return false;
   }
+  if (runnerNativeRestoreInFlight) {
+    return false;
+  }
+
+  runnerNativeRestoreInFlight = true;
 
   try {
     const state = await LiveStrideNativeTracker.getNativeTrackerState();
@@ -2016,8 +2081,10 @@ async function restoreRunnerFromNativeState() {
       clearRunnerNativeRestoreDisplay();
       hydrated = await hydrateRunnerFromNativeSqliteInBatches({
         finalTimeMs,
-        focusLatestPoint: true
+        focusLatestPoint: true,
+        maxBatches: NATIVE_HYDRATION_FIRST_PAINT_BATCHES
       });
+      continueRunnerNativeHydrationInBackground(finalTimeMs);
     } else {
       hydrated = pathCoords.length === 0
         ? await hydrateRunnerFromNativeSqliteInBatches({ finalTimeMs, focusLatestPoint: true })
@@ -2053,6 +2120,8 @@ async function restoreRunnerFromNativeState() {
   } catch (err) {
     console.warn("Native runner restore failed:", err);
     return false;
+  } finally {
+    runnerNativeRestoreInFlight = false;
   }
 }
 
@@ -2077,7 +2146,9 @@ function stopRunnerNativeSnapshotPolling() {
 function clearRunnerNativeRestoreDisplay() {
   pathCoords = [];
   runnerNativeLastSequenceNum = -1;
+  runnerNativeHydrationLoadedThroughSequenceNum = -1;
   runnerNativeDisplayActive = false;
+  runPathRenderPending = false;
   totalDistanceMeters = 0;
   latestRunnerDistance = 0;
   latestRunnerPace = 0;
@@ -2129,25 +2200,30 @@ window.addEventListener("offline", () => {
   showRunnerConnectionLossStatus("Connection lost - saving run locally");
 });
 
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
-    restoreRunnerFromNativeState().then(restored => {
-      if (!restored) {
-        syncRunnerUiWithNativeStop();
-        recoverRunnerPathOnWake();
-      }
-    });
-    flushSupabaseQueue();
-  }
-});
-
-window.addEventListener("focus", () => {
+function restoreOrRecoverRunnerFromNative() {
   restoreRunnerFromNativeState().then(restored => {
     if (!restored) {
       syncRunnerUiWithNativeStop();
       recoverRunnerPathOnWake();
     }
   });
+}
+
+function startInitialRunnerNativeRestore() {
+  if (runnerNativeRestoreStarted) return;
+  runnerNativeRestoreStarted = true;
+  restoreOrRecoverRunnerFromNative();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    restoreOrRecoverRunnerFromNative();
+    flushSupabaseQueue();
+  }
+});
+
+window.addEventListener("focus", () => {
+  restoreOrRecoverRunnerFromNative();
   flushSupabaseQueue();
 });
 
@@ -3851,8 +3927,16 @@ layerSelect.addEventListener("change", () => {
   map.setStyle(newStyle);
 });
 
+setMode("runner");
+setTimeout(() => {
+  requestStartupPermissions();
+  startInitialRunnerNativeRestore();
+}, 0);
+
 map.on("load", () => {
+  mapStyleReady = true;
   setMode("runner");
   requestStartupPermissions();
-  restoreRunnerFromNativeState();
+  renderPendingRunPathIfReady();
+  startInitialRunnerNativeRestore();
 });

@@ -6,6 +6,9 @@ def elevationApiBaseUrl =
 def mapContextApiBaseUrl =
         project.findProperty("LIVESTRIDE_MAP_CONTEXT_API_BASE_URL")
                 ?: "https://maps.livestride.run"
+def arcgisAccessToken =
+        project.findProperty("LIVESTRIDE_ARCGIS_ACCESS_TOKEN")
+                ?: "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv"
 
 android {
     namespace "com.kdidso.livestride"
@@ -19,6 +22,7 @@ android {
         versionName      "1.0.2"
         buildConfigField "String", "ELEVATION_API_BASE_URL", "\"${elevationApiBaseUrl}\""
         buildConfigField "String", "MAP_CONTEXT_API_BASE_URL", "\"${mapContextApiBaseUrl}\""
+        buildConfigField "String", "ARCGIS_ACCESS_TOKEN", "\"${arcgisAccessToken}\""
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
@@ -75,4 +79,3 @@ try {
 } catch (Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
 }
-

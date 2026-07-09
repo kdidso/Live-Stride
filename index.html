@@ -393,7 +393,10 @@
 
       map.addControl(geoControl, "bottom-right");
     }
-    map.on("style.load", addControls);
+    map.on("style.load", () => {
+      addControls();
+      restoreRunPathLayersAfterStyleLoad();
+    });
 
     // -> State
     let pathCoords = [];
@@ -1748,6 +1751,12 @@ function addOrUpdateNativePath() {
   } else {
     map.getSource("native-run-path").setData(data);
   }
+}
+
+function restoreRunPathLayersAfterStyleLoad() {
+  if (!pathCoords.length) return;
+  addOrUpdatePath();
+  addOrUpdateNativePath();
 }
     function clearRunPathLayer() {
       if (map.getLayer("run-line")) {

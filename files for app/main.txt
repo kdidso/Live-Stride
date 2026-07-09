@@ -99,6 +99,7 @@ let activeNativeSupabaseChannel = null;
 let nativePathCoords = [];
 const NATIVE_PATH_BREAK_GAP_MS = 45 * 1000;
 const NATIVE_PATH_BREAK_DISTANCE_METERS = 25;
+const ROUTE_RENDER_BREAK_DISTANCE_METERS = 500;
 let viewerTimerId = null;;
 let lastViewerData = null;
 let lastViewerElapsed = 0;
@@ -1057,16 +1058,51 @@ function renderPendingRunPathIfReady() {
   addOrUpdatePath();
 }
 
+function getSortedUniqueRoutePoints(points) {
+  const seenSequences = new Set();
+  const seenFallbackKeys = new Set();
+
+  return (Array.isArray(points) ? points : [])
+    .filter(point =>
+      Number.isFinite(point?.lat) &&
+      Number.isFinite(point?.lon)
+    )
+    .slice()
+    .sort((a, b) => {
+      if (a.sequenceNum != null && b.sequenceNum != null) {
+        return a.sequenceNum - b.sequenceNum;
+      }
+
+      return (a.timestamp || 0) - (b.timestamp || 0);
+    })
+    .filter(point => {
+      if (point.sequenceNum != null) {
+        if (seenSequences.has(point.sequenceNum)) return false;
+        seenSequences.add(point.sequenceNum);
+        return true;
+      }
+
+      const fallbackKey = `${point.timestamp || ""}:${point.lat}:${point.lon}`;
+      if (seenFallbackKeys.has(fallbackKey)) return false;
+      seenFallbackKeys.add(fallbackKey);
+      return true;
+    });
+}
+
 function buildSequenceLineSegments(points) {
   const segments = [];
   let currentSegment = [];
   let previousSequence = null;
   let previousTimestamp = null;
+  let previousPoint = null;
 
-  points.forEach(point => {
+  getSortedUniqueRoutePoints(points).forEach(point => {
     const pointCoords = [point.lon, point.lat];
     const sequence = point.sequenceNum;
     const timestamp = Number.isFinite(point.timestamp) ? point.timestamp : null;
+    const distanceFromPrevious = previousPoint
+      ? haversineDistance(previousPoint, point)
+      : 0;
 
     if (
       currentSegment.length > 0 &&
@@ -1080,11 +1116,9 @@ function buildSequenceLineSegments(points) {
           previousTimestamp != null &&
           timestamp != null &&
           timestamp - previousTimestamp > NATIVE_PATH_BREAK_GAP_MS &&
-          haversineDistance(
-            { lat: currentSegment[currentSegment.length - 1][1], lon: currentSegment[currentSegment.length - 1][0] },
-            point
-          ) > NATIVE_PATH_BREAK_DISTANCE_METERS
-        )
+          distanceFromPrevious > NATIVE_PATH_BREAK_DISTANCE_METERS
+        ) ||
+        distanceFromPrevious > ROUTE_RENDER_BREAK_DISTANCE_METERS
       )
     ) {
       if (currentSegment.length > 1) {
@@ -1097,6 +1131,7 @@ function buildSequenceLineSegments(points) {
     currentSegment.push(pointCoords);
     previousSequence = sequence;
     previousTimestamp = timestamp;
+    previousPoint = point;
   });
 
   if (currentSegment.length > 1) {
@@ -2361,8 +2396,11 @@ function privateRunFilename(runData) {
 }
 
 async function saveAndShareGpx(filename, gpx) {
-  let shareUrl = null;
+  await saveGpxToDownloads(filename, gpx);
+  await shareGpx(filename, gpx, "Your LiveStride GPX file has been saved to Downloads.");
+}
 
+async function saveGpxToDownloads(filename, gpx) {
   if (LiveStrideExport?.saveGpxToDownloads) {
     await LiveStrideExport.saveGpxToDownloads({
       filename,
@@ -2371,6 +2409,10 @@ async function saveAndShareGpx(filename, gpx) {
   } else {
     downloadGpxInBrowser(filename, gpx);
   }
+}
+
+async function shareGpx(filename, gpx, text = "Share your LiveStride GPX file.") {
+  let shareUrl = null;
 
   if (Filesystem?.writeFile && Filesystem?.getUri) {
     try {
@@ -2394,20 +2436,21 @@ async function saveAndShareGpx(filename, gpx) {
     try {
       await Share.share({
         title: "LiveStride GPX Export",
-        text: "Your LiveStride GPX file has been saved to Downloads.",
+        text,
         url: shareUrl || undefined,
         dialogTitle: "Share your run GPX"
       });
     } catch (err) {
       console.warn("Share cancelled or failed:", err);
     }
+  } else if (!shareUrl) {
+    downloadGpxInBrowser(filename, gpx);
   }
 }
 
-async function exportPrivateRunById(runId) {
+async function getPrivateRunDataById(runId) {
   if (!LiveStrideNativeTracker?.getNativeRunSnapshot || !runId) {
-    alert("No local run is available to export.");
-    return;
+    throw new Error("No local run is available.");
   }
 
   const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
@@ -2425,21 +2468,115 @@ async function exportPrivateRunById(runId) {
     : [];
 
   if (points.length === 0) {
-    alert("That local run has no points to export.");
-    return;
+    throw new Error("That local run has no points.");
   }
 
   sortRunPoints(points);
   const firstTimestamp = points[0]?.timestamp || Date.now();
-  const runData = {
+  return {
+    runId,
     startTime: firstTimestamp,
     pathCoords: points,
     totalDistanceMiles: metersToMiles(points[points.length - 1]?.distanceM || 0),
     lastUpdated: Date.now()
   };
+}
 
-  await saveAndShareGpx(privateRunFilename(runData), convertToGpx(runData));
+async function downloadPrivateRunById(runId) {
+  const runData = await getPrivateRunDataById(runId);
+  await saveGpxToDownloads(privateRunFilename(runData), convertToGpx(runData));
   alert("GPX saved to Downloads.");
+}
+
+async function sharePrivateRunById(runId) {
+  const runData = await getPrivateRunDataById(runId);
+  await shareGpx(
+    privateRunFilename(runData),
+    convertToGpx(runData),
+    "Share your LiveStride GPX file."
+  );
+}
+
+async function viewPrivateRunById(runId) {
+  const runData = await getPrivateRunDataById(runId);
+  const points = getSortedUniqueRoutePoints(runData.pathCoords);
+  const firstPoint = points[0];
+  const latestPoint = getLatestSequencePoint(points) || points[points.length - 1];
+
+  if (!latestPoint) {
+    throw new Error("That local run has no points to view.");
+  }
+
+  if (activeListener) {
+    activeListener.off();
+    activeListener = null;
+  }
+  if (activeSupabaseChannel) {
+    supabaseClient.removeChannel(activeSupabaseChannel);
+    activeSupabaseChannel = null;
+  }
+  if (activeNativeSupabaseChannel) {
+    supabaseClient.removeChannel(activeNativeSupabaseChannel);
+    activeNativeSupabaseChannel = null;
+  }
+  if (viewerTimerId !== null) {
+    clearInterval(viewerTimerId);
+    viewerTimerId = null;
+  }
+
+  setMode("viewer");
+  currentViewerRunIsLive = false;
+  selectedRunner = runId;
+  pathCoords = points;
+  runnerNativeDisplayActive = true;
+  sortRunPoints(pathCoords);
+  clearRunPathLayer();
+  addOrUpdatePath();
+  updateSplitsPanel(pathCoords, { includeFinalPartial: true });
+
+  const elapsedMs = Math.max(0, (latestPoint.timestamp || Date.now()) - (firstPoint?.timestamp || Date.now()));
+  const distanceMiles = metersToMiles(latestPoint.distanceM ?? 0);
+  const avgPace = distanceMiles > 0 ? (elapsedMs / 60000) / distanceMiles : latestPoint.avgPace ?? 0;
+
+  lastViewerData = {
+    distance: distanceMiles,
+    pace: latestPoint.instPace ?? 0,
+    avgPace,
+    startTime: firstPoint?.timestamp || null,
+    current: [latestPoint.lon, latestPoint.lat],
+    elevationFt: latestPoint.elevationFt ?? null
+  };
+  lastViewerElapsed = elapsedMs;
+
+  updateStatsDisplay(
+    distanceMiles,
+    latestPoint.instPace ?? 0,
+    avgPace,
+    elapsedMs,
+    latestPoint.elevationFt ?? null
+  );
+
+  if (viewerMarker) {
+    viewerMarker.remove();
+  }
+  viewerMarker = new maplibregl.Marker({ color: "red" })
+    .setLngLat([latestPoint.lon, latestPoint.lat])
+    .addTo(map);
+
+  if (map?.fitBounds && pathCoords.length > 1) {
+    const bounds = pathCoords.reduce((box, point) => {
+      return box.extend([point.lon, point.lat]);
+    }, new maplibregl.LngLatBounds(
+      [pathCoords[0].lon, pathCoords[0].lat],
+      [pathCoords[0].lon, pathCoords[0].lat]
+    ));
+    map.fitBounds(bounds, { padding: 60, maxZoom: 16 });
+  } else if (map?.setCenter) {
+    map.setCenter([latestPoint.lon, latestPoint.lat]);
+  }
+
+  showViewerStatus("Local run loaded", "good");
+  hideViewerStatusSoon("Local run loaded", 3000);
 }
 
 async function chooseAndExportLocalRun() {
@@ -2475,7 +2612,32 @@ async function chooseAndExportLocalRun() {
   const selectedRunId = await showChoiceModal("Choose Local Run", options);
   if (!selectedRunId) return;
 
-  await exportPrivateRunById(selectedRunId);
+  const action = await showChoiceModal("Local Run Options", [
+    {
+      label: "View on Map",
+      description: "Open this local run with its final route, stats, and splits.",
+      value: "view"
+    },
+    {
+      label: "Download GPX",
+      description: "Save the GPX file to Downloads on this phone.",
+      value: "download"
+    },
+    {
+      label: "Share GPX",
+      description: "Send the GPX file to another app without saving to Downloads.",
+      value: "share"
+    }
+  ]);
+  if (!action) return;
+
+  if (action === "view") {
+    await viewPrivateRunById(selectedRunId);
+  } else if (action === "download") {
+    await downloadPrivateRunById(selectedRunId);
+  } else if (action === "share") {
+    await sharePrivateRunById(selectedRunId);
+  }
 }
 
 function collectCoordinateLines(value, lines = []) {

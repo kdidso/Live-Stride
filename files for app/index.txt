@@ -493,6 +493,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       <option value="streets">Streets</option>
       <option value="topo">Topographic</option>
       <option value="outdoor">Outdoor</option>
+      <option value="arcgisHybrid">ArcGIS Hybrid</option>
     </select>
   </div>
 

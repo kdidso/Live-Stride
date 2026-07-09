@@ -17,6 +17,25 @@ final class LiveStrideServerClient {
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 15_000;
     private static final int MAX_ATTEMPTS = 3;
+    private static final String ARCGIS_ELEVATION_API_URL =
+            "https://elevation-api.arcgis.com/arcgis/rest/services/elevation-service/v1/elevation/at-point";
+    private static final double[][][] FIFTY_STATE_ELEVATION_GUARD_AREAS = new double[][][] {
+            {
+                    {-124.8, 48.8}, {-122.8, 49.1}, {-95.0, 49.1}, {-82.7, 45.0},
+                    {-67.0, 47.5}, {-66.8, 44.5}, {-70.7, 41.5}, {-74.0, 40.4},
+                    {-75.7, 36.5}, {-81.0, 31.0}, {-80.0, 25.0}, {-82.8, 24.4},
+                    {-87.6, 30.2}, {-97.2, 25.8}, {-106.6, 31.7}, {-117.1, 32.5},
+                    {-124.4, 42.0}, {-124.8, 48.8}
+            },
+            {
+                    {-179.9, 51.0}, {-170.0, 71.5}, {-129.0, 71.5}, {-129.0, 54.0},
+                    {-141.0, 59.0}, {-153.0, 55.0}, {-170.0, 52.0}, {-179.9, 51.0}
+            },
+            {
+                    {-161.0, 18.0}, {-154.0, 18.0}, {-154.0, 23.0}, {-161.0, 23.0},
+                    {-161.0, 18.0}
+            }
+    };
 
     private LiveStrideServerClient() {
     }
@@ -32,18 +51,94 @@ final class LiveStrideServerClient {
                             + "/api/v1/lookup?locations=" + locations,
                     "elevation"
             );
-            if (response == null) return null;
+            if (response == null) return fetchArcGISElevationMeters(latitude, longitude);
 
             JSONArray results = response.optJSONArray("results");
-            if (results == null || results.length() == 0) return null;
+            if (results == null || results.length() == 0) {
+                return fetchArcGISElevationMeters(latitude, longitude);
+            }
 
             JSONObject first = results.optJSONObject(0);
-            if (first == null || first.isNull("elevation")) return null;
+            if (first == null || first.isNull("elevation")) {
+                return fetchArcGISElevationMeters(latitude, longitude);
+            }
             return first.optDouble("elevation");
         } catch (Exception error) {
             Log.w(TAG, "Elevation request could not be prepared: " + message(error));
+            return fetchArcGISElevationMeters(latitude, longitude);
+        }
+    }
+
+    private static Double fetchArcGISElevationMeters(double latitude, double longitude) {
+        if (!shouldUseArcGISElevationFallback(latitude, longitude)) return null;
+
+        try {
+            String endpoint = ARCGIS_ELEVATION_API_URL
+                    + "?lon=" + URLEncoder.encode(
+                            String.valueOf(longitude),
+                            StandardCharsets.UTF_8.name()
+                    )
+                    + "&lat=" + URLEncoder.encode(
+                            String.valueOf(latitude),
+                            StandardCharsets.UTF_8.name()
+                    )
+                    + "&relativeTo=meanSeaLevel"
+                    + "&f=json"
+                    + "&token=" + URLEncoder.encode(
+                            BuildConfig.ARCGIS_ACCESS_TOKEN,
+                            StandardCharsets.UTF_8.name()
+                    );
+
+            JSONObject response = getJson(endpoint, "arcgis-elevation");
+            if (response == null) return null;
+
+            JSONObject error = response.optJSONObject("error");
+            if (error != null) {
+                Log.w(TAG, "ArcGIS elevation error: " + error.optString("message"));
+                return null;
+            }
+
+            JSONObject result = response.optJSONObject("result");
+            JSONObject point = result == null ? null : result.optJSONObject("point");
+            if (point == null || point.isNull("z")) return null;
+
+            double elevation = point.optDouble("z", Double.NaN);
+            return Double.isNaN(elevation) ? null : elevation;
+        } catch (Exception error) {
+            Log.w(TAG, "ArcGIS elevation request could not be prepared: " + message(error));
             return null;
         }
+    }
+
+    private static boolean shouldUseArcGISElevationFallback(double latitude, double longitude) {
+        return Double.isFinite(latitude)
+                && Double.isFinite(longitude)
+                && latitude >= -85.05
+                && latitude <= 85.05
+                && longitude >= -179.99
+                && longitude <= 179.99
+                && !isWithin50StateElevationCoverage(latitude, longitude);
+    }
+
+    private static boolean isWithin50StateElevationCoverage(double latitude, double longitude) {
+        for (double[][] area : FIFTY_STATE_ELEVATION_GUARD_AREAS) {
+            if (pointInPolygon(longitude, latitude, area)) return true;
+        }
+        return false;
+    }
+
+    private static boolean pointInPolygon(double longitude, double latitude, double[][] polygon) {
+        boolean inside = false;
+        for (int i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+            double xi = polygon[i][0];
+            double yi = polygon[i][1];
+            double xj = polygon[j][0];
+            double yj = polygon[j][1];
+            boolean intersects = ((yi > latitude) != (yj > latitude))
+                    && longitude < ((xj - xi) * (latitude - yi)) / (yj - yi) + xi;
+            if (intersects) inside = !inside;
+        }
+        return inside;
     }
 
     static JSONObject fetchMapContext(

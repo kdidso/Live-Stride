@@ -69,7 +69,7 @@ function addControls() {
 map.on("style.load", () => {
   mapStyleReady = true;
   addControls();
-  renderPendingRunPathIfReady();
+  restoreRunPathLayersAfterStyleLoad();
 });
 
 // -> Tracking state
@@ -1057,6 +1057,15 @@ function addOrUpdatePath() {
 function renderPendingRunPathIfReady() {
   if (!runPathRenderPending || pathCoords.length === 0) return;
   addOrUpdatePath();
+}
+
+function restoreRunPathLayersAfterStyleLoad() {
+  if (pathCoords.length > 0) {
+    addOrUpdatePath();
+    addOrUpdateNativePath();
+  } else {
+    renderPendingRunPathIfReady();
+  }
 }
 
 function getSortedUniqueRoutePoints(points) {
@@ -4114,6 +4123,7 @@ function trackRunner(key) {
 
 layerSelect.addEventListener("change", () => {
   const newStyle = STYLES[layerSelect.value] || STYLES.satellite;
+  mapStyleReady = false;
   map.setStyle(newStyle);
 });
 

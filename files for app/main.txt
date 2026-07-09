@@ -2497,6 +2497,28 @@ async function sharePrivateRunById(runId) {
   );
 }
 
+async function getCurrentPrivateRunData() {
+  if (pathCoords.length > 0) {
+    return {
+      startTime,
+      pathCoords,
+      totalDistanceMiles: metersToMiles(totalDistanceMeters),
+      lastUpdated: Date.now()
+    };
+  }
+
+  if (!localRunFilename) {
+    throw new Error("No run to export.");
+  }
+
+  const readResult = await Filesystem.readFile({
+    path: localRunFilename,
+    directory: "DATA",
+    encoding: "utf8"
+  });
+  return JSON.parse(readResult.data);
+}
+
 async function viewPrivateRunById(runId) {
   const runData = await getPrivateRunDataById(runId);
   const points = getSortedUniqueRoutePoints(runData.pathCoords);
@@ -3257,25 +3279,30 @@ exportGpxBtn.onclick = async () => {
   }
 
   try {
-    let runData;
-    if (pathCoords.length > 0) {
-      runData = {
-        startTime,
-        pathCoords,
-        totalDistanceMiles: metersToMiles(totalDistanceMeters),
-        lastUpdated: Date.now()
-      };
-    } else {
-      const readResult = await Filesystem.readFile({
-        path: localRunFilename,
-        directory: "DATA",
-        encoding: "utf8"
-      });
-      runData = JSON.parse(readResult.data);
-    }
+    const action = await showChoiceModal("Export GPX", [
+      {
+        label: "Download GPX",
+        description: "Save the GPX file to Downloads on this phone.",
+        value: "download"
+      },
+      {
+        label: "Share GPX",
+        description: "Send the GPX file to another app without saving to Downloads.",
+        value: "share"
+      }
+    ]);
+    if (!action) return;
 
-    await saveAndShareGpx(privateRunFilename(runData), convertToGpx(runData));
-    alert("GPX saved to Downloads.");
+    const runData = await getCurrentPrivateRunData();
+    const filename = privateRunFilename(runData);
+    const gpx = convertToGpx(runData);
+
+    if (action === "download") {
+      await saveGpxToDownloads(filename, gpx);
+      alert("GPX saved to Downloads.");
+    } else if (action === "share") {
+      await shareGpx(filename, gpx, "Share your LiveStride GPX file.");
+    }
   } catch (err) {
     console.error("Unexpected export error:", err);
     alert(`Export failed:\n${err.message}`);

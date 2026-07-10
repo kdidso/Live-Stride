@@ -268,6 +268,34 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void getNativeRunPreviewSnapshot(PluginCall call) {
+        String runId = call.getString("runId");
+        int maxPoints = call.getInt("maxPoints", 700);
+
+        if (runId == null || runId.trim().isEmpty()) {
+            call.reject("Missing runId.");
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                LiveStridePointStore pointStore = new LiveStridePointStore(getContext());
+                org.json.JSONObject snapshot = pointStore.getRunDisplayPreviewSnapshot(
+                        runId,
+                        maxPoints
+                );
+
+                JSObject result = new JSObject();
+                result.put("ok", snapshot != null);
+                result.put("snapshotJson", snapshot == null ? "{}" : snapshot.toString());
+                call.resolve(result);
+            } catch (Exception e) {
+                call.reject("Native run preview failed: " + e.getMessage(), e);
+            }
+        }).start();
+    }
+
+    @PluginMethod
     public void listLocalRuns(PluginCall call) {
         new Thread(() -> {
             try {

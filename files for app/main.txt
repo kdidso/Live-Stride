@@ -27,13 +27,15 @@ const supabaseClient = window.supabase.createClient(
   SUPABASE_ANON_KEY
 );
 
+const ARCGIS_ACCESS_TOKEN = "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv";
+
 // -> Style URLs for map toggle
 const STYLES = {
   satellite: `https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
   streets: `https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
   topo: `https://api.maptiler.com/maps/topo/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
   outdoor: `https://api.maptiler.com/maps/outdoor/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
-  arcgisHybrid: `https://basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/open/hybrid?token=AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv`
+  arcgisHybrid: `https://basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/open/hybrid?token=${ARCGIS_ACCESS_TOKEN}`
 };
 
 // -> Create map with default satellite style
@@ -337,9 +339,11 @@ function clearViewerSearch() {
 }
 
 const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
-const NATIVE_HYDRATION_BATCH_SIZE = 500;
+const NATIVE_HYDRATION_BATCH_SIZE = 250;
 const NATIVE_HYDRATION_RENDER_EVERY_BATCHES = 4;
 const NATIVE_HYDRATION_FIRST_PAINT_BATCHES = 1;
+const NATIVE_HYDRATION_BACKGROUND_DELAY_MS = 75;
+const NATIVE_ROUTE_PREVIEW_MAX_POINTS = 700;
 const STOPPED_NATIVE_RESTORE_GRACE_MS = 30 * 60 * 1000;
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
@@ -910,6 +914,81 @@ function updateSplitsPanel(points = null, options = {}) {
 }
 
 const ELEVATION_API_BASE = "https://elevation.livestride.run";
+const ARCGIS_ELEVATION_API_URL = "https://elevation-api.arcgis.com/arcgis/rest/services/elevation-service/v1/elevation/at-point";
+const FIFTY_STATE_ELEVATION_GUARD_AREAS = [
+  [
+    [-124.8, 48.8], [-122.8, 49.1], [-95.0, 49.1], [-82.7, 45.0],
+    [-67.0, 47.5], [-66.8, 44.5], [-70.7, 41.5], [-74.0, 40.4],
+    [-75.7, 36.5], [-81.0, 31.0], [-80.0, 25.0], [-82.8, 24.4],
+    [-87.6, 30.2], [-97.2, 25.8], [-106.6, 31.7], [-117.1, 32.5],
+    [-124.4, 42.0], [-124.8, 48.8]
+  ],
+  [
+    [-179.9, 51.0], [-170.0, 71.5], [-129.0, 71.5], [-129.0, 54.0],
+    [-141.0, 59.0], [-153.0, 55.0], [-170.0, 52.0], [-179.9, 51.0]
+  ],
+  [
+    [-161.0, 18.0], [-154.0, 18.0], [-154.0, 23.0], [-161.0, 23.0],
+    [-161.0, 18.0]
+  ]
+];
+
+function pointInPolygon(lon, lat, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0];
+    const yi = polygon[i][1];
+    const xj = polygon[j][0];
+    const yj = polygon[j][1];
+    const intersects = ((yi > lat) !== (yj > lat)) &&
+      lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function isWithin50StateElevationCoverage(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return true;
+  return FIFTY_STATE_ELEVATION_GUARD_AREAS.some(area =>
+    pointInPolygon(lon, lat, area)
+  );
+}
+
+function shouldUseArcGISElevationFallback(lat, lon) {
+  return Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    lat >= -85.05 &&
+    lat <= 85.05 &&
+    lon >= -179.99 &&
+    lon <= 179.99 &&
+    !isWithin50StateElevationCoverage(lat, lon);
+}
+
+async function fetchArcGISElevation(lat, lon) {
+  if (!shouldUseArcGISElevationFallback(lat, lon)) return null;
+
+  try {
+    const url = `${ARCGIS_ELEVATION_API_URL}?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}&relativeTo=meanSeaLevel&f=json&token=${encodeURIComponent(ARCGIS_ACCESS_TOKEN)}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      console.warn("ArcGIS elevation returned:", response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    if (data.error) {
+      console.warn("ArcGIS elevation error:", data.error.message || data.error);
+      return null;
+    }
+
+    const elevation = Number(data.result?.point?.z);
+    return Number.isFinite(elevation) ? elevation : null;
+  } catch (err) {
+    console.error("ArcGIS elevation fetch error:", err);
+    return null;
+  }
+}
 
 async function fetchElevation(lat, lon) {
   try {
@@ -919,14 +998,15 @@ async function fetchElevation(lat, lon) {
 
     if (!response.ok) {
       console.warn("Elevation server returned:", response.status);
-      return null;
+      return fetchArcGISElevation(lat, lon);
     }
 
     const data = await response.json();
-    return data.results?.[0]?.elevation ?? null;
+    const elevation = data.results?.[0]?.elevation ?? null;
+    return elevation != null ? elevation : fetchArcGISElevation(lat, lon);
   } catch (err) {
     console.error("Elevation fetch error:", err);
-    return null;
+    return fetchArcGISElevation(lat, lon);
   }
 }
 
@@ -1807,16 +1887,26 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
     latestRunnerElevFt
   );
 
-  if (isFollowing && Number.isFinite(latestPoint.lon) && Number.isFinite(latestPoint.lat)) {
+  if (
+    isFollowing &&
+    mapStyleReady &&
+    map?.isStyleLoaded?.() &&
+    Number.isFinite(latestPoint.lon) &&
+    Number.isFinite(latestPoint.lat)
+  ) {
     const latestCenter = [latestPoint.lon, latestPoint.lat];
-    if (focusLatestPoint && map?.flyTo) {
-      map.flyTo({
-        center: latestCenter,
-        zoom: Math.max(map.getZoom?.() || 0, 16),
-        essential: true
-      });
-    } else {
-      map.setCenter(latestCenter);
+    try {
+      if (focusLatestPoint && map?.flyTo) {
+        map.flyTo({
+          center: latestCenter,
+          zoom: Math.max(map.getZoom?.() || 0, 16),
+          essential: true
+        });
+      } else {
+        map.setCenter(latestCenter);
+      }
+    } catch (err) {
+      console.warn("Native runner map recenter deferred:", err);
     }
   }
 
@@ -1862,6 +1952,7 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
   if (!isRunnerNativeSnapshotAllowed()) return false;
 
   const finalTimeMs = Number(options.finalTimeMs || 0);
+  const allowSplits = options.updateSplits !== false;
   const maxBatches = Number.isFinite(options.maxBatches)
     ? Math.max(1, Math.floor(options.maxBatches))
     : 40;
@@ -1870,6 +1961,13 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
     : -1;
   let loadedAny = false;
   let firstBatch = pathCoords.length === 0 && afterSequenceNum < 0;
+  const hydrationStartedAt = performance.now?.() || Date.now();
+  console.log("Native SQLite hydration started", {
+    runId: activeRunId,
+    afterSequenceNum,
+    maxBatches,
+    allowSplits
+  });
 
   for (let i = 0; i < maxBatches; i++) {
     let snapshot;
@@ -1899,7 +1997,7 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
       focusLatestPoint: Boolean(options.focusLatestPoint) && firstBatch,
       appendOnly: !firstBatch,
       renderPath: shouldRenderThisBatch,
-      updateSplits: shouldRenderThisBatch
+      updateSplits: allowSplits && shouldRenderThisBatch
     });
     loadedAny = true;
     firstBatch = false;
@@ -1923,25 +2021,137 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
   if (loadedAny) {
     sortRunPoints(pathCoords);
     addOrUpdatePath();
-    updateSplitsPanel(pathCoords);
+    if (allowSplits) {
+      updateSplitsPanel(pathCoords);
+    }
   }
 
+  const hydrationFinishedAt = performance.now?.() || Date.now();
+  console.log("Native SQLite hydration finished", {
+    runId: activeRunId,
+    loadedAny,
+    pointCount: pathCoords.length,
+    loadedThroughSequence: runnerNativeHydrationLoadedThroughSequenceNum,
+    durationMs: Math.round(hydrationFinishedAt - hydrationStartedAt)
+  });
+
   return loadedAny;
+}
+
+async function hydrateRunnerPreviewFromNativeSqlite(finalTimeMs = 0) {
+  if (!isRunnerNativeSnapshotAllowed() || !LiveStrideNativeTracker?.getNativeRunPreviewSnapshot) {
+    return false;
+  }
+
+  const previewStartedAt = performance.now?.() || Date.now();
+
+  try {
+    const result = await LiveStrideNativeTracker.getNativeRunPreviewSnapshot({
+      runId: activeRunId,
+      maxPoints: NATIVE_ROUTE_PREVIEW_MAX_POINTS
+    });
+    const snapshot = JSON.parse(result?.snapshotJson || "{}");
+    const hydrated = applyRunnerNativeSnapshot(snapshot, true, {
+      finalTimeMs,
+      focusLatestPoint: true,
+      renderPath: true,
+      updateSplits: false
+    });
+    const previewFinishedAt = performance.now?.() || Date.now();
+    console.log("Native SQLite preview hydration finished", {
+      runId: activeRunId,
+      hydrated,
+      previewPointCount: snapshot.previewPointCount,
+      totalPointCount: snapshot.totalPointCount,
+      durationMs: Math.round(previewFinishedAt - previewStartedAt)
+    });
+    return hydrated;
+  } catch (err) {
+    console.warn("Native SQLite preview hydration failed:", err);
+    return false;
+  }
+}
+
+async function loadFullRunnerNativePathInBackground(finalTimeMs = 0) {
+  if (!isRunnerNativeSnapshotAllowed()) return false;
+
+  const fullStartedAt = performance.now?.() || Date.now();
+  let afterSequenceNum = -1;
+  let fullPoints = [];
+  let latestSnapshot = null;
+
+  console.log("Native SQLite full background hydration started", {
+    runId: activeRunId
+  });
+
+  for (let i = 0; i < 120; i++) {
+    let snapshot;
+    try {
+      const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
+        runId: activeRunId,
+        afterSequenceNum,
+        beforeSequenceNum: -1,
+        includeFullPath: false,
+        limit: NATIVE_HYDRATION_BATCH_SIZE
+      });
+      snapshot = JSON.parse(result?.snapshotJson || "{}");
+    } catch (err) {
+      console.warn("Native SQLite full background hydration failed:", err);
+      return fullPoints.length > 0;
+    }
+
+    const points = Array.isArray(snapshot.points) ? snapshot.points : [];
+    if (points.length === 0) break;
+
+    fullPoints = fullPoints.concat(points);
+    latestSnapshot = snapshot;
+
+    const latestBatchPoint = points
+      .map(normalizeNativeRunPoint)
+      .filter(point => point.sequenceNum != null)
+      .sort((a, b) => b.sequenceNum - a.sequenceNum)[0];
+
+    if (!latestBatchPoint) break;
+    afterSequenceNum = latestBatchPoint.sequenceNum;
+    runnerNativeHydrationLoadedThroughSequenceNum = Math.max(
+      runnerNativeHydrationLoadedThroughSequenceNum,
+      latestBatchPoint.sequenceNum
+    );
+
+    if (points.length < NATIVE_HYDRATION_BATCH_SIZE) break;
+    await new Promise(resolve => setTimeout(resolve, NATIVE_HYDRATION_BACKGROUND_DELAY_MS));
+  }
+
+  if (fullPoints.length === 0) return false;
+
+  const fullSnapshot = {
+    ...(latestSnapshot || {}),
+    points: fullPoints
+  };
+  const hydrated = applyRunnerNativeSnapshot(fullSnapshot, true, {
+    finalTimeMs,
+    focusLatestPoint: false,
+    renderPath: true,
+    updateSplits: true
+  });
+  const fullFinishedAt = performance.now?.() || Date.now();
+
+  console.log("Native SQLite full background hydration finished", {
+    runId: activeRunId,
+    hydrated,
+    pointCount: fullPoints.length,
+    durationMs: Math.round(fullFinishedAt - fullStartedAt)
+  });
+
+  return hydrated;
 }
 
 function continueRunnerNativeHydrationInBackground(finalTimeMs = 0) {
   if (!isRunnerNativeSnapshotAllowed()) return;
 
-  const afterSequenceNum = runnerNativeHydrationLoadedThroughSequenceNum;
-  if (afterSequenceNum < 0) return;
-
   setTimeout(() => {
-    hydrateRunnerFromNativeSqliteInBatches({
-      finalTimeMs,
-      afterSequenceNum,
-      focusLatestPoint: false
-    });
-  }, 0);
+    loadFullRunnerNativePathInBackground(finalTimeMs);
+  }, NATIVE_HYDRATION_BACKGROUND_DELAY_MS);
 }
 
 function getSequenceGaps(points) {
@@ -2124,11 +2334,15 @@ async function restoreRunnerFromNativeState() {
     let hydrated = false;
     if (!isNativeRunning && stoppedAtMs > 0) {
       clearRunnerNativeRestoreDisplay();
-      hydrated = await hydrateRunnerFromNativeSqliteInBatches({
-        finalTimeMs,
-        focusLatestPoint: true,
-        maxBatches: NATIVE_HYDRATION_FIRST_PAINT_BATCHES
-      });
+      hydrated = await hydrateRunnerPreviewFromNativeSqlite(finalTimeMs);
+      if (!hydrated) {
+        hydrated = await hydrateRunnerFromNativeSqliteInBatches({
+          finalTimeMs,
+          focusLatestPoint: true,
+          maxBatches: NATIVE_HYDRATION_FIRST_PAINT_BATCHES,
+          updateSplits: false
+        });
+      }
       continueRunnerNativeHydrationInBackground(finalTimeMs);
     } else {
       hydrated = pathCoords.length === 0

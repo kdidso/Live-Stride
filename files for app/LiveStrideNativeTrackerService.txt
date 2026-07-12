@@ -859,6 +859,10 @@ private void updateRunNotification(
         if (mapContextProvider != null) {
             mapContextProvider.shutdown();
         }
+        if (pointStore != null) {
+            pointStore.close();
+            pointStore = null;
+        }
         super.onDestroy();
     }
 

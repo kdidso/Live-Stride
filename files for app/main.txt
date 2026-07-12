@@ -137,6 +137,7 @@ let runnerNativeDisplayActive = false;
 let runnerWakeRecoveryInFlight = false;
 let runnerNativeRestoreInFlight = false;
 let runnerNativeRestoreStarted = false;
+let runnerStoppedNativeHydrationInFlight = false;
 let startupPermissionsRequested = false;
 let lastMapMatchingContextSentAt = 0;
 let lastMapMatchingContextSignature = "";
@@ -1474,6 +1475,7 @@ async function fillMissingQueuedElevations(queue) {
 
 async function flushSupabaseQueue() {
   if (isFlushingSupabase) return;
+  if (runnerStoppedNativeHydrationInFlight) return;
   if (!navigator.onLine) return;
 
 let queue = loadSyncQueue();
@@ -2150,7 +2152,9 @@ function continueRunnerNativeHydrationInBackground(finalTimeMs = 0) {
   if (!isRunnerNativeSnapshotAllowed()) return;
 
   setTimeout(() => {
-    loadFullRunnerNativePathInBackground(finalTimeMs);
+    loadFullRunnerNativePathInBackground(finalTimeMs).finally(() => {
+      runnerStoppedNativeHydrationInFlight = false;
+    });
   }, NATIVE_HYDRATION_BACKGROUND_DELAY_MS);
 }
 
@@ -2332,6 +2336,7 @@ async function restoreRunnerFromNativeState() {
 
     let hydrated = false;
     if (!isNativeRunning && stoppedAtMs > 0) {
+      runnerStoppedNativeHydrationInFlight = true;
       clearRunnerNativeRestoreDisplay();
       hydrated = await hydrateRunnerPreviewFromNativeSqlite(finalTimeMs);
       if (!hydrated) {
@@ -2366,9 +2371,6 @@ async function restoreRunnerFromNativeState() {
         showConnectionStatus("Run stopped - background sync will finish if needed", "good");
       }
       hideConnectionStatusSoon();
-      if (hydrated) {
-        await clearNativeTrackerRestoreState();
-      }
     } else if (isNativeRunning) {
       startBtn.disabled = true;
       stopBtn.disabled = false;
@@ -2379,6 +2381,7 @@ async function restoreRunnerFromNativeState() {
     return hydrated;
   } catch (err) {
     console.warn("Native runner restore failed:", err);
+    runnerStoppedNativeHydrationInFlight = false;
     return false;
   } finally {
     runnerNativeRestoreInFlight = false;

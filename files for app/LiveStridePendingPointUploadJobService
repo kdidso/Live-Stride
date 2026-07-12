@@ -234,6 +234,15 @@ public class LiveStridePendingPointUploadJobService extends JobService {
         }
     }
 
+    public static boolean flushPendingFinishEvents(Context context) {
+        LiveStridePointStore pointStore = new LiveStridePointStore(context.getApplicationContext());
+        try {
+            return flushPendingFinishEvents(pointStore);
+        } finally {
+            pointStore.close();
+        }
+    }
+
     private static void clearStaleNativeTrackerState(Context appContext, long cutoffMs) {
         android.content.SharedPreferences prefs = appContext.getSharedPreferences(
                 LiveStrideNativeTrackerService.STATE_PREFS_NAME,
@@ -295,18 +304,18 @@ public class LiveStridePendingPointUploadJobService extends JobService {
             String finishPayloadJson = event.optString("finish_payload_json", "{}");
             finishPayloadJson = mergeNativePointSummary(pointStore, runId, finishPayloadJson);
 
+            boolean firebaseDone = true;
+            String firebaseRunnerPath = optCleanString(event, "firebase_runner_path");
+            if (firebaseRunnerPath != null) {
+                firebaseDone = syncFirebaseFinish(firebaseRunnerPath, finishPayloadJson);
+            }
+
             boolean supabaseDone = syncSupabaseFinish(
                     optCleanString(event, "supabase_url"),
                     optCleanString(event, "supabase_anon_key"),
                     runId,
                     finishPayloadJson
             );
-
-            boolean firebaseDone = true;
-            String firebaseRunnerPath = optCleanString(event, "firebase_runner_path");
-            if (firebaseRunnerPath != null) {
-                firebaseDone = syncFirebaseFinish(firebaseRunnerPath, finishPayloadJson);
-            }
 
             if (supabaseDone && firebaseDone) {
                 pointStore.markFinishEventCompleted(finishId);

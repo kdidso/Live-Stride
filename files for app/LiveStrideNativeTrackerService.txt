@@ -192,7 +192,10 @@ public class LiveStrideNativeTrackerService extends Service {
             long finalTimeMs = runStartTimeMs > 0L ? stoppedAtMs - runStartTimeMs : 0L;
             saveNativeTrackerState(false, stoppedAtMs, finalTimeMs);
             LiveStridePendingPointUploadJobService.schedule(this);
-            new Thread(() -> LiveStridePendingPointUploadJobService.flushPendingPoints(this)).start();
+            new Thread(() -> {
+                LiveStridePendingPointUploadJobService.flushPendingFinishEvents(this);
+                LiveStridePendingPointUploadJobService.flushPendingPoints(this);
+            }).start();
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;

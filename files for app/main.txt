@@ -346,6 +346,7 @@ const NATIVE_HYDRATION_FIRST_PAINT_BATCHES = 1;
 const NATIVE_HYDRATION_BACKGROUND_DELAY_MS = 75;
 const NATIVE_ROUTE_PREVIEW_MAX_POINTS = 700;
 const STOPPED_NATIVE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
+const RESTORED_STOPPED_NATIVE_RUN_KEY = "livestride_restored_stopped_native_run_id";
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
 
@@ -2320,6 +2321,14 @@ async function restoreRunnerFromNativeState() {
       return false;
     }
 
+    if (!isNativeRunning && stoppedAtMs > 0) {
+      const restoredRunId = localStorage.getItem(RESTORED_STOPPED_NATIVE_RUN_KEY);
+      if (restoredRunId === nativeRunId) {
+        await clearNativeTrackerRestoreState();
+        return false;
+      }
+    }
+
     if (!activeRunId) {
       activeRunId = nativeRunId;
     } else if (activeRunId !== nativeRunId) {
@@ -2360,6 +2369,9 @@ async function restoreRunnerFromNativeState() {
     }
 
     if (!isNativeRunning && stoppedAtMs > 0) {
+      if (hydrated) {
+        localStorage.setItem(RESTORED_STOPPED_NATIVE_RUN_KEY, nativeRunId);
+      }
       settleRunnerAfterNativeStop(finalTimeMs);
       if (isNativeLocalOnly) {
         exportGpxBtn.textContent = "Export GPX";

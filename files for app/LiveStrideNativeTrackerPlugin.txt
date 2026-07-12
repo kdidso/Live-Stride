@@ -247,8 +247,9 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         }
 
         new Thread(() -> {
+            LiveStridePointStore pointStore = null;
             try {
-                LiveStridePointStore pointStore = new LiveStridePointStore(getContext());
+                pointStore = new LiveStridePointStore(getContext());
                 org.json.JSONObject snapshot = pointStore.getRunDisplaySnapshot(
                         runId,
                         afterSequenceNum,
@@ -263,6 +264,10 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                 call.resolve(result);
             } catch (Exception e) {
                 call.reject("Native run snapshot failed: " + e.getMessage(), e);
+            } finally {
+                if (pointStore != null) {
+                    pointStore.close();
+                }
             }
         }).start();
     }
@@ -278,8 +283,9 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         }
 
         new Thread(() -> {
+            LiveStridePointStore pointStore = null;
             try {
-                LiveStridePointStore pointStore = new LiveStridePointStore(getContext());
+                pointStore = new LiveStridePointStore(getContext());
                 org.json.JSONObject snapshot = pointStore.getRunDisplayPreviewSnapshot(
                         runId,
                         maxPoints
@@ -291,6 +297,10 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
                 call.resolve(result);
             } catch (Exception e) {
                 call.reject("Native run preview failed: " + e.getMessage(), e);
+            } finally {
+                if (pointStore != null) {
+                    pointStore.close();
+                }
             }
         }).start();
     }
@@ -298,14 +308,19 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
     @PluginMethod
     public void listLocalRuns(PluginCall call) {
         new Thread(() -> {
+            LiveStridePointStore pointStore = null;
             try {
-                LiveStridePointStore pointStore = new LiveStridePointStore(getContext());
+                pointStore = new LiveStridePointStore(getContext());
                 JSObject result = new JSObject();
                 result.put("ok", true);
                 result.put("runsJson", pointStore.getLocalRunSummaries().toString());
                 call.resolve(result);
             } catch (Exception e) {
                 call.reject("Local run list failed: " + e.getMessage(), e);
+            } finally {
+                if (pointStore != null) {
+                    pointStore.close();
+                }
             }
         }).start();
     }

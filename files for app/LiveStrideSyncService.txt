@@ -93,9 +93,10 @@ public int onStartCommand(Intent intent, int flags, int startId) {
     }
 
     private String mergeNativePointSummary(String runId, String finishPayloadJson) {
+        LiveStridePointStore pointStore = null;
         try {
             JSONObject finishPayload = new JSONObject(finishPayloadJson);
-            LiveStridePointStore pointStore = new LiveStridePointStore(this);
+            pointStore = new LiveStridePointStore(this);
             JSONObject nativeSummary = pointStore.getRunSummaryFromNativePoints(runId);
 
             if (nativeSummary == null) {
@@ -125,6 +126,10 @@ public int onStartCommand(Intent intent, int flags, int startId) {
         } catch (Exception e) {
             e.printStackTrace();
             return finishPayloadJson;
+        } finally {
+            if (pointStore != null) {
+                pointStore.close();
+            }
         }
     }
 

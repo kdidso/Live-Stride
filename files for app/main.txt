@@ -344,7 +344,7 @@ const NATIVE_HYDRATION_RENDER_EVERY_BATCHES = 4;
 const NATIVE_HYDRATION_FIRST_PAINT_BATCHES = 1;
 const NATIVE_HYDRATION_BACKGROUND_DELAY_MS = 75;
 const NATIVE_ROUTE_PREVIEW_MAX_POINTS = 700;
-const STOPPED_NATIVE_RESTORE_GRACE_MS = 30 * 60 * 1000;
+const STOPPED_NATIVE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
 const FIREBASE_FINISH_QUEUE_KEY = "livestride_pending_firebase_finish_v1";
 
 
@@ -2313,7 +2313,6 @@ async function restoreRunnerFromNativeState() {
       && Date.now() - stoppedAtMs <= STOPPED_NATIVE_RESTORE_GRACE_MS;
 
     if (!isNativeRunning && !stoppedRecently) {
-      await clearNativeTrackerRestoreState();
       return false;
     }
 
@@ -2367,7 +2366,9 @@ async function restoreRunnerFromNativeState() {
         showConnectionStatus("Run stopped - background sync will finish if needed", "good");
       }
       hideConnectionStatusSoon();
-      await clearNativeTrackerRestoreState();
+      if (hydrated) {
+        await clearNativeTrackerRestoreState();
+      }
     } else if (isNativeRunning) {
       startBtn.disabled = true;
       stopBtn.disabled = false;

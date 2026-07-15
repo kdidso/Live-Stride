@@ -29,13 +29,75 @@ const supabaseClient = window.supabase.createClient(
 
 const ARCGIS_ACCESS_TOKEN = "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv";
 
+const OFFLINE_US_STYLE = {
+  version: 8,
+  sources: {
+    offlineUs: {
+      type: "geojson",
+      data: "livestride_offline_us_fallback.geojson"
+    }
+  },
+  layers: [
+    {
+      id: "offline-background",
+      type: "background",
+      paint: {
+        "background-color": "#dbeaf2"
+      }
+    },
+    {
+      id: "offline-us-nation-fill",
+      type: "fill",
+      source: "offlineUs",
+      filter: ["==", ["get", "layer_type"], "nation"],
+      paint: {
+        "fill-color": "#eeeaf7",
+        "fill-opacity": 0.86
+      }
+    },
+    {
+      id: "offline-us-state-fill",
+      type: "fill",
+      source: "offlineUs",
+      filter: ["==", ["get", "layer_type"], "state"],
+      paint: {
+        "fill-color": "#cbbdf4",
+        "fill-opacity": 0.68
+      }
+    },
+    {
+      id: "offline-us-nation-outline",
+      type: "line",
+      source: "offlineUs",
+      filter: ["==", ["get", "layer_type"], "nation"],
+      paint: {
+        "line-color": "#564987",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 1.2, 6, 2.4],
+        "line-opacity": 0.9
+      }
+    },
+    {
+      id: "offline-us-state-outline",
+      type: "line",
+      source: "offlineUs",
+      filter: ["==", ["get", "layer_type"], "state"],
+      paint: {
+        "line-color": "#5f538d",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.6, 6, 1.4],
+        "line-opacity": 0.82
+      }
+    }
+  ]
+};
+
 // -> Style URLs for map toggle
 const STYLES = {
   satellite: `https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
   streets: `https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
   topo: `https://api.maptiler.com/maps/topo/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
   outdoor: `https://api.maptiler.com/maps/outdoor/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
-  arcgisHybrid: `https://basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/open/hybrid?token=${ARCGIS_ACCESS_TOKEN}`
+  arcgisHybrid: `https://basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/open/hybrid?token=${ARCGIS_ACCESS_TOKEN}`,
+  offlineUs: OFFLINE_US_STYLE
 };
 
 // -> Create map with default satellite style

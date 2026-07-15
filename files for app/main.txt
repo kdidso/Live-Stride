@@ -129,6 +129,12 @@ function addControls() {
   });
 
   map.addControl(geoControl, "bottom-right");
+  requestAnimationFrame(() => {
+    document
+      .querySelector(".maplibregl-ctrl-geolocate")
+      ?.closest(".maplibregl-ctrl-group")
+      ?.classList.add("livestride-geolocate-control");
+  });
 }
 map.on("style.load", () => {
   mapStyleReady = true;
@@ -4415,6 +4421,7 @@ function trackRunner(key) {
 
 layerSelect.addEventListener("change", () => {
   const newStyle = STYLES[layerSelect.value] || STYLES.satellite;
+  document.body.classList.toggle("offline-us-map", layerSelect.value === "offlineUs");
   mapStyleReady = false;
   map.setStyle(newStyle);
 });

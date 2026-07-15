@@ -494,6 +494,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       <option value="topo">Topographic</option>
       <option value="outdoor">Outdoor</option>
       <option value="arcgisHybrid">ArcGIS Hybrid</option>
+      <option value="offlineUs">Offline US</option>
     </select>
   </div>
 

@@ -140,6 +140,7 @@ public class LiveStridePendingPointUploadJobService extends JobService {
 
             pointStore.resetStaleUploadAttempts(System.currentTimeMillis() - STALE_UPLOAD_MS);
 
+            boolean finishEventsDone = flushPendingFinishEvents(pointStore);
             boolean allUploaded = true;
 
             while (true) {
@@ -184,7 +185,9 @@ public class LiveStridePendingPointUploadJobService extends JobService {
             }
 
             boolean noPendingPoints = pointStore.countPending() == 0;
-            boolean finishEventsDone = flushPendingFinishEvents(pointStore);
+            if (finishEventsDone) {
+                finishEventsDone = flushPendingFinishEvents(pointStore);
+            }
 
             if (!noPendingPoints || !finishEventsDone) {
                 schedule(appContext);

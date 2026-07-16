@@ -526,8 +526,10 @@
       container: "map",
       style: STYLES.liveStride,
       center: [-98.6, 39.8],
-      zoom: 3.2
+      zoom: 3.2,
+      attributionControl: false
     });
+    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
 
     let geoControl;
     function addControls() {

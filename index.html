@@ -11,7 +11,15 @@
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      position: fixed;
+      inset: 0;
+    }
     body.viewer-mode .maplibregl-ctrl-geolocate {
       display: none !important;
     }
@@ -20,7 +28,13 @@
       margin-bottom: 58px;
     }
 
-    #map { width: 100%; height: 100%; }
+    #map {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+    }
 
     #buttonWrapper {
       position: absolute;
@@ -535,6 +549,16 @@
     });
     map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
 
+    function resizeMapAfterViewportChange() {
+      requestAnimationFrame(() => map.resize());
+      setTimeout(() => map.resize(), 250);
+    }
+
+    window.addEventListener("resize", resizeMapAfterViewportChange);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", resizeMapAfterViewportChange);
+    }
+
     let geoControl;
     function addControls() {
       if (geoControl) {
@@ -563,6 +587,7 @@
     map.on("style.load", () => {
       addControls();
       restoreRunPathLayersAfterStyleLoad();
+      resizeMapAfterViewportChange();
     });
 
     // -> State
@@ -3523,6 +3548,7 @@ if (viewerFollowing) {
     layerSelect.addEventListener("change", () => {
       const newStyle = STYLES[layerSelect.value] || STYLES.liveStride;
       map.setStyle(newStyle);
+      resizeMapAfterViewportChange();
     });
 
     function convertToGPX() {

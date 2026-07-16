@@ -7,6 +7,7 @@
 
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/pmtiles@4.3.0/dist/pmtiles.js"></script>
 
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
@@ -493,11 +494,12 @@ body.offline-us-map .maplibregl-ctrl-bottom-right .livestride-geolocate-control 
   <div id="layerToggle">
     <label for="layerSelect">Map:</label>
     <select id="layerSelect">
-      <option value="satellite" selected>Satellite</option>
+      <option value="liveStride" selected>LiveStride</option>
+      <option value="arcgisHybrid">ArcGIS Hybrid</option>
+      <option value="satellite">Satellite</option>
       <option value="streets">Streets</option>
       <option value="topo">Topographic</option>
       <option value="outdoor">Outdoor</option>
-      <option value="arcgisHybrid">ArcGIS Hybrid</option>
       <option value="offlineUs">Offline US</option>
     </select>
   </div>

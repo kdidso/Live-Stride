@@ -269,8 +269,10 @@ let map = new maplibregl.Map({
   container: "map",
   style: STYLES[DEFAULT_STYLE_KEY],
   center: [-98.6, 39.8],
-  zoom: 3.2
+  zoom: 3.2,
+  attributionControl: false
 });
+map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
 let mapStyleReady = false;
 let runPathRenderPending = false;
 

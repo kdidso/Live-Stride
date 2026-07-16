@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/pmtiles@4.3.0/dist/pmtiles.js"></script>
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -318,11 +319,12 @@
   <div id="layerToggle">
     <label for="layerSelect">Map:</label>
     <select id="layerSelect">
-      <option value="satellite" selected>Satellite</option>
+      <option value="liveStride" selected>LiveStride</option>
+      <option value="arcgisHybrid">ArcGIS Hybrid</option>
+      <option value="satellite">Satellite</option>
       <option value="streets">Streets</option>
       <option value="topo">Topographic</option>
       <option value="outdoor">Outdoor</option>
-      <option value="arcgisHybrid">ArcGIS Hybrid</option>
     </select>
   </div>
 
@@ -359,8 +361,159 @@
 
     const ARCGIS_ACCESS_TOKEN = "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv";
 
+    const LIVESTRIDE_TILE_URL = "https://tiles.livestride.run/planet.pmtiles";
+    if (window.pmtiles && !window.liveStridePmtilesProtocolAdded) {
+      const liveStrideProtocol = new window.pmtiles.Protocol();
+      maplibregl.addProtocol("pmtiles", liveStrideProtocol.tile);
+      window.liveStridePmtilesProtocolAdded = true;
+    }
+
+    const LIVESTRIDE_STYLE = {
+      version: 8,
+      glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+      sources: {
+        openmaptiles: {
+          type: "vector",
+          url: `pmtiles://${LIVESTRIDE_TILE_URL}`,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a>'
+        }
+      },
+      layers: [
+        {
+          id: "livestride-background",
+          type: "background",
+          paint: { "background-color": "#eef0e8" }
+        },
+        {
+          id: "livestride-water",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "water",
+          paint: { "fill-color": "#9fc9df" }
+        },
+        {
+          id: "livestride-landcover",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "landcover",
+          paint: {
+            "fill-color": [
+              "match",
+              ["get", "class"],
+              "wood", "#c8d7b0",
+              "grass", "#d4e6bd",
+              "scrub", "#d8d2ad",
+              "sand", "#eadca6",
+              "#d9dec7"
+            ],
+            "fill-opacity": 0.72
+          }
+        },
+        {
+          id: "livestride-landuse",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "landuse",
+          paint: {
+            "fill-color": [
+              "match",
+              ["get", "class"],
+              "residential", "#eee5d6",
+              "industrial", "#e4d8d7",
+              "commercial", "#ead8cf",
+              "park", "#cfe6bd",
+              "#e8e2cf"
+            ],
+            "fill-opacity": 0.62
+          }
+        },
+        {
+          id: "livestride-building",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "building",
+          minzoom: 13,
+          paint: {
+            "fill-color": "#d3c6b8",
+            "fill-outline-color": "#bbaea2",
+            "fill-opacity": 0.78
+          }
+        },
+        {
+          id: "livestride-roads-minor",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "transportation",
+          filter: ["in", ["get", "class"], ["literal", ["minor", "service", "track", "path"]]],
+          paint: {
+            "line-color": "#ffffff",
+            "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.6, 14, 3.2],
+            "line-opacity": 0.92
+          }
+        },
+        {
+          id: "livestride-roads-major-casing",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "transportation",
+          filter: ["in", ["get", "class"], ["literal", ["primary", "secondary", "tertiary", "trunk", "motorway"]]],
+          paint: {
+            "line-color": "#b99a73",
+            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 1.8, 14, 7.5]
+          }
+        },
+        {
+          id: "livestride-roads-major",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "transportation",
+          filter: ["in", ["get", "class"], ["literal", ["primary", "secondary", "tertiary", "trunk", "motorway"]]],
+          paint: {
+            "line-color": "#f6d47b",
+            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 1.1, 14, 5.2]
+          }
+        },
+        {
+          id: "livestride-road-labels",
+          type: "symbol",
+          source: "openmaptiles",
+          "source-layer": "transportation_name",
+          minzoom: 12,
+          layout: {
+            "symbol-placement": "line",
+            "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+            "text-font": ["Noto Sans Regular"],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 12, 10, 14, 12]
+          },
+          paint: {
+            "text-color": "#5f5147",
+            "text-halo-color": "#ffffff",
+            "text-halo-width": 1.2
+          }
+        },
+        {
+          id: "livestride-place-labels",
+          type: "symbol",
+          source: "openmaptiles",
+          "source-layer": "place",
+          layout: {
+            "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+            "text-font": ["Noto Sans Bold"],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 3, 10, 6, 12, 12, 16],
+            "text-anchor": "center"
+          },
+          paint: {
+            "text-color": "#3d3a35",
+            "text-halo-color": "#f7f4ed",
+            "text-halo-width": 1.4
+          }
+        }
+      ]
+    };
+
     // -> Style URLs
     const STYLES = {
+      liveStride: LIVESTRIDE_STYLE,
       satellite: `https://api.maptiler.com/maps/hybrid/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
       streets: `https://api.maptiler.com/maps/streets/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
       topo: `https://api.maptiler.com/maps/topo/style.json?key=Ii8JoWt1QkDL9pFlSQXC`,
@@ -371,7 +524,7 @@
     // -> Initialize map
     let map = new maplibregl.Map({
       container: "map",
-      style: STYLES.satellite,
+      style: STYLES.liveStride,
       center: [-98.6, 39.8],
       zoom: 3.2
     });
@@ -3356,7 +3509,7 @@ if (viewerFollowing) {
     }
 
     layerSelect.addEventListener("change", () => {
-      const newStyle = STYLES[layerSelect.value] || STYLES.satellite;
+      const newStyle = STYLES[layerSelect.value] || STYLES.liveStride;
       map.setStyle(newStyle);
     });
 

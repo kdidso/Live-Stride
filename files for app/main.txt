@@ -272,7 +272,7 @@ let map = new maplibregl.Map({
   zoom: 3.2,
   attributionControl: false
 });
-map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
 let mapStyleReady = false;
 let runPathRenderPending = false;
 

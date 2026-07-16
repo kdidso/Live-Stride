@@ -3200,9 +3200,13 @@ async function updateNativeMapMatchingContext(coord) {
     const availableLayerIds = new Set(
       (map.getStyle().layers || []).map(layer => layer.id)
     );
-    const pathLayers = ["Path", "Path minor"].filter(id =>
-      availableLayerIds.has(id)
-    );
+    const pathLayers = [
+      "Path",
+      "Path minor",
+      "livestride-roads-minor",
+      "livestride-roads-major-casing",
+      "livestride-roads-major"
+    ].filter(id => availableLayerIds.has(id));
     if (pathLayers.length === 0) return;
 
     const centerPoint = map.project(coord);

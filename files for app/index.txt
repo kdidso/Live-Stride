@@ -25,7 +25,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
   display: none !important;
 }
 
-body.offline-us-map .maplibregl-ctrl-bottom-right .livestride-geolocate-control {
+.maplibregl-ctrl-bottom-right .livestride-geolocate-control {
   margin-bottom: 58px;
 }
 

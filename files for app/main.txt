@@ -30,7 +30,8 @@ const supabaseClient = window.supabase.createClient(
 const ARCGIS_ACCESS_TOKEN = "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv";
 
 const LIVESTRIDE_TILE_URL = "https://tiles.livestride.run/planet.pmtiles";
-if (window.pmtiles && !window.liveStridePmtilesProtocolAdded) {
+const liveStridePmtilesReady = Boolean(window.pmtiles);
+if (liveStridePmtilesReady && !window.liveStridePmtilesProtocolAdded) {
   const liveStrideProtocol = new window.pmtiles.Protocol();
   maplibregl.addProtocol("pmtiles", liveStrideProtocol.tile);
   window.liveStridePmtilesProtocolAdded = true;
@@ -251,10 +252,22 @@ const STYLES = {
   offlineUs: OFFLINE_US_STYLE
 };
 
+function updateMapStyleBodyClass(styleKey) {
+  document.body.classList.toggle("livestride-map", styleKey === "liveStride");
+  document.body.classList.toggle("offline-us-map", styleKey === "offlineUs");
+}
+
+const DEFAULT_STYLE_KEY = liveStridePmtilesReady ? "liveStride" : "satellite";
+if (!liveStridePmtilesReady) {
+  console.warn("PMTiles library is unavailable; falling back to Satellite map.");
+  document.getElementById("layerSelect").value = DEFAULT_STYLE_KEY;
+}
+updateMapStyleBodyClass(DEFAULT_STYLE_KEY);
+
 // -> Create map with default LiveStride basemap style
 let map = new maplibregl.Map({
   container: "map",
-  style: STYLES.liveStride,
+  style: STYLES[DEFAULT_STYLE_KEY],
   center: [-98.6, 39.8],
   zoom: 3.2
 });
@@ -4571,8 +4584,11 @@ function trackRunner(key) {
 }
 
 layerSelect.addEventListener("change", () => {
-  const newStyle = STYLES[layerSelect.value] || STYLES.liveStride;
-  document.body.classList.toggle("offline-us-map", layerSelect.value === "offlineUs");
+  const selectedStyleKey = layerSelect.value === "liveStride" && !liveStridePmtilesReady
+    ? "satellite"
+    : layerSelect.value;
+  const newStyle = STYLES[selectedStyleKey] || STYLES[DEFAULT_STYLE_KEY];
+  updateMapStyleBodyClass(selectedStyleKey);
   mapStyleReady = false;
   map.setStyle(newStyle);
 });

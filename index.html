@@ -16,6 +16,10 @@
       display: none !important;
     }
 
+    .maplibregl-ctrl-bottom-right .livestride-geolocate-control {
+      margin-bottom: 58px;
+    }
+
     #map { width: 100%; height: 100%; }
 
     #buttonWrapper {
@@ -549,6 +553,12 @@
       });
 
       map.addControl(geoControl, "bottom-right");
+      requestAnimationFrame(() => {
+        document
+          .querySelector(".maplibregl-ctrl-geolocate")
+          ?.closest(".maplibregl-ctrl-group")
+          ?.classList.add("livestride-geolocate-control");
+      });
     }
     map.on("style.load", () => {
       addControls();

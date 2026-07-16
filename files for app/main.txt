@@ -275,6 +275,14 @@ let map = new maplibregl.Map({
 map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
 let mapStyleReady = false;
 let runPathRenderPending = false;
+let nativePathRenderPending = false;
+
+function schedulePendingRunPathRender() {
+  requestAnimationFrame(() => {
+    renderPendingRunPathIfReady();
+    setTimeout(renderPendingRunPathIfReady, 250);
+  });
+}
 
 // -> Re-add geolocation control after style changes
 let geoControl;
@@ -306,7 +314,9 @@ map.on("style.load", () => {
   mapStyleReady = true;
   addControls();
   restoreRunPathLayersAfterStyleLoad();
+  schedulePendingRunPathRender();
 });
+map.on("idle", renderPendingRunPathIfReady);
 
 // -> Tracking state
 let pathCoords = [];
@@ -1371,17 +1381,22 @@ function addOrUpdatePath() {
 }
 
 function renderPendingRunPathIfReady() {
-  if (!runPathRenderPending || pathCoords.length === 0) return;
-  addOrUpdatePath();
+  if (runPathRenderPending && pathCoords.length > 0) {
+    addOrUpdatePath();
+  }
+  if (nativePathRenderPending && nativePathCoords.length > 0) {
+    addOrUpdateNativePath();
+  }
 }
 
 function restoreRunPathLayersAfterStyleLoad() {
   if (pathCoords.length > 0) {
     addOrUpdatePath();
-    addOrUpdateNativePath();
-  } else {
-    renderPendingRunPathIfReady();
   }
+  if (nativePathCoords.length > 0) {
+    addOrUpdateNativePath();
+  }
+  renderPendingRunPathIfReady();
 }
 
 function getSortedUniqueRoutePoints(points) {
@@ -1509,6 +1524,11 @@ function getLatestSequencePoint(points) {
 }
 
 function addOrUpdateNativePath() {
+  if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+    nativePathRenderPending = true;
+    return false;
+  }
+
   const segments = buildSequenceLineSegments(nativePathCoords);
 
   const data = {
@@ -1519,28 +1539,36 @@ function addOrUpdateNativePath() {
     }
   };
 
-  if (!map.getSource("native-run-path")) {
-    map.addSource("native-run-path", {
-      type: "geojson",
-      data
-    });
+  try {
+    if (!map.getSource("native-run-path")) {
+      map.addSource("native-run-path", {
+        type: "geojson",
+        data
+      });
 
-    map.addLayer({
-      id: "native-run-line",
-      type: "line",
-      source: "native-run-path",
-      layout: {
-        "line-join": "round",
-        "line-cap": "round"
-      },
-      paint: {
-        "line-color": "#B000FF",
-        "line-width": 4,
-        "line-opacity": 0.9
-      }
-    });
-  } else {
-    map.getSource("native-run-path").setData(data);
+      map.addLayer({
+        id: "native-run-line",
+        type: "line",
+        source: "native-run-path",
+        layout: {
+          "line-join": "round",
+          "line-cap": "round"
+        },
+        paint: {
+          "line-color": "#B000FF",
+          "line-width": 4,
+          "line-opacity": 0.9
+        }
+      });
+    } else {
+      map.getSource("native-run-path").setData(data);
+    }
+    nativePathRenderPending = false;
+    return true;
+  } catch (err) {
+    nativePathRenderPending = true;
+    console.warn("Native run path render deferred until map style is ready:", err);
+    return false;
   }
 }
 
@@ -1559,6 +1587,11 @@ function clearRunPathLayer() {
 }
 
 function clearNativeRunPathLayer() {
+  nativePathRenderPending = false;
+  if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+    return;
+  }
+
   if (map.getLayer("native-run-line")) {
     map.removeLayer("native-run-line");
   }
@@ -1710,7 +1743,6 @@ async function fillMissingQueuedElevations(queue) {
 
 async function flushSupabaseQueue() {
   if (isFlushingSupabase) return;
-  if (runnerStoppedNativeHydrationInFlight) return;
   if (!navigator.onLine) return;
 
 let queue = loadSyncQueue();
@@ -1725,26 +1757,6 @@ if (!hasWork) return;
 isFlushingSupabase = true;
 
 try {
-  await fillMissingQueuedElevations(queue);
-  queue = loadSyncQueue();
-    while (queue.points.length > 0) {
-      const pointPayload = queue.points[0];
-
-      const { error } = await supabaseClient
-        .from("run_points")
-        .insert(pointPayload);
-
-      if (error) {
-        console.warn("Still unable to sync queued point:", error);
-        showConnectionStatus("Still offline - run is saved locally", "bad");
-        saveSyncQueue(queue);
-        return;
-      }
-
-      queue.points.shift();
-      saveSyncQueue(queue);
-    }
-
     for (const [runId, updatePayload] of Object.entries(queue.runUpdates)) {
       const { error } = await supabaseClient
         .from("runs")
@@ -1776,6 +1788,30 @@ try {
       }
 
       delete queue.finishEvents[runId];
+      saveSyncQueue(queue);
+    }
+
+    if (runnerStoppedNativeHydrationInFlight) {
+      return;
+    }
+
+    await fillMissingQueuedElevations(queue);
+    queue = loadSyncQueue();
+    while (queue.points.length > 0) {
+      const pointPayload = queue.points[0];
+
+      const { error } = await supabaseClient
+        .from("run_points")
+        .insert(pointPayload);
+
+      if (error) {
+        console.warn("Still unable to sync queued point:", error);
+        showConnectionStatus("Still offline - run is saved locally", "bad");
+        saveSyncQueue(queue);
+        return;
+      }
+
+      queue.points.shift();
       saveSyncQueue(queue);
     }
 
@@ -4592,6 +4628,8 @@ layerSelect.addEventListener("change", () => {
   const newStyle = STYLES[selectedStyleKey] || STYLES[DEFAULT_STYLE_KEY];
   updateMapStyleBodyClass(selectedStyleKey);
   mapStyleReady = false;
+  runPathRenderPending = pathCoords.length > 0 || runPathRenderPending;
+  nativePathRenderPending = nativePathCoords.length > 0 || nativePathRenderPending;
   map.setStyle(newStyle);
 });
 

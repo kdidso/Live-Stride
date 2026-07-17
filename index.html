@@ -11,11 +11,15 @@
   <script src="https://www.gstatic.com/firebasejs/11.8.1/firebase-database-compat.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
+    :root {
+      --live-viewport-height: 100vh;
+    }
+
     html, body {
       margin: 0;
       padding: 0;
       width: 100%;
-      height: 100%;
+      height: var(--live-viewport-height);
       overflow: hidden;
       position: fixed;
       inset: 0;
@@ -32,8 +36,7 @@
       position: fixed;
       inset: 0;
       width: 100vw;
-      height: 100vh;
-      height: 100dvh;
+      height: var(--live-viewport-height);
     }
 
     #buttonWrapper {
@@ -549,11 +552,34 @@
     });
     map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
 
+    let mapStyleReady = false;
+    let runPathRenderPending = false;
+    let nativePathRenderPending = false;
+
+    function updateAppViewportHeight() {
+      const viewportHeight = window.visualViewport?.height || window.innerHeight;
+      if (viewportHeight) {
+        document.documentElement.style.setProperty(
+          "--live-viewport-height",
+          `${Math.round(viewportHeight)}px`
+        );
+      }
+    }
+
     function resizeMapAfterViewportChange() {
+      updateAppViewportHeight();
       requestAnimationFrame(() => map.resize());
       setTimeout(() => map.resize(), 250);
     }
 
+    function schedulePendingRunPathRender() {
+      requestAnimationFrame(() => {
+        renderPendingRunPathIfReady();
+        setTimeout(renderPendingRunPathIfReady, 250);
+      });
+    }
+
+    updateAppViewportHeight();
     window.addEventListener("resize", resizeMapAfterViewportChange);
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", resizeMapAfterViewportChange);
@@ -585,10 +611,13 @@
       });
     }
     map.on("style.load", () => {
+      mapStyleReady = true;
       addControls();
       restoreRunPathLayersAfterStyleLoad();
+      schedulePendingRunPathRender();
       resizeMapAfterViewportChange();
     });
+    map.on("idle", renderPendingRunPathIfReady);
 
     // -> State
     let pathCoords = [];
@@ -1870,6 +1899,11 @@ setTimeout(() => {
     }
 
     function addOrUpdatePath() {
+      if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+        runPathRenderPending = true;
+        return false;
+      }
+
       const coords = pathCoords.map(pt => [pt.lon, pt.lat]);
       const data = {
         type: "Feature",
@@ -1879,27 +1913,35 @@ setTimeout(() => {
         }
       };
 
-      if (!map.getSource("run-path")) {
-        map.addSource("run-path", {
-          type: "geojson",
-          data
-        });
+      try {
+        if (!map.getSource("run-path")) {
+          map.addSource("run-path", {
+            type: "geojson",
+            data
+          });
 
-        map.addLayer({
-          id: "run-line",
-          type: "line",
-          source: "run-path",
-          layout: {
-            "line-join": "round",
-            "line-cap": "round"
-          },
-          paint: {
-            "line-color": "#00FFFF",
-            "line-width": 4
-          }
-        });
-      } else {
-        map.getSource("run-path").setData(data);
+          map.addLayer({
+            id: "run-line",
+            type: "line",
+            source: "run-path",
+            layout: {
+              "line-join": "round",
+              "line-cap": "round"
+            },
+            paint: {
+              "line-color": "#00FFFF",
+              "line-width": 4
+            }
+          });
+        } else {
+          map.getSource("run-path").setData(data);
+        }
+        runPathRenderPending = false;
+        return true;
+      } catch (err) {
+        runPathRenderPending = true;
+        console.warn("Run path render deferred until map style is ready:", err);
+        return false;
       }
     }
 function buildSequenceLineSegments(points) {
@@ -1991,6 +2033,11 @@ function getLatestSequencePoint(points) {
 }
 
 function addOrUpdateNativePath() {
+  if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+    nativePathRenderPending = true;
+    return false;
+  }
+
   const segments = buildSequenceLineSegments(nativePathCoords);
 
   const data = {
@@ -2001,37 +2048,63 @@ function addOrUpdateNativePath() {
     }
   };
 
-  if (!map.getSource("native-run-path")) {
-    map.addSource("native-run-path", {
-      type: "geojson",
-      data
-    });
+  try {
+    if (!map.getSource("native-run-path")) {
+      map.addSource("native-run-path", {
+        type: "geojson",
+        data
+      });
 
-    map.addLayer({
-      id: "native-run-line",
-      type: "line",
-      source: "native-run-path",
-      layout: {
-        "line-join": "round",
-        "line-cap": "round"
-      },
-      paint: {
-        "line-color": "#B000FF",
-        "line-width": 4,
-        "line-opacity": 0.9
-      }
-    });
-  } else {
-    map.getSource("native-run-path").setData(data);
+      map.addLayer({
+        id: "native-run-line",
+        type: "line",
+        source: "native-run-path",
+        layout: {
+          "line-join": "round",
+          "line-cap": "round"
+        },
+        paint: {
+          "line-color": "#B000FF",
+          "line-width": 4,
+          "line-opacity": 0.9
+        }
+      });
+    } else {
+      map.getSource("native-run-path").setData(data);
+    }
+    nativePathRenderPending = false;
+    return true;
+  } catch (err) {
+    nativePathRenderPending = true;
+    console.warn("Native run path render deferred until map style is ready:", err);
+    return false;
   }
 }
 
 function restoreRunPathLayersAfterStyleLoad() {
-  if (!pathCoords.length) return;
-  addOrUpdatePath();
-  addOrUpdateNativePath();
+  if (pathCoords.length > 0) {
+    addOrUpdatePath();
+  }
+  if (nativePathCoords.length > 0) {
+    addOrUpdateNativePath();
+  }
+  renderPendingRunPathIfReady();
+}
+
+function renderPendingRunPathIfReady() {
+  if (runPathRenderPending && pathCoords.length > 0) {
+    addOrUpdatePath();
+  }
+  if (nativePathRenderPending && nativePathCoords.length > 0) {
+    addOrUpdateNativePath();
+  }
 }
     function clearRunPathLayer() {
+      runPathRenderPending = false;
+      if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+        return;
+      }
+
       if (map.getLayer("run-line")) {
         map.removeLayer("run-line");
       }
@@ -2041,6 +2114,11 @@ function restoreRunPathLayersAfterStyleLoad() {
     }
 
 function clearNativeRunPathLayer() {
+  nativePathRenderPending = false;
+  if (!mapStyleReady || !map?.isStyleLoaded?.()) {
+    return;
+  }
+
   if (map.getLayer("native-run-line")) {
     map.removeLayer("native-run-line");
   }
@@ -3547,6 +3625,9 @@ if (viewerFollowing) {
 
     layerSelect.addEventListener("change", () => {
       const newStyle = STYLES[layerSelect.value] || STYLES.liveStride;
+      mapStyleReady = false;
+      runPathRenderPending = pathCoords.length > 0 || runPathRenderPending;
+      nativePathRenderPending = nativePathCoords.length > 0 || nativePathRenderPending;
       map.setStyle(newStyle);
       resizeMapAfterViewportChange();
     });

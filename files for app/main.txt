@@ -728,6 +728,9 @@ function setMode(mode) {
   statsBar.style.display = mode === "viewer" ? "block" : statsBar.style.display;
   recenterBtn.style.display = mode === "viewer" ? "block" : "none";
   if (mode === "viewer") {
+    exportUploadBtn.style.display = "none";
+    exportGpxBtn.style.display = "none";
+    uploadStravaBtn.style.display = "none";
     viewerGpxBtn.style.display = "inline-block";
   } else if (viewerGpxBtn.style.display !== "inline-block") {
     viewerGpxBtn.style.display = "none";

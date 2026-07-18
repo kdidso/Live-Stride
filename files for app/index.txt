@@ -184,6 +184,24 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       background: #176f45;
     }
 
+    #profileSavePasswordBtn {
+      display: none;
+      grid-column: 1 / -1;
+      background: #176f45;
+    }
+
+    #profileForgotPasswordBtn {
+      display: block;
+      width: auto;
+      margin: 12px auto 0;
+      padding: 4px;
+      border: 0;
+      background: transparent;
+      color: #155f8a;
+      font-size: 14px;
+      text-decoration: underline;
+    }
+
     #profileAuthMessage {
       min-height: 22px;
       margin: 14px 0 0;
@@ -754,10 +772,10 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
         <button id="closeProfileAuthBtn" class="profile-close-btn" type="button" aria-label="Close">&times;</button>
       </div>
       <p id="profileAuthIntro">Sign in to save completed runs and view your activity history.</p>
-      <label class="profile-field">Email
+      <label id="profileAuthEmailField" class="profile-field">Email
         <input id="profileAuthEmail" type="email" autocomplete="email" inputmode="email" />
       </label>
-      <label class="profile-field">Password
+      <label id="profileAuthPasswordField" class="profile-field"><span id="profileAuthPasswordLabel">Password</span>
         <input id="profileAuthPassword" type="password" autocomplete="current-password" minlength="8" />
       </label>
       <label class="profile-password-toggle">
@@ -767,7 +785,9 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       <div class="profile-auth-actions">
         <button id="profileSignInBtn" type="button">Sign In</button>
         <button id="profileCreateBtn" type="button">Create Account</button>
+        <button id="profileSavePasswordBtn" type="button">Save New Password</button>
       </div>
+      <button id="profileForgotPasswordBtn" type="button">Forgot password?</button>
       <p id="profileAuthMessage" role="status"></p>
     </section>
   </div>

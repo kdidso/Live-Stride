@@ -430,11 +430,18 @@ const choiceModalCancel = document.getElementById("choiceModalCancel");
 const profileBtn = document.getElementById("profileBtn");
 const profileAuthOverlay = document.getElementById("profileAuthOverlay");
 const closeProfileAuthBtn = document.getElementById("closeProfileAuthBtn");
+const profileAuthTitle = document.getElementById("profileAuthTitle");
+const profileAuthIntro = document.getElementById("profileAuthIntro");
+const profileAuthEmailField = document.getElementById("profileAuthEmailField");
+const profileAuthPasswordField = document.getElementById("profileAuthPasswordField");
+const profileAuthPasswordLabel = document.getElementById("profileAuthPasswordLabel");
 const profileAuthEmail = document.getElementById("profileAuthEmail");
 const profileAuthPassword = document.getElementById("profileAuthPassword");
 const profileShowPasswords = document.getElementById("profileShowPasswords");
 const profileSignInBtn = document.getElementById("profileSignInBtn");
 const profileCreateBtn = document.getElementById("profileCreateBtn");
+const profileSavePasswordBtn = document.getElementById("profileSavePasswordBtn");
+const profileForgotPasswordBtn = document.getElementById("profileForgotPasswordBtn");
 const profileAuthMessage = document.getElementById("profileAuthMessage");
 const profileView = document.getElementById("profileView");
 const closeProfileViewBtn = document.getElementById("closeProfileViewBtn");
@@ -444,6 +451,7 @@ const profileSignOutBtn = document.getElementById("profileSignOutBtn");
 const profileTabs = Array.from(document.querySelectorAll(".profile-tab"));
 
 let profilesSession = null;
+let profilePasswordRecovery = false;
 
 function setProfileAuthMessage(message = "", success = false) {
   if (!profileAuthMessage) return;
@@ -454,6 +462,28 @@ function setProfileAuthMessage(message = "", success = false) {
 function setProfileAuthBusy(busy) {
   if (profileSignInBtn) profileSignInBtn.disabled = busy;
   if (profileCreateBtn) profileCreateBtn.disabled = busy;
+  if (profileSavePasswordBtn) profileSavePasswordBtn.disabled = busy;
+  if (profileForgotPasswordBtn) profileForgotPasswordBtn.disabled = busy;
+}
+
+function setProfilePasswordRecoveryMode(recovery) {
+  profilePasswordRecovery = recovery;
+  if (profileAuthTitle) profileAuthTitle.textContent = recovery ? "Choose New Password" : "LiveStride Profile";
+  if (profileAuthIntro) {
+    profileAuthIntro.textContent = recovery
+      ? "Enter a new password for your LiveStride account."
+      : "Sign in to save completed runs and view your activity history.";
+  }
+  if (profileAuthEmailField) profileAuthEmailField.style.display = recovery ? "none" : "block";
+  if (profileSignInBtn) profileSignInBtn.style.display = recovery ? "none" : "block";
+  if (profileCreateBtn) profileCreateBtn.style.display = recovery ? "none" : "block";
+  if (profileSavePasswordBtn) profileSavePasswordBtn.style.display = recovery ? "block" : "none";
+  if (profileForgotPasswordBtn) profileForgotPasswordBtn.style.display = recovery ? "none" : "block";
+  if (profileAuthPasswordLabel) profileAuthPasswordLabel.textContent = recovery ? "New password" : "Password";
+  if (profileAuthPassword) {
+    profileAuthPassword.value = "";
+    profileAuthPassword.autocomplete = recovery ? "new-password" : "current-password";
+  }
 }
 
 function closeProfileAuth() {
@@ -468,7 +498,7 @@ function openProfileAuth() {
   profileAuthOverlay.style.display = "flex";
   profileAuthOverlay.setAttribute("aria-hidden", "false");
   setProfileAuthMessage();
-  setTimeout(() => profileAuthEmail?.focus(), 0);
+  setTimeout(() => (profilePasswordRecovery ? profileAuthPassword : profileAuthEmail)?.focus(), 0);
 }
 
 function closeProfileView() {
@@ -605,14 +635,61 @@ async function submitProfileCreateAccount() {
   }
 }
 
+async function submitProfilePasswordResetEmail() {
+  const email = profileAuthEmail?.value.trim() || "";
+  if (!email || !profileAuthEmail?.checkValidity()) {
+    setProfileAuthMessage("Enter a valid email address.");
+    profileAuthEmail?.focus();
+    return;
+  }
+
+  setProfileAuthBusy(true);
+  setProfileAuthMessage("Requesting a password reset...");
+  const { error } = await profilesSupabaseClient.auth.resetPasswordForEmail(email, {
+    redirectTo: "https://app.livestride.run"
+  });
+  setProfileAuthBusy(false);
+
+  if (error) console.warn("Profile password reset request failed:", error);
+  setProfileAuthMessage(
+    "If that email belongs to a LiveStride account, a password reset link has been sent.",
+    true
+  );
+}
+
+async function submitProfileNewPassword() {
+  const password = profileAuthPassword?.value || "";
+  if (password.length < 8) {
+    setProfileAuthMessage("Use a new password of at least 8 characters.");
+    return;
+  }
+
+  setProfileAuthBusy(true);
+  setProfileAuthMessage("Saving your new password...");
+  const { error } = await profilesSupabaseClient.auth.updateUser({ password });
+  setProfileAuthBusy(false);
+
+  if (error) {
+    setProfileAuthMessage("The reset link may have expired. Request a new password reset email and try again.");
+    return;
+  }
+
+  setProfilePasswordRecoveryMode(false);
+  setProfileAuthMessage("Your password has been updated. You are now signed in.", true);
+}
+
 async function initializeProfilesAuth() {
+  profilesSupabaseClient.auth.onAuthStateChange((event, session) => {
+    applyProfilesSession(session);
+    if (event === "PASSWORD_RECOVERY") {
+      setProfilePasswordRecoveryMode(true);
+      openProfileAuth();
+    }
+  });
+
   const { data, error } = await profilesSupabaseClient.auth.getSession();
   if (error) console.warn("Profile session restore failed:", error);
   applyProfilesSession(data?.session || null);
-
-  profilesSupabaseClient.auth.onAuthStateChange((_event, session) => {
-    applyProfilesSession(session);
-  });
 }
 
 profileBtn?.addEventListener("click", () => {
@@ -623,8 +700,13 @@ closeProfileAuthBtn?.addEventListener("click", closeProfileAuth);
 closeProfileViewBtn?.addEventListener("click", closeProfileView);
 profileSignInBtn?.addEventListener("click", submitProfileSignIn);
 profileCreateBtn?.addEventListener("click", submitProfileCreateAccount);
+profileForgotPasswordBtn?.addEventListener("click", submitProfilePasswordResetEmail);
+profileSavePasswordBtn?.addEventListener("click", submitProfileNewPassword);
 profileAuthPassword?.addEventListener("keydown", event => {
-  if (event.key === "Enter") submitProfileSignIn();
+  if (event.key === "Enter") {
+    if (profilePasswordRecovery) submitProfileNewPassword();
+    else submitProfileSignIn();
+  }
 });
 profileShowPasswords?.addEventListener("change", () => {
   const type = profileShowPasswords.checked ? "text" : "password";

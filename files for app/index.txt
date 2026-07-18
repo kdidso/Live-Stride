@@ -760,12 +760,9 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       <label class="profile-field">Password
         <input id="profileAuthPassword" type="password" autocomplete="current-password" minlength="8" />
       </label>
-      <label class="profile-field">Confirm password <span>(new accounts only)</span>
-        <input id="profileAuthPasswordConfirm" type="password" autocomplete="new-password" minlength="8" />
-      </label>
       <label class="profile-password-toggle">
         <input id="profileShowPasswords" type="checkbox" />
-        Show passwords
+        Show password
       </label>
       <div class="profile-auth-actions">
         <button id="profileSignInBtn" type="button">Sign In</button>

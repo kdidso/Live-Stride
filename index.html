@@ -460,9 +460,9 @@
       </div>
       <p id="profileEmail"></p>
       <div class="profile-tabs">
-        <button class="profile-tab active" type="button">Activities</button>
-        <button class="profile-tab" type="button">Records</button>
-        <button class="profile-tab" type="button">Statistics</button>
+        <button class="profile-tab active" data-profile-tab="activities" type="button">Activities</button>
+        <button class="profile-tab" data-profile-tab="records" type="button">Records</button>
+        <button class="profile-tab" data-profile-tab="statistics" type="button">Statistics</button>
       </div>
       <div id="profileActivities">No saved runs yet.</div>
       <button id="profileSignOutBtn" type="button">Sign Out</button>
@@ -644,6 +644,21 @@
     document.getElementById("profileShowPasswords").addEventListener("change", event => profileAuthPassword.type = event.target.checked ? "text" : "password");
     profileAuthPassword.addEventListener("keydown", event => { if (event.key === "Enter") profilePasswordRecovery ? saveProfileNewPassword() : signInProfile(); });
     document.getElementById("profileSignOutBtn").addEventListener("click", async () => { await profilesSupabaseClient.auth.signOut(); applyProfilesSession(null); profileView.style.display = "none"; openProfileAuth(); setProfileAuthMessage("You are signed out.", true); });
+    const profileTabs = Array.from(document.querySelectorAll(".profile-tab"));
+    const profileActivities = document.getElementById("profileActivities");
+    profileTabs.forEach(tab => {
+      tab.addEventListener("click", () => {
+        profileTabs.forEach(item => item.classList.toggle("active", item === tab));
+        const selected = tab.dataset.profileTab;
+        if (selected === "activities") {
+          profileActivities.textContent = "No saved runs yet.";
+        } else if (selected === "records") {
+          profileActivities.textContent = "Personal records will appear here as saved runs are analyzed.";
+        } else {
+          profileActivities.textContent = "Training statistics will appear here as saved runs are analyzed.";
+        }
+      });
+    });
     initializeProfilesAuth();
 
     const ARCGIS_ACCESS_TOKEN = "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv";

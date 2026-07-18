@@ -154,6 +154,22 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       font: inherit;
     }
 
+    .profile-password-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: -4px 0 14px;
+      color: #354653;
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .profile-password-toggle input {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+    }
+
     .profile-auth-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -743,6 +759,13 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       </label>
       <label class="profile-field">Password
         <input id="profileAuthPassword" type="password" autocomplete="current-password" minlength="8" />
+      </label>
+      <label class="profile-field">Confirm password <span>(new accounts only)</span>
+        <input id="profileAuthPasswordConfirm" type="password" autocomplete="new-password" minlength="8" />
+      </label>
+      <label class="profile-password-toggle">
+        <input id="profileShowPasswords" type="checkbox" />
+        Show passwords
       </label>
       <div class="profile-auth-actions">
         <button id="profileSignInBtn" type="button">Sign In</button>

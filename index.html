@@ -39,6 +39,73 @@
       height: var(--live-viewport-height);
     }
 
+    #profileBtn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1100;
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      padding: 0;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid rgba(20, 35, 55, 0.22);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+    #profileBtn::before, #profileBtn::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #24415f;
+    }
+    #profileBtn::before { top: 9px; width: 11px; height: 11px; border-radius: 50%; }
+    #profileBtn::after { bottom: 8px; width: 22px; height: 12px; border-radius: 12px 12px 5px 5px; }
+    #profileBtn.signed-in { border-color: #16844b; box-shadow: 0 0 0 2px rgba(22,132,75,.2), 0 2px 8px rgba(0,0,0,.2); }
+
+    #profileAuthOverlay, #profileView {
+      position: fixed;
+      inset: 0;
+      z-index: 5000;
+      display: none;
+      box-sizing: border-box;
+      color: #15202b;
+    }
+    #profileAuthOverlay { justify-content: flex-end; background: rgba(0,0,0,.42); }
+    #profileAuthPanel {
+      width: min(92vw, 420px);
+      height: 100%;
+      overflow-y: auto;
+      background: #fff;
+      padding: 20px 22px 24px;
+      box-sizing: border-box;
+      box-shadow: -8px 0 28px rgba(0,0,0,.24);
+    }
+    .profile-header, .profile-view-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .profile-header h2, .profile-view-header h1 { margin: 0; }
+    .profile-close-btn { min-width: 42px; width: 42px; height: 42px; padding: 0; background: #e8edf1; color: #15202b; font-size: 25px; }
+    #profileAuthIntro { margin: 18px 0; color: #4b5b68; line-height: 1.45; }
+    .profile-field { display: block; margin-bottom: 14px; font-size: 14px; font-weight: 600; }
+    .profile-field input { width: 100%; margin-top: 6px; padding: 12px; border: 1px solid #b8c4ce; border-radius: 6px; box-sizing: border-box; font: inherit; }
+    .profile-password-toggle { display: inline-flex; align-items: center; gap: 8px; margin: -4px 0 14px; color: #354653; font-size: 14px; }
+    .profile-password-toggle input { width: 18px; height: 18px; margin: 0; }
+    .profile-auth-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .profile-auth-actions button { min-width: 0; }
+    #profileCreateBtn, #profileSavePasswordBtn { background: #176f45; }
+    #profileSavePasswordBtn { display: none; grid-column: 1 / -1; }
+    #profileForgotPasswordBtn { display: block; width: auto; min-width: 0; margin: 12px auto 0; padding: 4px; background: transparent; color: #155f8a; text-decoration: underline; }
+    #profileAuthMessage { min-height: 22px; margin: 14px 0 0; color: #9b2c2c; line-height: 1.4; }
+    #profileAuthMessage.success { color: #176f45; }
+    #profileView { overflow-y: auto; padding: 18px; background: rgba(242,246,248,.99); }
+    .profile-view-inner { width: min(100%, 900px); margin: 0 auto; }
+    #profileEmail { margin: 16px 0 20px; color: #52616d; overflow-wrap: anywhere; }
+    .profile-tabs { display: flex; border-bottom: 1px solid #cdd6dd; margin-bottom: 18px; }
+    .profile-tab { min-width: 0; flex: 1; border-radius: 0; background: transparent; color: #42515d; border-bottom: 3px solid transparent; padding: 11px 6px; }
+    .profile-tab.active { color: #075da8; border-bottom-color: #075da8; }
+    #profileActivities { padding: 26px 16px; background: #fff; border: 1px solid #d6dee4; border-radius: 6px; color: #52616d; text-align: center; }
+    #profileSignOutBtn { margin-top: 20px; background: #6b7680; }
+
     #buttonWrapper {
       position: absolute;
       top: 10px;
@@ -313,6 +380,7 @@
 </head>
 <body>
   <div id="map"></div>
+  <button id="profileBtn" type="button" aria-label="Open profile" title="Profile"></button>
 
   <div id="buttonWrapper">
     <div id="modeToggle">
@@ -360,6 +428,47 @@
     <iframe id="exportPageFrame" title="LiveStride GPX Export"></iframe>
   </div>
 
+  <div id="profileAuthOverlay" aria-hidden="true">
+    <section id="profileAuthPanel" aria-labelledby="profileAuthTitle">
+      <div class="profile-header">
+        <h2 id="profileAuthTitle">LiveStride Profile</h2>
+        <button id="closeProfileAuthBtn" class="profile-close-btn" type="button" aria-label="Close">&times;</button>
+      </div>
+      <p id="profileAuthIntro">Sign in to save completed runs and view your activity history.</p>
+      <label id="profileAuthEmailField" class="profile-field">Email
+        <input id="profileAuthEmail" type="email" autocomplete="email" inputmode="email" />
+      </label>
+      <label class="profile-field"><span id="profileAuthPasswordLabel">Password</span>
+        <input id="profileAuthPassword" type="password" autocomplete="current-password" minlength="8" />
+      </label>
+      <label class="profile-password-toggle"><input id="profileShowPasswords" type="checkbox" /> Show password</label>
+      <div class="profile-auth-actions">
+        <button id="profileSignInBtn" type="button">Sign In</button>
+        <button id="profileCreateBtn" type="button">Create Account</button>
+        <button id="profileSavePasswordBtn" type="button">Save New Password</button>
+      </div>
+      <button id="profileForgotPasswordBtn" type="button">Forgot password?</button>
+      <p id="profileAuthMessage" role="status"></p>
+    </section>
+  </div>
+
+  <div id="profileView" aria-hidden="true">
+    <div class="profile-view-inner">
+      <div class="profile-view-header">
+        <h1>Profile</h1>
+        <button id="closeProfileViewBtn" class="profile-close-btn" type="button" aria-label="Close">&times;</button>
+      </div>
+      <p id="profileEmail"></p>
+      <div class="profile-tabs">
+        <button class="profile-tab active" type="button">Activities</button>
+        <button class="profile-tab" type="button">Records</button>
+        <button class="profile-tab" type="button">Statistics</button>
+      </div>
+      <div id="profileActivities">No saved runs yet.</div>
+      <button id="profileSignOutBtn" type="button">Sign Out</button>
+    </div>
+  </div>
+
   <script>
     // -> Firebase initialization
     const firebaseConfig = {
@@ -378,7 +487,158 @@
     // -> Supabase initialization
     const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
-    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const profilesAuthReturnParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const profilesRecoveryReturnRequested = profilesAuthReturnParams.get("type") === "recovery";
+    const profilesAuthReturnError = profilesAuthReturnParams.get("error_code") || profilesAuthReturnParams.get("error");
+    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+
+    const PROFILES_SUPABASE_URL = "https://noceaxqvgtsrygmpzqmt.supabase.co";
+    const PROFILES_SUPABASE_KEY = "sb_publishable_fY_QIxQrkdxSveJTs_Wx3g_aUBTE9Lh";
+    const pendingProfilesAuthEvents = [];
+    let profilesAuthEventHandler = null;
+    const profilesSupabaseClient = window.supabase.createClient(PROFILES_SUPABASE_URL, PROFILES_SUPABASE_KEY, {
+      auth: { storageKey: "livestride-profiles-browser-auth", persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
+    profilesSupabaseClient.auth.onAuthStateChange((event, session) => {
+      if (profilesAuthEventHandler) profilesAuthEventHandler(event, session);
+      else pendingProfilesAuthEvents.push({ event, session });
+    });
+
+    const profileBtn = document.getElementById("profileBtn");
+    const profileAuthOverlay = document.getElementById("profileAuthOverlay");
+    const profileAuthTitle = document.getElementById("profileAuthTitle");
+    const profileAuthIntro = document.getElementById("profileAuthIntro");
+    const profileAuthEmailField = document.getElementById("profileAuthEmailField");
+    const profileAuthEmail = document.getElementById("profileAuthEmail");
+    const profileAuthPassword = document.getElementById("profileAuthPassword");
+    const profileAuthPasswordLabel = document.getElementById("profileAuthPasswordLabel");
+    const profileAuthMessage = document.getElementById("profileAuthMessage");
+    const profileSignInBtn = document.getElementById("profileSignInBtn");
+    const profileCreateBtn = document.getElementById("profileCreateBtn");
+    const profileSavePasswordBtn = document.getElementById("profileSavePasswordBtn");
+    const profileForgotPasswordBtn = document.getElementById("profileForgotPasswordBtn");
+    const profileView = document.getElementById("profileView");
+    let profilesSession = null;
+    let profilePasswordRecovery = false;
+
+    function setProfileAuthMessage(message = "", success = false) {
+      profileAuthMessage.textContent = message;
+      profileAuthMessage.classList.toggle("success", success);
+    }
+    function setProfileAuthBusy(busy) {
+      [profileSignInBtn, profileCreateBtn, profileSavePasswordBtn, profileForgotPasswordBtn].forEach(button => button.disabled = busy);
+    }
+    function setProfilePasswordRecoveryMode(recovery) {
+      profilePasswordRecovery = recovery;
+      profileAuthTitle.textContent = recovery ? "Choose New Password" : "LiveStride Profile";
+      profileAuthIntro.textContent = recovery ? "Enter a new password for your LiveStride account." : "Sign in to save completed runs and view your activity history.";
+      profileAuthEmailField.style.display = recovery ? "none" : "block";
+      profileSignInBtn.style.display = recovery ? "none" : "block";
+      profileCreateBtn.style.display = recovery ? "none" : "block";
+      profileSavePasswordBtn.style.display = recovery ? "block" : "none";
+      profileForgotPasswordBtn.style.display = recovery ? "none" : "block";
+      profileAuthPasswordLabel.textContent = recovery ? "New password" : "Password";
+      profileAuthPassword.value = "";
+      profileAuthPassword.autocomplete = recovery ? "new-password" : "current-password";
+    }
+    function openProfileAuth() {
+      profileAuthOverlay.style.display = "flex";
+      profileAuthOverlay.setAttribute("aria-hidden", "false");
+      setTimeout(() => (profilePasswordRecovery ? profileAuthPassword : profileAuthEmail).focus(), 0);
+    }
+    function closeProfileAuth() {
+      profileAuthOverlay.style.display = "none";
+      profileAuthOverlay.setAttribute("aria-hidden", "true");
+      setProfileAuthMessage();
+    }
+    function applyProfilesSession(session) {
+      profilesSession = session || null;
+      profileBtn.classList.toggle("signed-in", Boolean(profilesSession?.user));
+    }
+    function openProfileView() {
+      if (!profilesSession?.user) return openProfileAuth();
+      closeProfileAuth();
+      document.getElementById("profileEmail").textContent = profilesSession.user.email || "LiveStride member";
+      profileView.style.display = "block";
+      profileView.setAttribute("aria-hidden", "false");
+    }
+    async function signInProfile() {
+      const email = profileAuthEmail.value.trim(), password = profileAuthPassword.value;
+      if (!email || !password) return setProfileAuthMessage("Enter both your email and password.");
+      setProfileAuthBusy(true); setProfileAuthMessage("Signing in...");
+      const { data, error } = await profilesSupabaseClient.auth.signInWithPassword({ email, password });
+      setProfileAuthBusy(false);
+      if (error) return setProfileAuthMessage(error.message);
+      applyProfilesSession(data.session); profileAuthPassword.value = ""; openProfileView();
+    }
+    async function createProfileAccount() {
+      const email = profileAuthEmail.value.trim(), password = profileAuthPassword.value;
+      if (!email || password.length < 8) return setProfileAuthMessage("Enter a valid email and a password of at least 8 characters.");
+      setProfileAuthBusy(true); setProfileAuthMessage("Creating account...");
+      const { data, error } = await profilesSupabaseClient.auth.signUp({ email, password, options: { emailRedirectTo: "https://app.livestride.run" } });
+      setProfileAuthBusy(false);
+      if (error) return setProfileAuthMessage(error.message);
+      profileAuthPassword.value = "";
+      if (data.session) { applyProfilesSession(data.session); openProfileView(); }
+      else setProfileAuthMessage("Check your email to confirm your account, then return here to sign in.", true);
+    }
+    async function requestProfilePasswordReset() {
+      const email = profileAuthEmail.value.trim();
+      if (!email || !profileAuthEmail.checkValidity()) return setProfileAuthMessage("Enter a valid email address.");
+      setProfileAuthBusy(true); setProfileAuthMessage("Requesting a password reset...");
+      const { error } = await profilesSupabaseClient.auth.resetPasswordForEmail(email, { redirectTo: "https://app.livestride.run" });
+      setProfileAuthBusy(false);
+      if (error) console.warn("Password reset request failed:", error);
+      setProfileAuthMessage("If that email belongs to a LiveStride account, a password reset link has been sent.", true);
+    }
+    async function saveProfileNewPassword() {
+      const password = profileAuthPassword.value;
+      if (password.length < 8) return setProfileAuthMessage("Use a new password of at least 8 characters.");
+      setProfileAuthBusy(true); setProfileAuthMessage("Saving your new password...");
+      const { error } = await profilesSupabaseClient.auth.updateUser({ password });
+      setProfileAuthBusy(false);
+      if (error) return setProfileAuthMessage("The reset link may have expired. Request a new reset email and try again.");
+      setProfilePasswordRecoveryMode(false);
+      setProfileAuthMessage("Your password has been updated. You are now signed in.", true);
+      history.replaceState(null, document.title, location.pathname + location.search);
+    }
+    async function initializeProfilesAuth() {
+      profilesAuthEventHandler = (event, session) => {
+        applyProfilesSession(session);
+        if (event === "PASSWORD_RECOVERY") {
+          setProfilePasswordRecoveryMode(true);
+          openProfileAuth();
+          history.replaceState(null, document.title, location.pathname + location.search);
+        }
+      };
+      pendingProfilesAuthEvents.splice(0).forEach(({ event, session }) => profilesAuthEventHandler(event, session));
+      const { data, error } = await profilesSupabaseClient.auth.getSession();
+      if (error) console.warn("Profile session restore failed:", error);
+      applyProfilesSession(data?.session || null);
+      if (profilesRecoveryReturnRequested && data?.session?.user) {
+        setProfilePasswordRecoveryMode(true);
+        openProfileAuth();
+        history.replaceState(null, document.title, location.pathname + location.search);
+      }
+      else if (profilesAuthReturnError) {
+        setProfilePasswordRecoveryMode(false); openProfileAuth();
+        setProfileAuthMessage("This password reset link is invalid, expired, or has already been used. Request a new reset email and open only the newest link.");
+        history.replaceState(null, document.title, location.pathname + location.search);
+      }
+    }
+    profileBtn.addEventListener("click", () => profilesSession?.user ? openProfileView() : openProfileAuth());
+    document.getElementById("closeProfileAuthBtn").addEventListener("click", closeProfileAuth);
+    document.getElementById("closeProfileViewBtn").addEventListener("click", () => { profileView.style.display = "none"; });
+    profileSignInBtn.addEventListener("click", signInProfile);
+    profileCreateBtn.addEventListener("click", createProfileAccount);
+    profileForgotPasswordBtn.addEventListener("click", requestProfilePasswordReset);
+    profileSavePasswordBtn.addEventListener("click", saveProfileNewPassword);
+    document.getElementById("profileShowPasswords").addEventListener("change", event => profileAuthPassword.type = event.target.checked ? "text" : "password");
+    profileAuthPassword.addEventListener("keydown", event => { if (event.key === "Enter") profilePasswordRecovery ? saveProfileNewPassword() : signInProfile(); });
+    document.getElementById("profileSignOutBtn").addEventListener("click", async () => { await profilesSupabaseClient.auth.signOut(); applyProfilesSession(null); profileView.style.display = "none"; openProfileAuth(); setProfileAuthMessage("You are signed out.", true); });
+    initializeProfilesAuth();
 
     const ARCGIS_ACCESS_TOKEN = "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv";
 

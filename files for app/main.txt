@@ -22,6 +22,9 @@ const db = firebase.database();
 // Assumes @supabase/supabase-js is loaded globally via <script> before this module.
 const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
+const profilesAuthReturnParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+const profilesRecoveryReturnRequested = profilesAuthReturnParams.get("type") === "recovery";
+const profilesAuthReturnError = profilesAuthReturnParams.get("error_code") || profilesAuthReturnParams.get("error");
 const supabaseClient = window.supabase.createClient(
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
@@ -710,6 +713,16 @@ async function initializeProfilesAuth() {
   const { data, error } = await profilesSupabaseClient.auth.getSession();
   if (error) console.warn("Profile session restore failed:", error);
   applyProfilesSession(data?.session || null);
+
+  if (profilesRecoveryReturnRequested && data?.session?.user) {
+    setProfilePasswordRecoveryMode(true);
+    openProfileAuth();
+  } else if (profilesAuthReturnError) {
+    setProfilePasswordRecoveryMode(false);
+    openProfileAuth();
+    setProfileAuthMessage("This password reset link is invalid, expired, or has already been used. Request a new reset email and open only the newest link.");
+    window.history.replaceState(null, document.title, `${window.location.pathname}${window.location.search}`);
+  }
 }
 
 profileBtn?.addEventListener("click", () => {

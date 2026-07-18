@@ -38,6 +38,213 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       height: 100%;
     }
 
+    #profileBtn {
+      position: absolute;
+      top: calc(10px + var(--top-safe-offset));
+      right: 10px;
+      z-index: 1100;
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      padding: 0;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid rgba(20, 35, 55, 0.22);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    #profileBtn::before,
+    #profileBtn::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #24415f;
+    }
+
+    #profileBtn::before {
+      top: 9px;
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+    }
+
+    #profileBtn::after {
+      bottom: 8px;
+      width: 22px;
+      height: 12px;
+      border-radius: 12px 12px 5px 5px;
+    }
+
+    #profileBtn.signed-in {
+      border-color: #16844b;
+      box-shadow: 0 0 0 2px rgba(22, 132, 75, 0.2), 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    #profileAuthOverlay,
+    #profileView {
+      position: fixed;
+      inset: 0;
+      z-index: 5000;
+      display: none;
+      background: rgba(242, 246, 248, 0.98);
+      color: #15202b;
+      box-sizing: border-box;
+    }
+
+    #profileAuthOverlay {
+      justify-content: flex-end;
+      background: rgba(0, 0, 0, 0.42);
+    }
+
+    #profileAuthPanel {
+      width: min(92vw, 420px);
+      height: 100%;
+      overflow-y: auto;
+      background: #fff;
+      padding: calc(20px + var(--top-safe-offset)) 22px 24px;
+      box-sizing: border-box;
+      box-shadow: -8px 0 28px rgba(0, 0, 0, 0.24);
+    }
+
+    .profile-header,
+    .profile-view-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .profile-header h2,
+    .profile-view-header h1 {
+      margin: 0;
+      letter-spacing: 0;
+    }
+
+    .profile-close-btn {
+      min-width: 42px;
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      background: #e8edf1;
+      color: #15202b;
+      font-size: 25px;
+    }
+
+    #profileAuthIntro {
+      margin: 18px 0;
+      color: #4b5b68;
+      line-height: 1.45;
+    }
+
+    .profile-field {
+      display: block;
+      margin-bottom: 14px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .profile-field input {
+      width: 100%;
+      margin-top: 6px;
+      padding: 12px;
+      border: 1px solid #b8c4ce;
+      border-radius: 6px;
+      box-sizing: border-box;
+      font: inherit;
+    }
+
+    .profile-auth-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .profile-auth-actions button {
+      min-width: 0;
+    }
+
+    #profileCreateBtn {
+      background: #176f45;
+    }
+
+    #profileAuthMessage {
+      min-height: 22px;
+      margin: 14px 0 0;
+      color: #9b2c2c;
+      line-height: 1.4;
+    }
+
+    #profileAuthMessage.success {
+      color: #176f45;
+    }
+
+    #profileView {
+      overflow-y: auto;
+      padding: calc(18px + var(--top-safe-offset)) 18px calc(24px + var(--bottom-safe-offset));
+    }
+
+    .profile-view-inner {
+      width: min(100%, 900px);
+      margin: 0 auto;
+    }
+
+    #profileEmail {
+      margin: 16px 0 20px;
+      color: #52616d;
+      overflow-wrap: anywhere;
+    }
+
+    .profile-tabs {
+      display: flex;
+      border-bottom: 1px solid #cdd6dd;
+      margin-bottom: 18px;
+    }
+
+    .profile-tab {
+      min-width: 0;
+      flex: 1;
+      border-radius: 0;
+      background: transparent;
+      color: #42515d;
+      border-bottom: 3px solid transparent;
+      padding: 11px 6px;
+    }
+
+    .profile-tab.active {
+      color: #075da8;
+      border-bottom-color: #075da8;
+    }
+
+    #profileActivities {
+      display: grid;
+      gap: 10px;
+    }
+
+    .profile-empty,
+    .profile-activity {
+      background: #fff;
+      border: 1px solid #d5dde3;
+      border-radius: 6px;
+      padding: 16px;
+    }
+
+    .profile-activity strong,
+    .profile-activity span {
+      display: block;
+    }
+
+    .profile-activity span {
+      margin-top: 5px;
+      color: #52616d;
+      font-size: 14px;
+    }
+
+    #profileSignOutBtn {
+      margin-top: 22px;
+      background: #5c6675;
+    }
+
 #buttonWrapper {
   position: absolute;
   top: calc(10px + var(--top-safe-offset));
@@ -452,6 +659,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
 </head>
 <body>
   <div id="map"></div>
+  <button id="profileBtn" type="button" aria-label="Open profile" title="Profile"></button>
 
   <div id="buttonWrapper">
     <div id="modeToggle">
@@ -521,6 +729,44 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       <button id="closeExportPageBtn" type="button">Close</button>
     </div>
     <iframe id="exportPageFrame" title="LiveStride GPX Export"></iframe>
+  </div>
+
+  <div id="profileAuthOverlay" aria-hidden="true">
+    <section id="profileAuthPanel" aria-labelledby="profileAuthTitle">
+      <div class="profile-header">
+        <h2 id="profileAuthTitle">LiveStride Profile</h2>
+        <button id="closeProfileAuthBtn" class="profile-close-btn" type="button" aria-label="Close">&times;</button>
+      </div>
+      <p id="profileAuthIntro">Sign in to save completed runs and view your activity history.</p>
+      <label class="profile-field">Email
+        <input id="profileAuthEmail" type="email" autocomplete="email" inputmode="email" />
+      </label>
+      <label class="profile-field">Password
+        <input id="profileAuthPassword" type="password" autocomplete="current-password" minlength="8" />
+      </label>
+      <div class="profile-auth-actions">
+        <button id="profileSignInBtn" type="button">Sign In</button>
+        <button id="profileCreateBtn" type="button">Create Account</button>
+      </div>
+      <p id="profileAuthMessage" role="status"></p>
+    </section>
+  </div>
+
+  <div id="profileView" aria-hidden="true">
+    <div class="profile-view-inner">
+      <div class="profile-view-header">
+        <h1>Profile</h1>
+        <button id="closeProfileViewBtn" class="profile-close-btn" type="button" aria-label="Close">&times;</button>
+      </div>
+      <p id="profileEmail"></p>
+      <div class="profile-tabs" role="tablist" aria-label="Profile sections">
+        <button class="profile-tab active" data-profile-tab="activities" type="button">Activities</button>
+        <button class="profile-tab" data-profile-tab="records" type="button">Records</button>
+        <button class="profile-tab" data-profile-tab="statistics" type="button">Statistics</button>
+      </div>
+      <div id="profileActivities"></div>
+      <button id="profileSignOutBtn" type="button">Sign Out</button>
+    </div>
   </div>
 
   <script src="https://unpkg.com/@capacitor/core@7.3.0"></script>

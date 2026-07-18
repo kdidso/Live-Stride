@@ -1,0 +1,10 @@
+{
+	"appId": "com.kdidso.livestride",
+	"appName": "LiveStride",
+	"webDir": "www",
+	"plugins": {
+		"SplashScreen": {
+			"launchAutoHide": true
+		}
+	}
+}

@@ -432,7 +432,6 @@ const profileAuthOverlay = document.getElementById("profileAuthOverlay");
 const closeProfileAuthBtn = document.getElementById("closeProfileAuthBtn");
 const profileAuthEmail = document.getElementById("profileAuthEmail");
 const profileAuthPassword = document.getElementById("profileAuthPassword");
-const profileAuthPasswordConfirm = document.getElementById("profileAuthPasswordConfirm");
 const profileShowPasswords = document.getElementById("profileShowPasswords");
 const profileSignInBtn = document.getElementById("profileSignInBtn");
 const profileCreateBtn = document.getElementById("profileCreateBtn");
@@ -575,21 +574,14 @@ async function submitProfileSignIn() {
 async function submitProfileCreateAccount() {
   const email = profileAuthEmail?.value.trim() || "";
   const password = profileAuthPassword?.value || "";
-  const passwordConfirm = profileAuthPasswordConfirm?.value || "";
-  if (!email || !password || !passwordConfirm) {
-    setProfileAuthMessage("Enter your email, password, and matching password confirmation.");
+  if (!email || !password) {
+    setProfileAuthMessage("Enter an email and a password of at least 8 characters.");
     return;
   }
   if (password.length < 8) {
     setProfileAuthMessage("Use a password of at least 8 characters.");
     return;
   }
-  if (password !== passwordConfirm) {
-    setProfileAuthMessage("The passwords do not match.");
-    profileAuthPasswordConfirm?.focus();
-    return;
-  }
-
   setProfileAuthBusy(true);
   setProfileAuthMessage("Creating account...");
   const { data, error } = await profilesSupabaseClient.auth.signUp({
@@ -605,7 +597,6 @@ async function submitProfileCreateAccount() {
   }
 
   profileAuthPassword.value = "";
-  profileAuthPasswordConfirm.value = "";
   if (data.session) {
     applyProfilesSession(data.session);
     await openProfileView();
@@ -635,13 +626,9 @@ profileCreateBtn?.addEventListener("click", submitProfileCreateAccount);
 profileAuthPassword?.addEventListener("keydown", event => {
   if (event.key === "Enter") submitProfileSignIn();
 });
-profileAuthPasswordConfirm?.addEventListener("keydown", event => {
-  if (event.key === "Enter") submitProfileCreateAccount();
-});
 profileShowPasswords?.addEventListener("change", () => {
   const type = profileShowPasswords.checked ? "text" : "password";
   if (profileAuthPassword) profileAuthPassword.type = type;
-  if (profileAuthPasswordConfirm) profileAuthPasswordConfirm.type = type;
 });
 profileSignOutBtn?.addEventListener("click", async () => {
   await profilesSupabaseClient.auth.signOut();

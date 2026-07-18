@@ -689,6 +689,13 @@ async function submitProfileNewPassword() {
   setProfileAuthBusy(false);
 
   if (error) {
+    const samePassword = error.code === "same_password"
+      || /same password|different from (the )?(old|current) password/i.test(error.message || "");
+    if (samePassword) {
+      setProfilePasswordRecoveryMode(false);
+      setProfileAuthMessage("Your password is ready to use. You are now signed in.", true);
+      return;
+    }
     setProfileAuthMessage("The reset link may have expired. Request a new password reset email and try again.");
     return;
   }

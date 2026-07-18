@@ -599,9 +599,15 @@
       setProfileAuthBusy(true); setProfileAuthMessage("Saving your new password...");
       const { error } = await profilesSupabaseClient.auth.updateUser({ password });
       setProfileAuthBusy(false);
-      if (error) return setProfileAuthMessage("The reset link may have expired. Request a new reset email and try again.");
+      if (error) {
+        const samePassword = error.code === "same_password"
+          || /same password|different from (the )?(old|current) password/i.test(error.message || "");
+        if (!samePassword) {
+          return setProfileAuthMessage("The reset link may have expired. Request a new reset email and try again.");
+        }
+      }
       setProfilePasswordRecoveryMode(false);
-      setProfileAuthMessage("Your password has been updated. You are now signed in.", true);
+      setProfileAuthMessage(error ? "Your password is ready to use. You are now signed in." : "Your password has been updated. You are now signed in.", true);
       history.replaceState(null, document.title, location.pathname + location.search);
     }
     async function initializeProfilesAuth() {

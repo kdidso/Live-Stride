@@ -24,11 +24,20 @@ const SUPABASE_URL = "https://liczyibicdyvlpfiwyhc.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpY3p5aWJpY2R5dmxwZml3eWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDc5MTgsImV4cCI6MjA5Mjk4MzkxOH0.A3EV_DV9kGR5F0iKAzq8f1ZewETDMkfbN0p8hCit0rQ";
 const supabaseClient = window.supabase.createClient(
   SUPABASE_URL,
-  SUPABASE_ANON_KEY
+  SUPABASE_ANON_KEY,
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false
+    }
+  }
 );
 
 const PROFILES_SUPABASE_URL = "https://noceaxqvgtsrygmpzqmt.supabase.co";
 const PROFILES_SUPABASE_KEY = "sb_publishable_fY_QIxQrkdxSveJTs_Wx3g_aUBTE9Lh";
+const pendingProfilesAuthEvents = [];
+let profilesAuthEventHandler = null;
 const profilesSupabaseClient = window.supabase.createClient(
   PROFILES_SUPABASE_URL,
   PROFILES_SUPABASE_KEY,
@@ -41,6 +50,13 @@ const profilesSupabaseClient = window.supabase.createClient(
     }
   }
 );
+profilesSupabaseClient.auth.onAuthStateChange((event, session) => {
+  if (profilesAuthEventHandler) {
+    profilesAuthEventHandler(event, session);
+    return;
+  }
+  pendingProfilesAuthEvents.push({ event, session });
+});
 
 const ARCGIS_ACCESS_TOKEN = "AAPTa6e-VHCpyaJQSVWWFBCOJeg..-kkDAZUlISWNULSNF-s-scZHXrf3n2pwYlWCOOhke9j41vJ12917wf3Dh4L3k6zpyCh1Wu-5LoBroQjO_GQLskgjl2Ei4mYqDPk4v6DqyASw19PSFLbHEjk_V78G4C-l96txQzVwI50Eis9PWHiDrfc0TX504gbYrLNQW8odg_8xBIve9DMjfnzg2YxsRwvJHo3Ue5IdsV8Jx78C0Z8fCi9CBbJSmgihRn9kDiSq7zIN8NLF90q7qw..AT1_Qjw2SOCv";
 
@@ -679,12 +695,16 @@ async function submitProfileNewPassword() {
 }
 
 async function initializeProfilesAuth() {
-  profilesSupabaseClient.auth.onAuthStateChange((event, session) => {
+  profilesAuthEventHandler = (event, session) => {
     applyProfilesSession(session);
     if (event === "PASSWORD_RECOVERY") {
       setProfilePasswordRecoveryMode(true);
       openProfileAuth();
     }
+  };
+
+  pendingProfilesAuthEvents.splice(0).forEach(({ event, session }) => {
+    profilesAuthEventHandler(event, session);
   });
 
   const { data, error } = await profilesSupabaseClient.auth.getSession();

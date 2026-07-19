@@ -730,6 +730,16 @@ function formatProfileActivity(run) {
   const date = document.createElement("span");
   date.className = "profile-activity-date";
   date.textContent = started.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const deleteButton = document.createElement("button");
+  deleteButton.className = "profile-activity-delete";
+  deleteButton.type = "button";
+  deleteButton.textContent = "Delete";
+  deleteButton.setAttribute("aria-label", `Delete ${run.title || "saved activity"}`);
+  deleteButton.addEventListener("click", event => {
+    event.stopPropagation();
+    deleteProfileActivity(run, deleteButton);
+  });
+  deleteButton.addEventListener("keydown", event => event.stopPropagation());
   const title = document.createElement("strong");
   title.className = "profile-activity-title";
   title.textContent = run.title || started.toLocaleString();
@@ -746,7 +756,7 @@ function formatProfileActivity(run) {
   const route = document.createElement("div");
   route.className = "profile-route-preview";
   route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
-  item.append(date, title, source, stats, route);
+  item.append(date, deleteButton, title, source, stats, route);
   item._profileRun = run;
   const open = () => openProfileActivityDetail(run);
   item.addEventListener("click", open);
@@ -757,6 +767,28 @@ function formatProfileActivity(run) {
     }
   });
   return item;
+}
+
+async function deleteProfileActivity(run, button) {
+  if (!profilesSession?.user || !run?.id) return;
+  if (!window.confirm("Are you sure you want to delete this run?")) return;
+
+  button.disabled = true;
+  button.textContent = "Deleting...";
+  try {
+    const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
+      body: { action: "delete-run", savedRunId: run.id }
+    });
+    if (error) throw error;
+    if (!data?.deleted) throw new Error(data?.error || "The run could not be deleted.");
+    profileRouteCache.delete(run.id);
+    await loadProfileActivities();
+  } catch (error) {
+    console.warn("Profile activity deletion failed:", error);
+    button.disabled = false;
+    button.textContent = "Delete";
+    alert(`Run deletion failed: ${error?.message || "Please try again."}`);
+  }
 }
 
 async function openProfileActivityDetail(run) {

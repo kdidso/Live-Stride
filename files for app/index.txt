@@ -264,9 +264,37 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     .profile-activity {
+      position: relative;
       cursor: pointer;
       overflow: hidden;
       transition: border-color .18s ease, box-shadow .18s ease;
+    }
+
+    .profile-activity-delete {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: auto;
+      min-width: 0;
+      padding: 7px 10px;
+      border: 1px solid #c8d1d8;
+      border-radius: 4px;
+      background: #fff;
+      color: #9b2f2f;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .profile-activity-delete:hover,
+    .profile-activity-delete:focus-visible {
+      border-color: #b54a4a;
+      background: #fff5f5;
+      outline: none;
+    }
+
+    .profile-activity-delete:disabled {
+      opacity: .65;
+      cursor: wait;
     }
 
     .profile-activity:hover,
@@ -288,6 +316,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     .profile-activity-date {
+      padding-right: 72px;
       color: #667783 !important;
       font-size: 13px !important;
     }

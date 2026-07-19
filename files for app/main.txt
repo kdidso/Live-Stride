@@ -560,10 +560,21 @@ async function loadProfileRoute(runId) {
     const xml = new DOMParser().parseFromString(data.gpx, "application/xml");
     if (xml.querySelector("parsererror")) throw new Error("The saved route could not be read.");
     const points = Array.from(xml.querySelectorAll("trkpt"))
-      .map(point => ({ lat: Number(point.getAttribute("lat")), lon: Number(point.getAttribute("lon")) }))
+      .map(point => {
+        const elevationText = point.querySelector("ele")?.textContent;
+        const timeText = point.querySelector("time")?.textContent;
+        const elevation = elevationText == null ? null : Number(elevationText);
+        const time = timeText ? Date.parse(timeText) : null;
+        return {
+          lat: Number(point.getAttribute("lat")),
+          lon: Number(point.getAttribute("lon")),
+          elevation: Number.isFinite(elevation) ? elevation : null,
+          time: Number.isFinite(time) ? time : null
+        };
+      })
       .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
     if (points.length < 2) throw new Error("This activity has too few route points.");
-    return points;
+    return { points, analysis: analyzeProfilePoints(points) };
   })();
   profileRouteCache.set(runId, request);
   try {
@@ -572,6 +583,57 @@ async function loadProfileRoute(runId) {
     profileRouteCache.delete(runId);
     throw error;
   }
+}
+
+function analyzeProfilePoints(points) {
+  const elevations = points.map(point => point.elevation).filter(Number.isFinite);
+  let elevationGainM = null;
+  let elevationLossM = null;
+  let minElevationM = null;
+  let maxElevationM = null;
+
+  if (elevations.length >= 2) {
+    const smoothed = elevations.map((_, index) => {
+      const start = Math.max(0, index - 2);
+      const end = Math.min(elevations.length, index + 3);
+      const window = elevations.slice(start, end);
+      return window.reduce((sum, value) => sum + value, 0) / window.length;
+    });
+    minElevationM = Math.min(...smoothed);
+    maxElevationM = Math.max(...smoothed);
+    elevationGainM = 0;
+    elevationLossM = 0;
+    let anchor = smoothed[0];
+    for (let index = 1; index < smoothed.length; index += 1) {
+      const difference = smoothed[index] - anchor;
+      if (difference >= 1) {
+        elevationGainM += difference;
+        anchor = smoothed[index];
+      } else if (difference <= -1) {
+        elevationLossM += -difference;
+        anchor = smoothed[index];
+      }
+    }
+  }
+
+  let movingTimeMs = 0;
+  let timedSegments = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    if (!Number.isFinite(points[index - 1].time) || !Number.isFinite(points[index].time)) continue;
+    const difference = points[index].time - points[index - 1].time;
+    if (difference > 0) {
+      movingTimeMs += Math.min(difference, 1000);
+      timedSegments += 1;
+    }
+  }
+
+  return {
+    elevationGainM,
+    elevationLossM,
+    minElevationM,
+    maxElevationM,
+    movingTimeMs: timedSegments ? movingTimeMs : null
+  };
 }
 
 function createProfileRouteSvg(points, detailed = false) {
@@ -625,12 +687,14 @@ function createProfileRouteSvg(points, detailed = false) {
 
 async function hydrateProfileRoute(container, run, detailed = false) {
   try {
-    const points = await loadProfileRoute(run.id);
-    container.replaceChildren(createProfileRouteSvg(points, detailed));
+    const routeData = await loadProfileRoute(run.id);
+    container.replaceChildren(createProfileRouteSvg(routeData.points, detailed));
+    return routeData;
   } catch (error) {
     container.textContent = "Route preview unavailable";
     container.classList.add("route-unavailable");
     console.warn("Profile route load failed:", error);
+    return null;
   }
 }
 
@@ -706,17 +770,32 @@ async function openProfileActivityDetail(run) {
   const stats = document.createElement("div");
   stats.className = "profile-detail-stats";
   const miles = Number(run.distance_m || 0) / 1609.344;
-  stats.append(
-    createProfileStat("Distance", `${miles.toFixed(2)} mi`),
-    createProfileStat("Average pace", formatProfilePace(run)),
-    createProfileStat("Elapsed time", formatProfileDuration(run.elapsed_time_ms)),
-    createProfileStat("Moving time", run.moving_time_ms ? formatProfileDuration(run.moving_time_ms) : "--"),
-    createProfileStat("Elevation gain", Number.isFinite(Number(run.elevation_gain_m)) ? `${Math.round(Number(run.elevation_gain_m) * 3.28084)} ft` : "--"),
-    createProfileStat("Average cadence", Number.isFinite(Number(run.avg_cadence_spm)) ? `${Math.round(run.avg_cadence_spm)} spm` : "--")
-  );
+  const distanceStat = createProfileStat("Distance", `${miles.toFixed(2)} mi`);
+  const paceStat = createProfileStat("Average pace", formatProfilePace(run));
+  const elapsedStat = createProfileStat("Elapsed time", formatProfileDuration(run.elapsed_time_ms));
+  const movingStat = createProfileStat("Moving time", run.moving_time_ms ? formatProfileDuration(run.moving_time_ms) : "Calculating...");
+  const hasStoredGain = run.elevation_gain_m != null && Number.isFinite(Number(run.elevation_gain_m));
+  const gainStat = createProfileStat("Elevation gain", hasStoredGain ? `${Math.round(Number(run.elevation_gain_m) * 3.28084)} ft` : "Calculating...");
+  const hasCadence = run.avg_cadence_spm != null && Number.isFinite(Number(run.avg_cadence_spm)) && Number(run.avg_cadence_spm) > 0;
+  const cadenceStat = createProfileStat("Average cadence", hasCadence ? `${Math.round(run.avg_cadence_spm)} spm` : "--");
+  stats.append(distanceStat, paceStat, elapsedStat, movingStat, gainStat, cadenceStat);
   detail.append(heading, subtitle, route, stats);
   profileActivities.append(back, detail);
-  await hydrateProfileRoute(route, run, true);
+  const routeData = await hydrateProfileRoute(route, run, true);
+  if (routeData) {
+    const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
+    movingStat.querySelector("strong").textContent = movingTimeMs ? formatProfileDuration(movingTimeMs) : "--";
+    const elevationGainM = hasStoredGain ? Number(run.elevation_gain_m) : routeData.analysis.elevationGainM;
+    gainStat.querySelector("strong").textContent = Number.isFinite(elevationGainM)
+      ? `${Math.round(elevationGainM * 3.28084)} ft`
+      : "--";
+    if (movingTimeMs && miles > 0) {
+      const movingSecondsPerMile = movingTimeMs / 1000 / miles;
+      const rounded = Math.round(movingSecondsPerMile);
+      const movingPace = createProfileStat("Moving pace", `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")} /mi`);
+      stats.append(movingPace);
+    }
+  }
 }
 
 async function loadProfileActivities() {

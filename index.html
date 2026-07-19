@@ -603,7 +603,15 @@
       if (browserProfileRouteCache.has(runId)) return browserProfileRouteCache.get(runId);
       const request = (async () => {
         const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", { body: { action: "get-gpx", savedRunId: runId } });
-        if (error || !data?.gpx) throw error || new Error(data?.error || "Route unavailable");
+        if (error) {
+          let message = error.message || "Route unavailable";
+          try {
+            const details = await error.context?.clone?.().json();
+            if (details?.error) message = details.error;
+          } catch (_) {}
+          throw new Error(message);
+        }
+        if (!data?.gpx) throw new Error(data?.error || "Route unavailable");
         const xml = new DOMParser().parseFromString(data.gpx, "application/xml");
         const points = Array.from(xml.querySelectorAll("trkpt")).map(point => {
           const elevationText = point.querySelector("ele")?.textContent;

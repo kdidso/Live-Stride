@@ -3358,6 +3358,7 @@ function buildSavedRunMetadata(runData, source, overrides = {}) {
   const startedAtMs = Number(runData?.startTime || first.timestamp || Date.now());
   const finishedAtMs = Number(last.timestamp || runData?.lastUpdated || startedAtMs);
   const distanceM = Number(last.distanceM ?? (Number(runData?.totalDistanceMiles || 0) * 1609.344));
+  const avgPaceMinPerMile = Number(last.avgPace);
   const lats = points.map(point => Number(point.lat)).filter(Number.isFinite);
   const lons = points.map(point => Number(point.lon)).filter(Number.isFinite);
   const sourceRunId = overrides.sourceRunId || runData?.runId || null;
@@ -3370,15 +3371,17 @@ function buildSavedRunMetadata(runData, source, overrides = {}) {
     finished_at: new Date(Math.max(startedAtMs, finishedAtMs)).toISOString(),
     elapsed_time_ms: Math.max(0, finishedAtMs - startedAtMs),
     distance_m: Number.isFinite(distanceM) ? Math.max(0, distanceM) : 0,
-    avg_pace_min_per_mile: Number.isFinite(Number(last.avgPace)) ? Number(last.avgPace) : null,
+    avg_pace_sec_per_km: Number.isFinite(avgPaceMinPerMile) && avgPaceMinPerMile > 0
+      ? (avgPaceMinPerMile * 60) / 1.609344
+      : null,
     start_lat: Number.isFinite(Number(first.lat)) ? Number(first.lat) : null,
     start_lon: Number.isFinite(Number(first.lon)) ? Number(first.lon) : null,
     end_lat: Number.isFinite(Number(last.lat)) ? Number(last.lat) : null,
     end_lon: Number.isFinite(Number(last.lon)) ? Number(last.lon) : null,
-    bounds_min_lat: lats.length ? Math.min(...lats) : null,
-    bounds_min_lon: lons.length ? Math.min(...lons) : null,
-    bounds_max_lat: lats.length ? Math.max(...lats) : null,
-    bounds_max_lon: lons.length ? Math.max(...lons) : null,
+    bounds_west: lons.length ? Math.min(...lons) : null,
+    bounds_south: lats.length ? Math.min(...lats) : null,
+    bounds_east: lons.length ? Math.max(...lons) : null,
+    bounds_north: lats.length ? Math.max(...lats) : null,
     point_count: points.length || Number(overrides.pointCount || 0)
   };
 }

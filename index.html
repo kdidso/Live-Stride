@@ -105,9 +105,13 @@
     .profile-tab.active { color: #075da8; border-bottom-color: #075da8; }
     #profileActivities { display: grid; gap: 18px; color: #52616d; }
     .profile-empty, .profile-activity, .profile-activity-detail { background: #fff; border: 1px solid #d6dee4; border-radius: 6px; padding: 16px; }
-    .profile-activity { cursor: pointer; overflow: hidden; text-align: left; }
+    .profile-activity { position: relative; cursor: pointer; overflow: hidden; text-align: left; }
+    .profile-activity-delete { position: absolute; top: 12px; right: 12px; width: auto; min-width: 0; padding: 7px 10px; border: 1px solid #c8d1d8; border-radius: 4px; background: #fff; color: #9b2f2f; font-size: 13px; font-weight: 600; }
+    .profile-activity-delete:hover, .profile-activity-delete:focus-visible { border-color: #b54a4a; background: #fff5f5; outline: none; }
+    .profile-activity-delete:disabled { opacity: .65; cursor: wait; }
     .profile-activity:hover, .profile-activity:focus-visible { border-color: #8fa9ba; box-shadow: 0 8px 22px rgba(31,52,66,.12); outline: none; }
     .profile-activity-date, .profile-activity-source { display: block; color: #667783; font-size: 13px; }
+    .profile-activity-date { padding-right: 72px; }
     .profile-activity-title { display: block; margin-top: 7px; color: #17262f; font-size: 21px; }
     .profile-activity-source { margin-top: 5px; font-size: 14px; }
     .profile-activity-stats, .profile-detail-stats { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); margin: 15px 0; }
@@ -701,13 +705,27 @@
     function browserProfileActivity(run) {
       const item = document.createElement("article"); item.className = "profile-activity"; item.tabIndex = 0; item.setAttribute("role", "button");
       const date = document.createElement("span"); date.className = "profile-activity-date"; date.textContent = new Date(run.started_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+      const deleteButton = document.createElement("button"); deleteButton.className = "profile-activity-delete"; deleteButton.type = "button"; deleteButton.textContent = "Delete"; deleteButton.setAttribute("aria-label", `Delete ${run.title || "saved activity"}`); deleteButton.addEventListener("click", event => { event.stopPropagation(); deleteBrowserProfileActivity(run, deleteButton); }); deleteButton.addEventListener("keydown", event => event.stopPropagation());
       const title = document.createElement("strong"); title.className = "profile-activity-title"; title.textContent = run.title || "Saved Run";
       const source = document.createElement("span"); source.className = "profile-activity-source"; source.textContent = run.source === "private" ? "Private run" : "Broadcast run";
       const stats = document.createElement("div"); stats.className = "profile-activity-stats"; const miles = Number(run.distance_m || 0) / 1609.344;
       stats.append(profileStat("Distance", `${miles.toFixed(2)} mi`), profileStat("Pace", profilePace(run)), profileStat("Time", profileDuration(run.elapsed_time_ms)));
       const route = document.createElement("div"); route.className = "profile-route-preview"; route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
-      item.append(date, title, source, stats, route); item._profileRun = run;
+      item.append(date, deleteButton, title, source, stats, route); item._profileRun = run;
       const open = () => openBrowserProfileDetail(run); item.addEventListener("click", open); item.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } }); return item;
+    }
+    async function deleteBrowserProfileActivity(run, button) {
+      if (!profilesSession?.user || !run?.id || !window.confirm("Are you sure you want to delete this run?")) return;
+      button.disabled = true; button.textContent = "Deleting...";
+      try {
+        const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", { body: { action: "delete-run", savedRunId: run.id } });
+        if (error) throw error;
+        if (!data?.deleted) throw new Error(data?.error || "The run could not be deleted.");
+        browserProfileRouteCache.delete(run.id);
+        await loadBrowserProfileActivities();
+      } catch (error) {
+        console.warn("Profile activity deletion failed:", error); button.disabled = false; button.textContent = "Delete"; alert(`Run deletion failed: ${error?.message || "Please try again."}`);
+      }
     }
     async function loadBrowserProfileActivities() {
       profileActivities.innerHTML = '<div class="profile-empty">Loading activities...</div>';

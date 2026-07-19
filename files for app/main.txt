@@ -918,6 +918,34 @@ async function handleExportPageMessage(event) {
         message: err?.message || String(err)
       });
     }
+  } else if (data.type === "saveToProfile") {
+    try {
+      const run = data.run || {};
+      const startedAt = run.started_at || new Date().toISOString();
+      const finishedAt = run.finished_at || startedAt;
+      const metadata = {
+        source: "broadcast",
+        source_run_id: isUuid(run.id) ? run.id : null,
+        title: `${run.runner_name || "LiveStride"} - ${new Date(startedAt).toLocaleString()}`,
+        started_at: new Date(startedAt).toISOString(),
+        finished_at: new Date(finishedAt).toISOString(),
+        elapsed_time_ms: Math.max(0, new Date(finishedAt).getTime() - new Date(startedAt).getTime()),
+        distance_m: Math.max(0, Number(run.total_distance_m || 0)),
+        start_lat: Number.isFinite(Number(data.startLat)) ? Number(data.startLat) : null,
+        start_lon: Number.isFinite(Number(data.startLon)) ? Number(data.startLon) : null,
+        end_lat: Number.isFinite(Number(run.latest_lat)) ? Number(run.latest_lat) : null,
+        end_lon: Number.isFinite(Number(run.latest_lon)) ? Number(run.latest_lon) : null,
+        point_count: Math.max(0, Number(data.pointCount || 0))
+      };
+      await saveGpxToProfile(String(data.content || ""), metadata);
+      replyToExportPage({ type: "saveToProfileResult", ok: true });
+    } catch (err) {
+      replyToExportPage({
+        type: "saveToProfileResult",
+        ok: false,
+        message: err?.message || String(err)
+      });
+    }
   } else if (data.type === "openExternal" || data.type === "openInPanel") {
     const url = String(data.url || "");
     if (url.startsWith("https://www.strava.com/") || url.startsWith("https://strava.com/")) {
@@ -3319,6 +3347,94 @@ async function shareGpx(filename, gpx, text = "Share your LiveStride GPX file.")
   }
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function buildSavedRunMetadata(runData, source, overrides = {}) {
+  const points = Array.isArray(runData?.pathCoords) ? runData.pathCoords : [];
+  const first = points[0] || {};
+  const last = points[points.length - 1] || {};
+  const startedAtMs = Number(runData?.startTime || first.timestamp || Date.now());
+  const finishedAtMs = Number(last.timestamp || runData?.lastUpdated || startedAtMs);
+  const distanceM = Number(last.distanceM ?? (Number(runData?.totalDistanceMiles || 0) * 1609.344));
+  const lats = points.map(point => Number(point.lat)).filter(Number.isFinite);
+  const lons = points.map(point => Number(point.lon)).filter(Number.isFinite);
+  const sourceRunId = overrides.sourceRunId || runData?.runId || null;
+
+  return {
+    source,
+    source_run_id: isUuid(sourceRunId) ? sourceRunId : null,
+    title: overrides.title || `LiveStride Run ${new Date(startedAtMs).toLocaleString()}`,
+    started_at: new Date(startedAtMs).toISOString(),
+    finished_at: new Date(Math.max(startedAtMs, finishedAtMs)).toISOString(),
+    elapsed_time_ms: Math.max(0, finishedAtMs - startedAtMs),
+    distance_m: Number.isFinite(distanceM) ? Math.max(0, distanceM) : 0,
+    avg_pace_min_per_mile: Number.isFinite(Number(last.avgPace)) ? Number(last.avgPace) : null,
+    start_lat: Number.isFinite(Number(first.lat)) ? Number(first.lat) : null,
+    start_lon: Number.isFinite(Number(first.lon)) ? Number(first.lon) : null,
+    end_lat: Number.isFinite(Number(last.lat)) ? Number(last.lat) : null,
+    end_lon: Number.isFinite(Number(last.lon)) ? Number(last.lon) : null,
+    bounds_min_lat: lats.length ? Math.min(...lats) : null,
+    bounds_min_lon: lons.length ? Math.min(...lons) : null,
+    bounds_max_lat: lats.length ? Math.max(...lats) : null,
+    bounds_max_lon: lons.length ? Math.max(...lons) : null,
+    point_count: points.length || Number(overrides.pointCount || 0)
+  };
+}
+
+async function requireProfilesSession() {
+  const { data, error } = await profilesSupabaseClient.auth.getSession();
+  if (error) throw error;
+  applyProfilesSession(data?.session || null);
+  if (!data?.session?.user) {
+    openProfileAuth();
+    throw new Error("Sign in to your LiveStride Profile before saving this run.");
+  }
+  return data.session;
+}
+
+async function saveGpxToProfile(gpx, metadata) {
+  if (!gpx || !metadata) throw new Error("This run could not be prepared for your profile.");
+  const session = await requireProfilesSession();
+  const insertPayload = {
+    ...metadata,
+    user_id: session.user.id,
+    archive_status: "pending"
+  };
+  const { data: savedRun, error: insertError } = await profilesSupabaseClient
+    .from("saved_runs")
+    .insert(insertPayload)
+    .select("id")
+    .single();
+  if (insertError) throw insertError;
+
+  const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
+    body: {
+      action: "upload-gpx",
+      savedRunId: savedRun.id,
+      gpx
+    }
+  });
+  if (error || !data?.ready) {
+    await profilesSupabaseClient
+      .from("saved_runs")
+      .update({ archive_status: "failed" })
+      .eq("id", savedRun.id);
+    throw error || new Error(data?.error || "The run archive could not be completed.");
+  }
+
+  await loadProfileActivities();
+  return savedRun.id;
+}
+
+async function savePrivateRunToProfile(runId) {
+  const runData = await getPrivateRunDataById(runId);
+  const metadata = buildSavedRunMetadata(runData, "private", { sourceRunId: runId });
+  await saveGpxToProfile(convertToGpx(runData), metadata);
+  alert("Run saved to your LiveStride Profile.");
+}
+
 async function getPrivateRunDataById(runId) {
   if (!LiveStrideNativeTracker?.getNativeRunSnapshot || !runId) {
     throw new Error("No local run is available.");
@@ -3520,6 +3636,11 @@ async function chooseAndExportLocalRun() {
       label: "Share GPX",
       description: "Send the GPX file to another app without saving to Downloads.",
       value: "share"
+    },
+    {
+      label: "Save to Profile",
+      description: "Securely save this run to your signed-in LiveStride Profile.",
+      value: "profile"
     }
   ]);
   if (!action) return;
@@ -3530,6 +3651,12 @@ async function chooseAndExportLocalRun() {
     await downloadPrivateRunById(selectedRunId);
   } else if (action === "share") {
     await sharePrivateRunById(selectedRunId);
+  } else if (action === "profile") {
+    try {
+      await savePrivateRunToProfile(selectedRunId);
+    } catch (err) {
+      if (profilesSession?.user) alert(`Profile save failed:\n${err?.message || err}`);
+    }
   }
 }
 

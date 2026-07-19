@@ -1010,6 +1010,36 @@
       window.open(url, "_blank");
     }
 
+    function isUuid(value) {
+      return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+    }
+
+    async function saveGpxToProfile(gpx, metadata) {
+      const { data: sessionData, error: sessionError } = await profilesSupabaseClient.auth.getSession();
+      if (sessionError) throw sessionError;
+      applyProfilesSession(sessionData?.session || null);
+      if (!sessionData?.session?.user) {
+        openProfileAuth();
+        throw new Error("Sign in to your LiveStride Profile before saving this run.");
+      }
+
+      const { data: savedRun, error: insertError } = await profilesSupabaseClient
+        .from("saved_runs")
+        .insert({ ...metadata, user_id: sessionData.session.user.id, archive_status: "pending" })
+        .select("id")
+        .single();
+      if (insertError) throw insertError;
+
+      const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
+        body: { action: "upload-gpx", savedRunId: savedRun.id, gpx }
+      });
+      if (error || !data?.ready) {
+        await profilesSupabaseClient.from("saved_runs").update({ archive_status: "failed" }).eq("id", savedRun.id);
+        throw error || new Error(data?.error || "The run archive could not be completed.");
+      }
+      return savedRun.id;
+    }
+
     function handleExportPageMessage(event) {
       if (event.origin !== "https://kdidso.github.io") return;
 
@@ -1055,6 +1085,31 @@
             message: err?.message || String(err)
           });
         }
+      } else if (data.type === "saveToProfile") {
+        const saveBroadcastRun = async () => {
+          const run = data.run || {};
+          const startedAt = run.started_at || new Date().toISOString();
+          const finishedAt = run.finished_at || startedAt;
+          await saveGpxToProfile(String(data.content || ""), {
+            source: "broadcast",
+            source_run_id: isUuid(run.id) ? run.id : null,
+            title: `${run.runner_name || "LiveStride"} - ${new Date(startedAt).toLocaleString()}`,
+            started_at: new Date(startedAt).toISOString(),
+            finished_at: new Date(finishedAt).toISOString(),
+            elapsed_time_ms: Math.max(0, new Date(finishedAt).getTime() - new Date(startedAt).getTime()),
+            distance_m: Math.max(0, Number(run.total_distance_m || 0)),
+            start_lat: Number.isFinite(Number(data.startLat)) ? Number(data.startLat) : null,
+            start_lon: Number.isFinite(Number(data.startLon)) ? Number(data.startLon) : null,
+            end_lat: Number.isFinite(Number(run.latest_lat)) ? Number(run.latest_lat) : null,
+            end_lon: Number.isFinite(Number(run.latest_lon)) ? Number(run.latest_lon) : null,
+            point_count: Math.max(0, Number(data.pointCount || 0))
+          });
+        };
+        saveBroadcastRun().then(() => {
+          replyToExportPage({ type: "saveToProfileResult", ok: true });
+        }).catch(err => {
+          replyToExportPage({ type: "saveToProfileResult", ok: false, message: err?.message || String(err) });
+        });
       } else if (data.type === "openExternal" || data.type === "openInPanel") {
         const url = String(data.url || "");
         if (url.startsWith("https://www.strava.com/") || url.startsWith("https://strava.com/")) {

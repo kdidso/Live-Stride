@@ -3527,6 +3527,34 @@ async function savePrivateRunToFile() {
   }
 }
 
+async function fillMissingPrivateRunElevations(runData) {
+  const points = Array.isArray(runData?.pathCoords) ? runData.pathCoords : [];
+  const missing = points.filter(point => {
+    const elevation = Number(point.elevation);
+    return point.elevation == null || !Number.isFinite(elevation) || elevation === 0;
+  });
+
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(4, missing.length) }, async () => {
+    while (nextIndex < missing.length) {
+      const point = missing[nextIndex++];
+      point.elevation = null;
+      point.elevationFt = null;
+      try {
+        const elevation = await fetchElevation(point.lat, point.lon);
+        if (elevation != null && Number.isFinite(Number(elevation))) {
+          point.elevation = Number(elevation);
+          point.elevationFt = Number(elevation) * 3.28084;
+        }
+      } catch (error) {
+        console.warn("Could not fill a private GPX elevation:", error);
+      }
+    }
+  });
+  await Promise.all(workers);
+  return runData;
+}
+
 function convertToGpx(runData) {
   const runDate = runData.startTime
     ? new Date(runData.startTime).toISOString().slice(0, 10)
@@ -3543,11 +3571,13 @@ function convertToGpx(runData) {
 `;
 
   runData.pathCoords.forEach(pt => {
-    const ele = pt.elevation != null ? pt.elevation : 0;
+    const elevation = Number(pt.elevation);
+    const elevationLine = pt.elevation != null && Number.isFinite(elevation)
+      ? `        <ele>${elevation}</ele>\n`
+      : "";
     const time = pt.time || new Date(pt.timestamp).toISOString();
     gpx += `      <trkpt lat="${pt.lat}" lon="${pt.lon}">
-        <ele>${ele}</ele>
-        <time>${time}</time>
+${elevationLine}        <time>${time}</time>
       </trkpt>
 `;
   });
@@ -3706,6 +3736,7 @@ async function saveGpxToProfile(gpx, metadata) {
 
 async function savePrivateRunToProfile(runId) {
   const runData = await getPrivateRunDataById(runId);
+  await fillMissingPrivateRunElevations(runData);
   const metadata = buildSavedRunMetadata(runData, "private", { sourceRunId: runId });
   await saveGpxToProfile(convertToGpx(runData), metadata);
   alert("Run saved to your LiveStride Profile.");
@@ -3747,12 +3778,14 @@ async function getPrivateRunDataById(runId) {
 
 async function downloadPrivateRunById(runId) {
   const runData = await getPrivateRunDataById(runId);
+  await fillMissingPrivateRunElevations(runData);
   await saveGpxToDownloads(privateRunFilename(runData), convertToGpx(runData));
   alert("GPX saved to Downloads.");
 }
 
 async function sharePrivateRunById(runId) {
   const runData = await getPrivateRunDataById(runId);
+  await fillMissingPrivateRunElevations(runData);
   await shareGpx(
     privateRunFilename(runData),
     convertToGpx(runData),
@@ -4572,6 +4605,7 @@ exportGpxBtn.onclick = async () => {
     if (!action) return;
 
     const runData = await getCurrentPrivateRunData();
+    await fillMissingPrivateRunElevations(runData);
     const filename = privateRunFilename(runData);
     const gpx = convertToGpx(runData);
 

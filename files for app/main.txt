@@ -526,26 +526,197 @@ function closeProfileView() {
   profileView.setAttribute("aria-hidden", "true");
 }
 
-function formatProfileActivity(run) {
-  const started = new Date(run.started_at);
-  const miles = Number(run.distance_m || 0) / 1609.344;
-  const elapsedMs = Number(run.elapsed_time_ms || 0);
-  const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+const profileRouteCache = new Map();
+let profileRouteObserver = null;
+
+function formatProfileDuration(elapsedMs) {
+  const totalSeconds = Math.max(0, Math.round(Number(elapsedMs || 0) / 1000));
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  const duration = hours > 0
+  return hours > 0
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
     : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
 
+function formatProfilePace(run) {
+  let secondsPerMile = Number(run.avg_pace_sec_per_km) * 1.609344;
+  if (!Number.isFinite(secondsPerMile) || secondsPerMile <= 0) {
+    const miles = Number(run.distance_m || 0) / 1609.344;
+    secondsPerMile = miles > 0 ? Number(run.elapsed_time_ms || 0) / 1000 / miles : 0;
+  }
+  if (!Number.isFinite(secondsPerMile) || secondsPerMile <= 0) return "--";
+  const rounded = Math.round(secondsPerMile);
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")} /mi`;
+}
+
+async function loadProfileRoute(runId) {
+  if (profileRouteCache.has(runId)) return profileRouteCache.get(runId);
+  const request = (async () => {
+    const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
+      body: { action: "get-gpx", savedRunId: runId }
+    });
+    if (error || !data?.gpx) throw error || new Error(data?.error || "Route unavailable");
+    const xml = new DOMParser().parseFromString(data.gpx, "application/xml");
+    if (xml.querySelector("parsererror")) throw new Error("The saved route could not be read.");
+    const points = Array.from(xml.querySelectorAll("trkpt"))
+      .map(point => ({ lat: Number(point.getAttribute("lat")), lon: Number(point.getAttribute("lon")) }))
+      .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+    if (points.length < 2) throw new Error("This activity has too few route points.");
+    return points;
+  })();
+  profileRouteCache.set(runId, request);
+  try {
+    return await request;
+  } catch (error) {
+    profileRouteCache.delete(runId);
+    throw error;
+  }
+}
+
+function createProfileRouteSvg(points, detailed = false) {
+  const width = 720;
+  const height = detailed ? 430 : 280;
+  const padding = detailed ? 34 : 22;
+  const averageLat = points.reduce((sum, point) => sum + point.lat, 0) / points.length;
+  const lonScale = Math.max(0.2, Math.cos(averageLat * Math.PI / 180));
+  const projected = points.map(point => ({ x: point.lon * lonScale, y: -point.lat }));
+  const xs = projected.map(point => point.x);
+  const ys = projected.map(point => point.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const rangeX = Math.max(0.000001, maxX - minX);
+  const rangeY = Math.max(0.000001, maxY - minY);
+  const scale = Math.min((width - padding * 2) / rangeX, (height - padding * 2) / rangeY);
+  const offsetX = (width - rangeX * scale) / 2;
+  const offsetY = (height - rangeY * scale) / 2;
+  const pathData = projected.map((point, index) => {
+    const x = offsetX + (point.x - minX) * scale;
+    const y = offsetY + (point.y - minY) * scale;
+    return `${index ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`;
+  }).join(" ");
+  const first = projected[0];
+  const last = projected[projected.length - 1];
+  const locate = point => ({
+    x: offsetX + (point.x - minX) * scale,
+    y: offsetY + (point.y - minY) * scale
+  });
+  const start = locate(first);
+  const finish = locate(last);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  const patternId = `route-grid-${detailed ? "detail" : "card"}-${Math.random().toString(36).slice(2)}`;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Saved activity route");
+  svg.classList.add("profile-route-svg");
+  svg.innerHTML = `
+    <defs><pattern id="${patternId}" width="44" height="44" patternUnits="userSpaceOnUse"><path d="M44 0H0V44" fill="none" stroke="#dfe7eb" stroke-width="1"/></pattern></defs>
+    <rect width="${width}" height="${height}" fill="#eef3f1"/>
+    <path d="M0 ${height * .28} Q${width * .28} ${height * .12} ${width * .52} ${height * .34} T${width} ${height * .22}" fill="none" stroke="#fff" stroke-width="16" opacity=".9"/>
+    <path d="M${width * .18} 0 Q${width * .25} ${height * .5} ${width * .08} ${height}" fill="none" stroke="#fff" stroke-width="10" opacity=".75"/>
+    <rect width="${width}" height="${height}" fill="url(#${patternId})"/>
+    <path d="${pathData}" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${pathData}" fill="none" stroke="#ef5b2a" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="${start.x.toFixed(1)}" cy="${start.y.toFixed(1)}" r="7" fill="#fff" stroke="#17844b" stroke-width="5"/>
+    <circle cx="${finish.x.toFixed(1)}" cy="${finish.y.toFixed(1)}" r="7" fill="#fff" stroke="#c83d32" stroke-width="5"/>
+  `;
+  return svg;
+}
+
+async function hydrateProfileRoute(container, run, detailed = false) {
+  try {
+    const points = await loadProfileRoute(run.id);
+    container.replaceChildren(createProfileRouteSvg(points, detailed));
+  } catch (error) {
+    container.textContent = "Route preview unavailable";
+    container.classList.add("route-unavailable");
+    console.warn("Profile route load failed:", error);
+  }
+}
+
+function createProfileStat(label, value) {
+  const stat = document.createElement("div");
+  stat.className = "profile-stat";
+  const labelEl = document.createElement("span");
+  labelEl.textContent = label;
+  const valueEl = document.createElement("strong");
+  valueEl.textContent = value;
+  stat.append(labelEl, valueEl);
+  return stat;
+}
+
+function formatProfileActivity(run) {
+  const started = new Date(run.started_at);
+  const miles = Number(run.distance_m || 0) / 1609.344;
   const item = document.createElement("article");
   item.className = "profile-activity";
+  item.tabIndex = 0;
+  item.setAttribute("role", "button");
+  item.setAttribute("aria-label", `View ${run.title || "saved activity"}`);
+  const date = document.createElement("span");
+  date.className = "profile-activity-date";
+  date.textContent = started.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const title = document.createElement("strong");
+  title.className = "profile-activity-title";
   title.textContent = run.title || started.toLocaleString();
-  const details = document.createElement("span");
-  details.textContent = `${miles.toFixed(2)} mi | ${duration} | ${run.source}`;
-  item.append(title, details);
+  const source = document.createElement("span");
+  source.className = "profile-activity-source";
+  source.textContent = run.source === "private" ? "Private run" : "Broadcast run";
+  const stats = document.createElement("div");
+  stats.className = "profile-activity-stats";
+  stats.append(
+    createProfileStat("Distance", `${miles.toFixed(2)} mi`),
+    createProfileStat("Pace", formatProfilePace(run)),
+    createProfileStat("Time", formatProfileDuration(run.elapsed_time_ms))
+  );
+  const route = document.createElement("div");
+  route.className = "profile-route-preview";
+  route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
+  item.append(date, title, source, stats, route);
+  item._profileRun = run;
+  const open = () => openProfileActivityDetail(run);
+  item.addEventListener("click", open);
+  item.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
   return item;
+}
+
+async function openProfileActivityDetail(run) {
+  if (!profileActivities) return;
+  profileRouteObserver?.disconnect();
+  profileActivities.innerHTML = "";
+  const back = document.createElement("button");
+  back.className = "profile-detail-back";
+  back.type = "button";
+  back.textContent = "Back to activities";
+  back.addEventListener("click", loadProfileActivities);
+  const detail = document.createElement("article");
+  detail.className = "profile-activity-detail";
+  const heading = document.createElement("h2");
+  heading.textContent = run.title || "Saved Run";
+  const subtitle = document.createElement("p");
+  subtitle.textContent = new Date(run.started_at).toLocaleString([], { dateStyle: "full", timeStyle: "short" });
+  const route = document.createElement("div");
+  route.className = "profile-route-detail";
+  route.textContent = "Loading route...";
+  const stats = document.createElement("div");
+  stats.className = "profile-detail-stats";
+  const miles = Number(run.distance_m || 0) / 1609.344;
+  stats.append(
+    createProfileStat("Distance", `${miles.toFixed(2)} mi`),
+    createProfileStat("Average pace", formatProfilePace(run)),
+    createProfileStat("Elapsed time", formatProfileDuration(run.elapsed_time_ms)),
+    createProfileStat("Moving time", run.moving_time_ms ? formatProfileDuration(run.moving_time_ms) : "--"),
+    createProfileStat("Elevation gain", Number.isFinite(Number(run.elevation_gain_m)) ? `${Math.round(Number(run.elevation_gain_m) * 3.28084)} ft` : "--"),
+    createProfileStat("Average cadence", Number.isFinite(Number(run.avg_cadence_spm)) ? `${Math.round(run.avg_cadence_spm)} spm` : "--")
+  );
+  detail.append(heading, subtitle, route, stats);
+  profileActivities.append(back, detail);
+  await hydrateProfileRoute(route, run, true);
 }
 
 async function loadProfileActivities() {
@@ -554,7 +725,7 @@ async function loadProfileActivities() {
 
   const { data, error } = await profilesSupabaseClient
     .from("saved_runs")
-    .select("id, title, source, started_at, elapsed_time_ms, distance_m, archive_status")
+    .select("id, title, source, started_at, finished_at, elapsed_time_ms, moving_time_ms, distance_m, elevation_gain_m, elevation_loss_m, min_elevation_m, max_elevation_m, avg_pace_sec_per_km, avg_moving_pace_sec_per_km, avg_cadence_spm, max_cadence_spm, archive_status")
     .order("started_at", { ascending: false })
     .limit(50);
 
@@ -576,7 +747,22 @@ async function loadProfileActivities() {
     return;
   }
 
-  data.forEach(run => profileActivities.appendChild(formatProfileActivity(run)));
+  profileRouteObserver?.disconnect();
+  profileRouteObserver = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      profileRouteObserver.unobserve(entry.target);
+      const route = entry.target.querySelector(".profile-route-preview");
+      if (route && entry.target._profileRun?.archive_status === "ready") {
+        hydrateProfileRoute(route, entry.target._profileRun);
+      }
+    });
+  }, { root: profileView, rootMargin: "180px" });
+  data.forEach(run => {
+    const activity = formatProfileActivity(run);
+    profileActivities.appendChild(activity);
+    profileRouteObserver.observe(activity);
+  });
 }
 
 async function openProfileView() {

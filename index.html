@@ -103,7 +103,32 @@
     .profile-tabs { display: flex; border-bottom: 1px solid #cdd6dd; margin-bottom: 18px; }
     .profile-tab { min-width: 0; flex: 1; border-radius: 0; background: transparent; color: #42515d; border-bottom: 3px solid transparent; padding: 11px 6px; }
     .profile-tab.active { color: #075da8; border-bottom-color: #075da8; }
-    #profileActivities { padding: 26px 16px; background: #fff; border: 1px solid #d6dee4; border-radius: 6px; color: #52616d; text-align: center; }
+    #profileActivities { display: grid; gap: 18px; color: #52616d; }
+    .profile-empty, .profile-activity, .profile-activity-detail { background: #fff; border: 1px solid #d6dee4; border-radius: 6px; padding: 16px; }
+    .profile-activity { cursor: pointer; overflow: hidden; text-align: left; }
+    .profile-activity:hover, .profile-activity:focus-visible { border-color: #8fa9ba; box-shadow: 0 8px 22px rgba(31,52,66,.12); outline: none; }
+    .profile-activity-date, .profile-activity-source { display: block; color: #667783; font-size: 13px; }
+    .profile-activity-title { display: block; margin-top: 7px; color: #17262f; font-size: 21px; }
+    .profile-activity-source { margin-top: 5px; font-size: 14px; }
+    .profile-activity-stats, .profile-detail-stats { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); margin: 15px 0; }
+    .profile-stat { min-width: 0; padding: 2px 12px; border-left: 1px solid #dce3e7; }
+    .profile-stat:first-child { padding-left: 0; border-left: 0; }
+    .profile-stat span, .profile-stat strong { display: block; }
+    .profile-stat span { color: #667783; font-size: 12px; }
+    .profile-stat strong { margin-top: 3px; color: #17262f; font-size: 18px; white-space: nowrap; }
+    .profile-route-preview, .profile-route-detail { display: grid; place-items: center; min-height: 190px; margin: 14px -16px -16px; background: #eef3f1; color: #667783; overflow: hidden; }
+    .profile-route-detail { min-height: 300px; margin: 18px 0 8px; border: 1px solid #d5dde3; border-radius: 6px; }
+    .profile-route-svg { display: block; width: 100%; height: 100%; min-height: inherit; }
+    .profile-detail-back { justify-self: start; width: auto; margin-bottom: 14px; padding: 9px 14px; background: #e6edf1; color: #24343f; }
+    .profile-activity-detail { padding: 20px; text-align: left; }
+    .profile-activity-detail h2, .profile-activity-detail p { margin: 0; }
+    .profile-activity-detail p { margin-top: 6px; color: #667783; }
+    .profile-detail-stats { row-gap: 18px; }
+    @media (max-width: 520px) {
+      .profile-activity-stats, .profile-detail-stats { grid-template-columns: repeat(2,minmax(0,1fr)); row-gap: 14px; }
+      .profile-stat:nth-child(odd) { padding-left: 0; border-left: 0; }
+      .profile-stat strong { font-size: 16px; }
+    }
     #profileSignOutBtn { margin-top: 20px; background: #6b7680; }
 
     #buttonWrapper {
@@ -553,16 +578,105 @@
       profileAuthOverlay.setAttribute("aria-hidden", "true");
       setProfileAuthMessage();
     }
+    const browserProfileRouteCache = new Map();
+    let browserProfileRouteObserver = null;
+    function profileDuration(ms) {
+      const total = Math.max(0, Math.round(Number(ms || 0) / 1000));
+      const hours = Math.floor(total / 3600), minutes = Math.floor(total % 3600 / 60), seconds = total % 60;
+      return hours ? `${hours}:${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}` : `${minutes}:${String(seconds).padStart(2,"0")}`;
+    }
+    function profilePace(run) {
+      let seconds = Number(run.avg_pace_sec_per_km) * 1.609344;
+      const miles = Number(run.distance_m || 0) / 1609.344;
+      if (!(seconds > 0)) seconds = miles > 0 ? Number(run.elapsed_time_ms || 0) / 1000 / miles : 0;
+      if (!(seconds > 0)) return "--";
+      seconds = Math.round(seconds);
+      return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2,"0")} /mi`;
+    }
+    function profileStat(label, value) {
+      const node = document.createElement("div"); node.className = "profile-stat";
+      const caption = document.createElement("span"); caption.textContent = label;
+      const result = document.createElement("strong"); result.textContent = value;
+      node.append(caption, result); return node;
+    }
+    async function profileRoute(runId) {
+      if (browserProfileRouteCache.has(runId)) return browserProfileRouteCache.get(runId);
+      const request = (async () => {
+        const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", { body: { action: "get-gpx", savedRunId: runId } });
+        if (error || !data?.gpx) throw error || new Error(data?.error || "Route unavailable");
+        const xml = new DOMParser().parseFromString(data.gpx, "application/xml");
+        const points = Array.from(xml.querySelectorAll("trkpt")).map(point => ({ lat: Number(point.getAttribute("lat")), lon: Number(point.getAttribute("lon")) })).filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+        if (points.length < 2) throw new Error("Route unavailable");
+        return points;
+      })();
+      browserProfileRouteCache.set(runId, request);
+      try { return await request; } catch (error) { browserProfileRouteCache.delete(runId); throw error; }
+    }
+    function profileRouteSvg(points, detailed = false) {
+      const width = 720, height = detailed ? 430 : 280, padding = detailed ? 34 : 22;
+      const averageLat = points.reduce((sum, point) => sum + point.lat, 0) / points.length;
+      const lonScale = Math.max(.2, Math.cos(averageLat * Math.PI / 180));
+      const projected = points.map(point => ({ x: point.lon * lonScale, y: -point.lat }));
+      const xs = projected.map(point => point.x), ys = projected.map(point => point.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const rangeX = Math.max(.000001, maxX - minX), rangeY = Math.max(.000001, maxY - minY);
+      const scale = Math.min((width - padding * 2) / rangeX, (height - padding * 2) / rangeY);
+      const offsetX = (width - rangeX * scale) / 2, offsetY = (height - rangeY * scale) / 2;
+      const locate = point => ({ x: offsetX + (point.x - minX) * scale, y: offsetY + (point.y - minY) * scale });
+      const path = projected.map((point, index) => { const p = locate(point); return `${index ? "L" : "M"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`; }).join(" ");
+      const start = locate(projected[0]), finish = locate(projected[projected.length - 1]);
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "Saved activity route"); svg.classList.add("profile-route-svg");
+      svg.innerHTML = `<rect width="${width}" height="${height}" fill="#eef3f1"/><path d="M0 ${height*.28} Q${width*.28} ${height*.12} ${width*.52} ${height*.34} T${width} ${height*.22}" fill="none" stroke="#fff" stroke-width="16"/><path d="M${width*.18} 0 Q${width*.25} ${height*.5} ${width*.08} ${height}" fill="none" stroke="#fff" stroke-width="10"/><path d="${path}" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/><path d="${path}" fill="none" stroke="#ef5b2a" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="${start.x}" cy="${start.y}" r="7" fill="#fff" stroke="#17844b" stroke-width="5"/><circle cx="${finish.x}" cy="${finish.y}" r="7" fill="#fff" stroke="#c83d32" stroke-width="5"/>`;
+      return svg;
+    }
+    async function hydrateBrowserProfileRoute(container, run, detailed = false) {
+      try { container.replaceChildren(profileRouteSvg(await profileRoute(run.id), detailed)); }
+      catch (error) { container.textContent = "Route preview unavailable"; console.warn("Profile route load failed:", error); }
+    }
+    async function openBrowserProfileDetail(run) {
+      browserProfileRouteObserver?.disconnect(); profileActivities.innerHTML = "";
+      const back = document.createElement("button"); back.className = "profile-detail-back"; back.textContent = "Back to activities"; back.addEventListener("click", loadBrowserProfileActivities);
+      const detail = document.createElement("article"); detail.className = "profile-activity-detail";
+      const heading = document.createElement("h2"); heading.textContent = run.title || "Saved Run";
+      const subtitle = document.createElement("p"); subtitle.textContent = new Date(run.started_at).toLocaleString([], { dateStyle: "full", timeStyle: "short" });
+      const route = document.createElement("div"); route.className = "profile-route-detail"; route.textContent = "Loading route...";
+      const stats = document.createElement("div"); stats.className = "profile-detail-stats";
+      const miles = Number(run.distance_m || 0) / 1609.344;
+      stats.append(profileStat("Distance", `${miles.toFixed(2)} mi`), profileStat("Average pace", profilePace(run)), profileStat("Elapsed time", profileDuration(run.elapsed_time_ms)), profileStat("Moving time", run.moving_time_ms ? profileDuration(run.moving_time_ms) : "--"), profileStat("Elevation gain", Number.isFinite(Number(run.elevation_gain_m)) ? `${Math.round(run.elevation_gain_m * 3.28084)} ft` : "--"), profileStat("Average cadence", Number.isFinite(Number(run.avg_cadence_spm)) ? `${Math.round(run.avg_cadence_spm)} spm` : "--"));
+      detail.append(heading, subtitle, route, stats); profileActivities.append(back, detail); await hydrateBrowserProfileRoute(route, run, true);
+    }
+    function browserProfileActivity(run) {
+      const item = document.createElement("article"); item.className = "profile-activity"; item.tabIndex = 0; item.setAttribute("role", "button");
+      const date = document.createElement("span"); date.className = "profile-activity-date"; date.textContent = new Date(run.started_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+      const title = document.createElement("strong"); title.className = "profile-activity-title"; title.textContent = run.title || "Saved Run";
+      const source = document.createElement("span"); source.className = "profile-activity-source"; source.textContent = run.source === "private" ? "Private run" : "Broadcast run";
+      const stats = document.createElement("div"); stats.className = "profile-activity-stats"; const miles = Number(run.distance_m || 0) / 1609.344;
+      stats.append(profileStat("Distance", `${miles.toFixed(2)} mi`), profileStat("Pace", profilePace(run)), profileStat("Time", profileDuration(run.elapsed_time_ms)));
+      const route = document.createElement("div"); route.className = "profile-route-preview"; route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
+      item.append(date, title, source, stats, route); item._profileRun = run;
+      const open = () => openBrowserProfileDetail(run); item.addEventListener("click", open); item.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } }); return item;
+    }
+    async function loadBrowserProfileActivities() {
+      profileActivities.innerHTML = '<div class="profile-empty">Loading activities...</div>';
+      const { data, error } = await profilesSupabaseClient.from("saved_runs").select("id,title,source,started_at,finished_at,elapsed_time_ms,moving_time_ms,distance_m,elevation_gain_m,avg_pace_sec_per_km,avg_cadence_spm,archive_status").order("started_at", { ascending: false }).limit(50);
+      profileActivities.innerHTML = "";
+      if (error) { profileActivities.innerHTML = '<div class="profile-empty">Activities could not be loaded right now.</div>'; return; }
+      if (!data?.length) { profileActivities.innerHTML = '<div class="profile-empty">No saved runs yet.</div>'; return; }
+      browserProfileRouteObserver?.disconnect(); browserProfileRouteObserver = new IntersectionObserver(entries => entries.forEach(entry => { if (!entry.isIntersecting) return; browserProfileRouteObserver.unobserve(entry.target); const route = entry.target.querySelector(".profile-route-preview"); if (route && entry.target._profileRun?.archive_status === "ready") hydrateBrowserProfileRoute(route, entry.target._profileRun); }), { root: profileView, rootMargin: "180px" });
+      data.forEach(run => { const item = browserProfileActivity(run); profileActivities.appendChild(item); browserProfileRouteObserver.observe(item); });
+    }
     function applyProfilesSession(session) {
       profilesSession = session || null;
       profileBtn.classList.toggle("signed-in", Boolean(profilesSession?.user));
     }
-    function openProfileView() {
+    async function openProfileView() {
       if (!profilesSession?.user) return openProfileAuth();
       closeProfileAuth();
       document.getElementById("profileEmail").textContent = profilesSession.user.email || "LiveStride member";
       profileView.style.display = "block";
       profileView.setAttribute("aria-hidden", "false");
+      await loadBrowserProfileActivities();
     }
     async function signInProfile() {
       const email = profileAuthEmail.value.trim(), password = profileAuthPassword.value;
@@ -651,7 +765,7 @@
         profileTabs.forEach(item => item.classList.toggle("active", item === tab));
         const selected = tab.dataset.profileTab;
         if (selected === "activities") {
-          profileActivities.textContent = "No saved runs yet.";
+          loadBrowserProfileActivities();
         } else if (selected === "records") {
           profileActivities.textContent = "Personal records will appear here as saved runs are analyzed.";
         } else {

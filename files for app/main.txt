@@ -446,6 +446,8 @@ const choiceModal = document.getElementById("choiceModal");
 const choiceModalTitle = document.getElementById("choiceModalTitle");
 const choiceModalOptions = document.getElementById("choiceModalOptions");
 const choiceModalCancel = document.getElementById("choiceModalCancel");
+const profileSaveProgress = document.getElementById("profileSaveProgress");
+const profileSaveProgressMessage = document.getElementById("profileSaveProgressMessage");
 const profileBtn = document.getElementById("profileBtn");
 const profileAuthOverlay = document.getElementById("profileAuthOverlay");
 const closeProfileAuthBtn = document.getElementById("closeProfileAuthBtn");
@@ -1126,6 +1128,23 @@ function showChoiceModal(title, options = []) {
     choiceModal.style.display = "flex";
     choiceModal.setAttribute("aria-hidden", "false");
   });
+}
+
+function showProfileSaveProgress(message) {
+  if (!profileSaveProgress) return;
+  if (profileSaveProgressMessage) profileSaveProgressMessage.textContent = message;
+  profileSaveProgress.style.display = "flex";
+  profileSaveProgress.setAttribute("aria-hidden", "false");
+}
+
+function updateProfileSaveProgress(message) {
+  if (profileSaveProgressMessage) profileSaveProgressMessage.textContent = message;
+}
+
+function hideProfileSaveProgress() {
+  if (!profileSaveProgress) return;
+  profileSaveProgress.style.display = "none";
+  profileSaveProgress.setAttribute("aria-hidden", "true");
 }
 
 async function openExternalUrl(url) {
@@ -3700,9 +3719,10 @@ async function requireProfilesSession() {
   return data.session;
 }
 
-async function saveGpxToProfile(gpx, metadata) {
+async function saveGpxToProfile(gpx, metadata, onStatus = null) {
   if (!gpx || !metadata) throw new Error("This run could not be prepared for your profile.");
   const session = await requireProfilesSession();
+  onStatus?.("Creating your profile activity...");
   const insertPayload = {
     ...metadata,
     user_id: session.user.id,
@@ -3715,6 +3735,7 @@ async function saveGpxToProfile(gpx, metadata) {
     .single();
   if (insertError) throw insertError;
 
+  onStatus?.("Uploading the completed GPX securely...");
   const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
     body: {
       action: "upload-gpx",
@@ -3730,16 +3751,28 @@ async function saveGpxToProfile(gpx, metadata) {
     throw error || new Error(data?.error || "The run archive could not be completed.");
   }
 
+  onStatus?.("Refreshing your activities...");
   await loadProfileActivities();
   return savedRun.id;
 }
 
 async function savePrivateRunToProfile(runId) {
-  const runData = await getPrivateRunDataById(runId);
-  await fillMissingPrivateRunElevations(runData);
-  const metadata = buildSavedRunMetadata(runData, "private", { sourceRunId: runId });
-  await saveGpxToProfile(convertToGpx(runData), metadata);
-  alert("Run saved to your LiveStride Profile.");
+  await requireProfilesSession();
+  showProfileSaveProgress("Loading the selected run from this phone...");
+  try {
+    const runData = await getPrivateRunDataById(runId);
+    updateProfileSaveProgress("Completing any missing elevation values...");
+    await fillMissingPrivateRunElevations(runData);
+    updateProfileSaveProgress("Preparing the completed GPX file...");
+    const metadata = buildSavedRunMetadata(runData, "private", { sourceRunId: runId });
+    const gpx = convertToGpx(runData);
+    await saveGpxToProfile(gpx, metadata, updateProfileSaveProgress);
+    hideProfileSaveProgress();
+    alert("Run saved to your LiveStride Profile.");
+  } catch (err) {
+    hideProfileSaveProgress();
+    throw err;
+  }
 }
 
 async function getPrivateRunDataById(runId) {

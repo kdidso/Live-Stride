@@ -605,12 +605,42 @@
         const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", { body: { action: "get-gpx", savedRunId: runId } });
         if (error || !data?.gpx) throw error || new Error(data?.error || "Route unavailable");
         const xml = new DOMParser().parseFromString(data.gpx, "application/xml");
-        const points = Array.from(xml.querySelectorAll("trkpt")).map(point => ({ lat: Number(point.getAttribute("lat")), lon: Number(point.getAttribute("lon")) })).filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+        const points = Array.from(xml.querySelectorAll("trkpt")).map(point => {
+          const elevationText = point.querySelector("ele")?.textContent;
+          const timeText = point.querySelector("time")?.textContent;
+          const elevation = elevationText == null ? null : Number(elevationText);
+          const time = timeText ? Date.parse(timeText) : null;
+          return { lat: Number(point.getAttribute("lat")), lon: Number(point.getAttribute("lon")), elevation: Number.isFinite(elevation) ? elevation : null, time: Number.isFinite(time) ? time : null };
+        }).filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
         if (points.length < 2) throw new Error("Route unavailable");
-        return points;
+        return { points, analysis: analyzeBrowserProfilePoints(points) };
       })();
       browserProfileRouteCache.set(runId, request);
       try { return await request; } catch (error) { browserProfileRouteCache.delete(runId); throw error; }
+    }
+    function analyzeBrowserProfilePoints(points) {
+      const elevations = points.map(point => point.elevation).filter(Number.isFinite);
+      let elevationGainM = null;
+      if (elevations.length >= 2) {
+        const smoothed = elevations.map((_, index) => {
+          const window = elevations.slice(Math.max(0, index - 2), Math.min(elevations.length, index + 3));
+          return window.reduce((sum, value) => sum + value, 0) / window.length;
+        });
+        elevationGainM = 0;
+        let anchor = smoothed[0];
+        for (let index = 1; index < smoothed.length; index += 1) {
+          const difference = smoothed[index] - anchor;
+          if (difference >= 1) { elevationGainM += difference; anchor = smoothed[index]; }
+          else if (difference <= -1) anchor = smoothed[index];
+        }
+      }
+      let movingTimeMs = 0, timedSegments = 0;
+      for (let index = 1; index < points.length; index += 1) {
+        if (!Number.isFinite(points[index - 1].time) || !Number.isFinite(points[index].time)) continue;
+        const difference = points[index].time - points[index - 1].time;
+        if (difference > 0) { movingTimeMs += Math.min(difference, 1000); timedSegments += 1; }
+      }
+      return { elevationGainM, movingTimeMs: timedSegments ? movingTimeMs : null };
     }
     function profileRouteSvg(points, detailed = false) {
       const width = 720, height = detailed ? 430 : 280, padding = detailed ? 34 : 22;
@@ -631,8 +661,8 @@
       return svg;
     }
     async function hydrateBrowserProfileRoute(container, run, detailed = false) {
-      try { container.replaceChildren(profileRouteSvg(await profileRoute(run.id), detailed)); }
-      catch (error) { container.textContent = "Route preview unavailable"; console.warn("Profile route load failed:", error); }
+      try { const routeData = await profileRoute(run.id); container.replaceChildren(profileRouteSvg(routeData.points, detailed)); return routeData; }
+      catch (error) { container.textContent = "Route preview unavailable"; console.warn("Profile route load failed:", error); return null; }
     }
     async function openBrowserProfileDetail(run) {
       browserProfileRouteObserver?.disconnect(); profileActivities.innerHTML = "";
@@ -643,8 +673,22 @@
       const route = document.createElement("div"); route.className = "profile-route-detail"; route.textContent = "Loading route...";
       const stats = document.createElement("div"); stats.className = "profile-detail-stats";
       const miles = Number(run.distance_m || 0) / 1609.344;
-      stats.append(profileStat("Distance", `${miles.toFixed(2)} mi`), profileStat("Average pace", profilePace(run)), profileStat("Elapsed time", profileDuration(run.elapsed_time_ms)), profileStat("Moving time", run.moving_time_ms ? profileDuration(run.moving_time_ms) : "--"), profileStat("Elevation gain", Number.isFinite(Number(run.elevation_gain_m)) ? `${Math.round(run.elevation_gain_m * 3.28084)} ft` : "--"), profileStat("Average cadence", Number.isFinite(Number(run.avg_cadence_spm)) ? `${Math.round(run.avg_cadence_spm)} spm` : "--"));
-      detail.append(heading, subtitle, route, stats); profileActivities.append(back, detail); await hydrateBrowserProfileRoute(route, run, true);
+      const movingStat = profileStat("Moving time", run.moving_time_ms ? profileDuration(run.moving_time_ms) : "Calculating...");
+      const hasStoredGain = run.elevation_gain_m != null && Number.isFinite(Number(run.elevation_gain_m));
+      const gainStat = profileStat("Elevation gain", hasStoredGain ? `${Math.round(run.elevation_gain_m * 3.28084)} ft` : "Calculating...");
+      stats.append(profileStat("Distance", `${miles.toFixed(2)} mi`), profileStat("Average pace", profilePace(run)), profileStat("Elapsed time", profileDuration(run.elapsed_time_ms)), movingStat, gainStat, profileStat("Average cadence", run.avg_cadence_spm != null && Number(run.avg_cadence_spm) > 0 ? `${Math.round(run.avg_cadence_spm)} spm` : "--"));
+      detail.append(heading, subtitle, route, stats); profileActivities.append(back, detail);
+      const routeData = await hydrateBrowserProfileRoute(route, run, true);
+      if (routeData) {
+        const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
+        movingStat.querySelector("strong").textContent = movingTimeMs ? profileDuration(movingTimeMs) : "--";
+        const elevationGainM = hasStoredGain ? Number(run.elevation_gain_m) : routeData.analysis.elevationGainM;
+        gainStat.querySelector("strong").textContent = Number.isFinite(elevationGainM) ? `${Math.round(elevationGainM * 3.28084)} ft` : "--";
+        if (movingTimeMs && miles > 0) {
+          const seconds = Math.round(movingTimeMs / 1000 / miles);
+          stats.append(profileStat("Moving pace", `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2,"0")} /mi`));
+        }
+      }
     }
     function browserProfileActivity(run) {
       const item = document.createElement("article"); item.className = "profile-activity"; item.tabIndex = 0; item.setAttribute("role", "button");

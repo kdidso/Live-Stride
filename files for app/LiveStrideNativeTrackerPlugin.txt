@@ -31,6 +31,20 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void getDeviceProfile(PluginCall call) {
+        boolean isLightPhoneIII = "Light".equalsIgnoreCase(Build.MANUFACTURER)
+                && ("TLP301".equalsIgnoreCase(Build.MODEL)
+                || "LightPhoneIII".equalsIgnoreCase(Build.DEVICE));
+
+        JSObject result = new JSObject();
+        result.put("manufacturer", Build.MANUFACTURER);
+        result.put("model", Build.MODEL);
+        result.put("device", Build.DEVICE);
+        result.put("isLightPhoneIII", isLightPhoneIII);
+        call.resolve(result);
+    }
+
+    @PluginMethod
     public void requestStartupPermissions(PluginCall call) {
         List<String> permissions = new ArrayList<>();
 

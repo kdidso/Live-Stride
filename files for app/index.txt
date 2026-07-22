@@ -908,6 +908,86 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
         padding: 8px 112px 8px 10px;
       }
     }
+
+    /* Light Phone III only. The class is added after native manufacturer/model detection. */
+    body.light-phone-iii {
+      --top-safe-offset: 0px;
+      --bottom-safe-offset: 0px;
+    }
+
+    body.light-phone-iii #profileBtn {
+      top: 0;
+      right: 0;
+    }
+
+    body.light-phone-iii #buttonWrapper,
+    body.light-phone-iii #buttonWrapper.top-shift {
+      top: 0;
+      left: 0;
+      margin-top: 0;
+      gap: 4px;
+    }
+
+    body.light-phone-iii #controls,
+    body.light-phone-iii #modeToggle,
+    body.light-phone-iii #broadcastControls {
+      gap: 4px;
+    }
+
+    body.light-phone-iii.viewer-mode #searchBar {
+      top: 0;
+      left: 0;
+      right: 0;
+      transform: none;
+    }
+
+    body.light-phone-iii.viewer-mode #searchInput {
+      height: 48px;
+      border-radius: 0 0 6px 6px;
+    }
+
+    body.light-phone-iii.viewer-mode #buttonWrapper {
+      top: 52px;
+      left: 0;
+      gap: 4px;
+    }
+
+    body.light-phone-iii.viewer-mode #modeToggle {
+      gap: 4px;
+    }
+
+    body.light-phone-iii #statsBar {
+      position: fixed;
+      bottom: 0;
+    }
+
+    body.light-phone-iii #layerToggle {
+      position: fixed;
+      bottom: 46px;
+      left: 8px;
+    }
+
+    body.light-phone-iii.viewer-mode #layerToggle {
+      bottom: 70px;
+    }
+
+    body.light-phone-iii #recenterBtn {
+      position: fixed;
+      right: 8px;
+      bottom: 22px;
+    }
+
+    body.light-phone-iii .maplibregl-ctrl-bottom-right .livestride-geolocate-control {
+      margin-bottom: 40px;
+    }
+
+    body.light-phone-iii.light-phone-keyboard-open #statsBar,
+    body.light-phone-iii.light-phone-keyboard-open #layerToggle,
+    body.light-phone-iii.light-phone-keyboard-open #recenterBtn,
+    body.light-phone-iii.light-phone-keyboard-open .maplibregl-ctrl-bottom-left,
+    body.light-phone-iii.light-phone-keyboard-open .maplibregl-ctrl-bottom-right {
+      visibility: hidden !important;
+    }
   </style>
 </head>
 <body>

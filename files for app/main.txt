@@ -329,31 +329,13 @@ function addControls() {
     }
   }
 
+  const isLightPhoneIII = document.body.classList.contains("light-phone-iii");
   geoControl = new maplibregl.GeolocateControl({
     positionOptions: { enableHighAccuracy: true },
     trackUserLocation: true,
     showAccuracyCircle: false,
-    showUserLocation: true
-  });
-
-  let lightPhoneStreetZoomPending = true;
-  geoControl.on("geolocate", event => {
-    if (!document.body.classList.contains("light-phone-iii") ||
-        document.body.classList.contains("viewer-mode") ||
-        !lightPhoneStreetZoomPending) {
-      return;
-    }
-
-    const longitude = event?.coords?.longitude;
-    const latitude = event?.coords?.latitude;
-    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
-    lightPhoneStreetZoomPending = false;
-
-    // Apply the Light Phone street zoom once per button press. Repeating this for every
-    // location update would prevent the runner from freely panning or zooming afterward.
-    setTimeout(() => {
-      map.easeTo({ center: [longitude, latitude], zoom: 17, duration: 500 });
-    }, 0);
+    showUserLocation: true,
+    ...(isLightPhoneIII ? { fitBoundsOptions: { maxZoom: 17 } } : {})
   });
 
   map.addControl(geoControl, "bottom-right");
@@ -362,9 +344,6 @@ function addControls() {
     geolocateButton
       ?.closest(".maplibregl-ctrl-group")
       ?.classList.add("livestride-geolocate-control");
-    geolocateButton?.addEventListener("click", () => {
-      lightPhoneStreetZoomPending = true;
-    });
   });
 }
 map.on("style.load", () => {

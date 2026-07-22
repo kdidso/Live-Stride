@@ -336,17 +336,21 @@ function addControls() {
     showUserLocation: true
   });
 
+  let lightPhoneStreetZoomPending = true;
   geoControl.on("geolocate", event => {
     if (!document.body.classList.contains("light-phone-iii") ||
-        document.body.classList.contains("viewer-mode")) {
+        document.body.classList.contains("viewer-mode") ||
+        !lightPhoneStreetZoomPending) {
       return;
     }
 
     const longitude = event?.coords?.longitude;
     const latitude = event?.coords?.latitude;
     if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
+    lightPhoneStreetZoomPending = false;
 
-    // Let the control finish its own camera update, then apply the Light Phone street zoom.
+    // Apply the Light Phone street zoom once per button press. Repeating this for every
+    // location update would prevent the runner from freely panning or zooming afterward.
     setTimeout(() => {
       map.easeTo({ center: [longitude, latitude], zoom: 17, duration: 500 });
     }, 0);
@@ -354,10 +358,13 @@ function addControls() {
 
   map.addControl(geoControl, "bottom-right");
   requestAnimationFrame(() => {
-    document
-      .querySelector(".maplibregl-ctrl-geolocate")
+    const geolocateButton = document.querySelector(".maplibregl-ctrl-geolocate");
+    geolocateButton
       ?.closest(".maplibregl-ctrl-group")
       ?.classList.add("livestride-geolocate-control");
+    geolocateButton?.addEventListener("click", () => {
+      lightPhoneStreetZoomPending = true;
+    });
   });
 }
 map.on("style.load", () => {

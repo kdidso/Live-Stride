@@ -336,6 +336,22 @@ function addControls() {
     showUserLocation: true
   });
 
+  geoControl.on("geolocate", event => {
+    if (!document.body.classList.contains("light-phone-iii") ||
+        document.body.classList.contains("viewer-mode")) {
+      return;
+    }
+
+    const longitude = event?.coords?.longitude;
+    const latitude = event?.coords?.latitude;
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
+
+    // Let the control finish its own camera update, then apply the Light Phone street zoom.
+    setTimeout(() => {
+      map.easeTo({ center: [longitude, latitude], zoom: 17, duration: 500 });
+    }, 0);
+  });
+
   map.addControl(geoControl, "bottom-right");
   requestAnimationFrame(() => {
     document
@@ -1624,6 +1640,22 @@ function ensureSplitsPanel() {
 
 function positionSplitsPanel() {
   if (!splitsPanelEl) return;
+
+  const isLightPhoneIII = document.body.classList.contains("light-phone-iii");
+  if (isLightPhoneIII) {
+    const isViewer = document.body.classList.contains("viewer-mode");
+    const anchor = isViewer ? runnerModeBtn : document.getElementById("broadcastControls");
+    const anchorRect = anchor?.getBoundingClientRect();
+    splitsPanelEl.style.top = `${Math.max(0, anchorRect?.top ?? (isViewer ? 52 : 76))}px`;
+    splitsPanelEl.style.right = "4px";
+    splitsPanelEl.style.width = "min(180px, calc(100vw - 124px))";
+    splitsPanelEl.style.maxHeight = "88px";
+    if (splitsListEl) {
+      splitsListEl.style.maxHeight = "56px";
+      splitsListEl.style.overflowY = "auto";
+    }
+    return;
+  }
 
   const isMobileViewer = document.body.classList.contains("viewer-mode") &&
     window.matchMedia("(max-width: 600px)").matches;
@@ -5500,7 +5532,39 @@ layerSelect.addEventListener("change", () => {
   map.setStyle(newStyle);
 });
 
+async function initializeDeviceLayout() {
+  if (!LiveStrideNativeTracker?.getDeviceProfile) return;
+
+  try {
+    const profile = await LiveStrideNativeTracker.getDeviceProfile();
+    if (!profile?.isLightPhoneIII) return;
+
+    document.body.classList.add("light-phone-iii");
+    positionSplitsPanel();
+
+    const searchInput = document.getElementById("searchInput");
+    const syncKeyboardLayout = () => {
+      const focused = document.activeElement === searchInput;
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      const keyboardVisible = focused && viewportHeight < window.screen.height * 0.75;
+      document.body.classList.toggle(
+        "light-phone-keyboard-open",
+        focused || keyboardVisible
+      );
+    };
+
+    searchInput?.addEventListener("focus", syncKeyboardLayout);
+    searchInput?.addEventListener("blur", () => {
+      document.body.classList.remove("light-phone-keyboard-open");
+    });
+    window.visualViewport?.addEventListener("resize", syncKeyboardLayout);
+  } catch (error) {
+    console.warn("Could not determine the native device layout profile:", error);
+  }
+}
+
 setMode("runner");
+initializeDeviceLayout();
 setTimeout(() => {
   initializeProfilesAuth();
   requestStartupPermissions();

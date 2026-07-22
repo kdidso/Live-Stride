@@ -10,6 +10,9 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.Bundle;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.Looper;
@@ -69,6 +72,10 @@ public class LiveStrideNativeTrackerService extends Service {
 
     private FusedLocationProviderClient fusedLocationClient;
     private LocationCallback locationCallback;
+    private LocationManager platformLocationManager;
+    private LocationListener platformLocationListener;
+    private boolean locationStartRequested = false;
+    private boolean usingLightPhoneLocationManager = false;
 
     private String supabaseUrl;
     private String supabaseAnonKey;
@@ -98,7 +105,11 @@ public class LiveStrideNativeTrackerService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        if (isLightPhoneIII()) {
+            platformLocationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+        } else {
+            fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        }
         pointStore = new LiveStridePointStore(this);
         mapContextProvider = new LiveStrideMapContextProvider(this);
         createNotificationChannel();
@@ -205,7 +216,7 @@ public class LiveStrideNativeTrackerService extends Service {
     }
 
     private void startLocationUpdates() {
-        if (isTracking) return;
+        if (isTracking || locationStartRequested) return;
 
         if (!localOnly && (supabaseUrl == null || supabaseAnonKey == null)) {
             stopSelf();
@@ -217,6 +228,11 @@ public class LiveStrideNativeTrackerService extends Service {
                 && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
             stopSelf();
+            return;
+        }
+
+        if (isLightPhoneIII()) {
+            startLightPhoneLocationUpdates();
             return;
         }
 
@@ -240,20 +256,115 @@ public class LiveStrideNativeTrackerService extends Service {
             }
         };
 
+        locationStartRequested = true;
         fusedLocationClient.requestLocationUpdates(
                 locationRequest,
                 locationCallback,
                 Looper.getMainLooper()
-        );
+        ).addOnSuccessListener(ignored -> {
+            if (!locationStartRequested) return;
+            isTracking = true;
+            locationStartRequested = false;
+            Log.i("LiveStrideNative", "Google fused location updates started");
+        }).addOnFailureListener(error -> {
+            isTracking = false;
+            locationStartRequested = false;
+            Log.e("LiveStrideNative", "Google fused location request failed", error);
+        });
+    }
 
-        isTracking = true;
+    private void startLightPhoneLocationUpdates() {
+        if (platformLocationManager == null) {
+            Log.e("LiveStrideNative", "Light Phone location service is unavailable");
+            return;
+        }
+
+        String provider = null;
+        if (platformLocationManager.getProvider(LocationManager.GPS_PROVIDER) != null) {
+            provider = LocationManager.GPS_PROVIDER;
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && platformLocationManager.getProvider(LocationManager.FUSED_PROVIDER) != null) {
+            provider = LocationManager.FUSED_PROVIDER;
+        } else if (platformLocationManager.getProvider(LocationManager.NETWORK_PROVIDER) != null) {
+            provider = LocationManager.NETWORK_PROVIDER;
+        }
+
+        if (provider == null) {
+            Log.e("LiveStrideNative", "Light Phone has no usable Android location provider");
+            return;
+        }
+
+        platformLocationListener = new LocationListener() {
+            @Override
+            public void onLocationChanged(Location location) {
+                if (location != null) uploadNativePoint(location);
+            }
+
+            @Override
+            public void onProviderEnabled(String providerName) {
+                Log.i("LiveStrideNative", "Light Phone location provider enabled: " + providerName);
+            }
+
+            @Override
+            public void onProviderDisabled(String providerName) {
+                Log.w("LiveStrideNative", "Light Phone location provider disabled: " + providerName);
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public void onStatusChanged(String providerName, int status, Bundle extras) {
+                // Retained for compatibility with older Android versions supported by LiveStride.
+            }
+        };
+
+        try {
+            locationStartRequested = true;
+            platformLocationManager.requestLocationUpdates(
+                    provider,
+                    1000L,
+                    1.0f,
+                    platformLocationListener,
+                    Looper.getMainLooper()
+            );
+            usingLightPhoneLocationManager = true;
+            isTracking = true;
+            locationStartRequested = false;
+            Log.i(
+                    "LiveStrideNative",
+                    "Light Phone Android location updates started with provider=" + provider
+            );
+        } catch (SecurityException | IllegalArgumentException error) {
+            usingLightPhoneLocationManager = false;
+            isTracking = false;
+            locationStartRequested = false;
+            platformLocationListener = null;
+            Log.e("LiveStrideNative", "Light Phone location request failed", error);
+        }
+    }
+
+    private static boolean isLightPhoneIII() {
+        return "Light".equalsIgnoreCase(Build.MANUFACTURER)
+                && ("TLP301".equalsIgnoreCase(Build.MODEL)
+                || "LightPhoneIII".equalsIgnoreCase(Build.DEVICE));
     }
 
     private void stopLocationUpdates() {
+        locationStartRequested = false;
+        if (usingLightPhoneLocationManager
+                && platformLocationListener != null
+                && platformLocationManager != null) {
+            try {
+                platformLocationManager.removeUpdates(platformLocationListener);
+            } catch (SecurityException error) {
+                Log.w("LiveStrideNative", "Could not remove Light Phone location updates", error);
+            }
+        }
         if (locationCallback != null && fusedLocationClient != null) {
             fusedLocationClient.removeLocationUpdates(locationCallback);
         }
 
+        platformLocationListener = null;
+        usingLightPhoneLocationManager = false;
         locationCallback = null;
         isTracking = false;
     }

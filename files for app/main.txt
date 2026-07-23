@@ -383,6 +383,7 @@ let bgWatchId = null;
 let startTime = null;
 let lastPointTime = null;
 let totalDistanceMeters = 0;
+let stationaryHoldActive = false;
 let lastComputeTime = 0;
 
 let runnerTimerId = null;
@@ -3860,12 +3861,14 @@ function clearRunnerNativeRestoreDisplay() {
   runnerNativeDisplayActive = false;
   runPathRenderPending = false;
   totalDistanceMeters = 0;
+  stationaryHoldActive = false;
   latestRunnerDistance = 0;
   latestRunnerPace = 0;
   latestRunnerAvgPace = 0;
   latestRunnerElevFt = null;
   lastPointTime = null;
   startTime = null;
+  stationaryHoldActive = false;
   clearRunPathLayer();
 }
 
@@ -3941,6 +3944,7 @@ function resetRunDisplay() {
   pathCoords = [];
   nativePathCoords = [];
   totalDistanceMeters = 0;
+  stationaryHoldActive = false;
   latestRunnerDistance = 0;
   latestRunnerPace = 0;
   latestRunnerAvgPace = 0;
@@ -4637,17 +4641,26 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     const speedMps = segmentMeters / elapsedSeconds;
     const speedMph = speedMps * 2.23694;
 
-    if (segmentMeters < 1 || speedMph < 1 || speedMph > 140) {
+    let shouldHoldStationaryPoint = segmentMeters < 1 || speedMph < 1 || speedMph > 140;
+    if (stationaryHoldActive && segmentMeters < 4) {
+      shouldHoldStationaryPoint = true;
+    }
+
+    if (shouldHoldStationaryPoint) {
       heldPoint = true;
       holdReason = segmentMeters < 1
         ? "tiny_movement"
         : speedMph < 1
         ? "low_speed"
-        : "unrealistic_speed";
+        : speedMph > 140
+        ? "unrealistic_speed"
+        : "stationary_release_wait";
       effectiveCoord = [prev.lon, prev.lat];
       segmentMeters = 0;
+      stationaryHoldActive = true;
       console.warn("Recording hold point:", holdReason, speedMph.toFixed(2), "mph");
     } else {
+      stationaryHoldActive = false;
       totalDistanceMeters += segmentMeters;
     }
 
@@ -4799,6 +4812,7 @@ async function startTracking() {
   totalDistanceMeters = 0;
   startTime = null;
   lastPointTime = null;
+  stationaryHoldActive = false;
   lastComputeTime = 0;
   latestRunnerDistance = 0;
   latestRunnerPace = 0;

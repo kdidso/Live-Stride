@@ -771,8 +771,8 @@ function createProfileElevationChart(routeData) {
   }
 
   const width = 720;
-  const height = 330;
-  const padding = { top: 54, right: 26, bottom: 62, left: 58 };
+  const height = 300;
+  const padding = { top: 18, right: 18, bottom: 46, left: 62 };
   const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
   const smoothedMeters = smoothProfileElevationSamples(samples);
   const chartSamples = samples.map((sample, index) => ({
@@ -813,6 +813,17 @@ function createProfileElevationChart(routeData) {
     ? `${Math.round(routeData.analysis.maxElevationM * 3.28084)} ft`
     : maxLabel;
 
+  const section = document.createElement("div");
+  section.className = "profile-elevation-content";
+  const header = document.createElement("div");
+  header.className = "profile-elevation-header";
+  const title = document.createElement("h3");
+  title.textContent = "Elevation";
+  const info = document.createElement("span");
+  info.className = "profile-elevation-info";
+  info.textContent = "i";
+  header.append(title, info);
+
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("role", "img");
@@ -820,9 +831,6 @@ function createProfileElevationChart(routeData) {
   svg.classList.add("profile-elevation-chart");
   svg.innerHTML = `
     <rect width="${width}" height="${height}" fill="#ffffff"/>
-    <text x="0" y="22" fill="#111820" font-size="22" font-weight="800">Elevation</text>
-    <circle cx="${width - 16}" cy="16" r="11" fill="none" stroke="#111820" stroke-width="2"/>
-    <text x="${width - 16}" y="20" fill="#111820" font-size="15" font-weight="800" text-anchor="middle">i</text>
     ${gridRows.map(value => {
       const y = yFor(value).toFixed(1);
       return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#e8ecef" stroke-width="1"/>`;
@@ -843,17 +851,24 @@ function createProfileElevationChart(routeData) {
       return `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13" text-anchor="middle">${value.toFixed(0)} mi</text>`;
     }).join("")}
     <text x="${width - padding.right}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13" text-anchor="end">${distanceLabel}</text>
-    <text x="0" y="${height - 50}" fill="#4b555f" font-size="16">Elevation Gain</text>
-    <text x="${width}" y="${height - 50}" fill="#111820" font-size="17" font-weight="800" text-anchor="end">${gainFt}</text>
-    <text x="0" y="${height - 12}" fill="#4b555f" font-size="16">Max Elevation</text>
-    <text x="${width}" y="${height - 12}" fill="#111820" font-size="17" font-weight="800" text-anchor="end">${maxElevationText}</text>
   `;
-  return svg;
+
+  const summary = document.createElement("div");
+  summary.className = "profile-elevation-summary";
+  const gainRow = document.createElement("div");
+  gainRow.className = "profile-elevation-row";
+  gainRow.innerHTML = `<span>Elevation Gain</span><strong>${gainFt}</strong>`;
+  const maxRow = document.createElement("div");
+  maxRow.className = "profile-elevation-row";
+  maxRow.innerHTML = `<span>Max Elevation</span><strong>${maxElevationText}</strong>`;
+  summary.append(gainRow, maxRow);
+  section.append(header, svg, summary);
+  return section;
 }
 
 function renderProfileElevationChart(routeContainer, routeData, detailed = false) {
   if (!detailed) return;
-  const graphContainer = routeContainer.nextElementSibling;
+  const graphContainer = routeContainer.closest(".profile-activity-detail")?.querySelector(".profile-elevation-detail");
   if (!graphContainer?.classList?.contains("profile-elevation-detail")) return;
   graphContainer.replaceChildren(createProfileElevationChart(routeData));
 }
@@ -1198,7 +1213,7 @@ async function openProfileActivityDetail(run) {
   const hasCadence = run.avg_cadence_spm != null && Number.isFinite(Number(run.avg_cadence_spm)) && Number(run.avg_cadence_spm) > 0;
   const cadenceStat = createProfileStat("Average cadence", hasCadence ? `${Math.round(run.avg_cadence_spm)} spm` : "--");
   stats.append(distanceStat, paceStat, elapsedStat, movingStat, gainStat, cadenceStat);
-  detail.append(heading, subtitle, route, elevation, stats);
+  detail.append(heading, subtitle, route, stats, elevation);
   profileActivities.append(back, detail);
   const routeData = await hydrateProfileRoute(route, run, true);
   if (routeData) {

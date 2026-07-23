@@ -42,6 +42,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private static final float MAX_ACCEPTED_ACCURACY_METERS = 10.0f;
     private static final double RESUME_ANCHOR_GAP_SECONDS = 45.0;
     private static final double RESUME_ANCHOR_MIN_DISTANCE_METERS = 25.0;
+    private static final double STATIONARY_HOLD_RELEASE_DISTANCE_METERS = 4.0;
     private static final double PRESUMED_DRIVER_AVG_SPEED_MPS = 8.9408;
     private static final double METERS_PER_MILE = 1609.34;
     private static final int ANDROID_16_API_LEVEL = 36;
@@ -92,6 +93,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private double totalDistanceMeters = 0.0;
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
+    private boolean stationaryHoldActive = false;
     private LiveStridePointStore pointStore;
     private LiveStrideMapContextProvider mapContextProvider;
     private long lastPendingFlushKickMs = 0L;
@@ -169,6 +171,7 @@ public class LiveStrideNativeTrackerService extends Service {
             totalDistanceMeters = 0.0;
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
+            stationaryHoldActive = false;
             loadedMapContextUpdatedAtMs = 0L;
             serverMapContextActive = false;
             lastCompletedMile = 0;
@@ -472,21 +475,33 @@ private void uploadNativePoint(Location rawLocation) {
             double speedMps = segmentMeters / elapsedSeconds;
             double speedMph = speedMps * 2.23694;
 
+            boolean shouldHoldStationaryPoint = !matchResult.matched
+                    && (segmentMeters < 1.0 || speedMph < 1.0 || speedMph > 140.0);
+
             if (!matchResult.matched
-                    && (segmentMeters < 1.0 || speedMph < 1.0 || speedMph > 140.0)) {
+                    && stationaryHoldActive
+                    && segmentMeters < STATIONARY_HOLD_RELEASE_DISTANCE_METERS) {
+                shouldHoldStationaryPoint = true;
+            }
+
+            if (shouldHoldStationaryPoint) {
                 heldPoint = true;
                 holdReason = segmentMeters < 1.0
                         ? "tiny_movement"
                         : speedMph < 1.0
                         ? "low_speed"
-                        : "unrealistic_speed";
+                        : speedMph > 140.0
+                        ? "unrealistic_speed"
+                        : "stationary_release_wait";
                 location = new Location(previousLocation);
                 segmentMeters = 0.0;
+                stationaryHoldActive = true;
                 System.out.println(
                         "LiveStride native recorded hold point: "
                                 + holdReason + " speed=" + speedMph + " mph"
                 );
             } else {
+                stationaryHoldActive = false;
                 double previousTotalDistanceMeters = totalDistanceMeters;
                 totalDistanceMeters += segmentMeters;
                 alertNotificationForMileSplit = updateMileSplit(

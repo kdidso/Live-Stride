@@ -731,14 +731,24 @@ function cloneMapStyle(style) {
   }
 }
 
-function destroyProfileRouteMap(container) {
+function destroyProfileRouteMap(container, placeholder = null) {
   const existing = profileRouteMaps.get(container);
-  if (!existing) return;
+  if (!existing) {
+    if (placeholder != null) {
+      container.textContent = placeholder;
+      container.classList.remove("route-unavailable");
+    }
+    return;
+  }
 
   try {
     existing.remove();
   } catch (_) {}
   profileRouteMaps.delete(container);
+  if (placeholder != null) {
+    container.textContent = placeholder;
+    container.classList.remove("route-unavailable");
+  }
 }
 
 function destroyProfileRouteMapsIn(root) {
@@ -882,9 +892,10 @@ function createProfileRouteMap(points, detailed = false) {
   return { mapEl, routeMap };
 }
 
-async function hydrateProfileRoute(container, run, detailed = false) {
+async function hydrateProfileRoute(container, run, detailed = false, shouldRender = null) {
   try {
     const routeData = await loadProfileRoute(run.id);
+    if (shouldRender && !shouldRender()) return routeData;
     destroyProfileRouteMap(container);
     const { mapEl, routeMap } = createProfileRouteMap(routeData.points, detailed);
     profileRouteMaps.set(container, routeMap);
@@ -897,6 +908,28 @@ async function hydrateProfileRoute(container, run, detailed = false) {
     console.warn("Profile route load failed:", error);
     return null;
   }
+}
+
+async function ensureProfileActivityRouteMap(activity) {
+  const route = activity.querySelector(".profile-route-preview");
+  const run = activity._profileRun;
+  if (!route || run?.archive_status !== "ready" || profileRouteMaps.has(route) || activity._profileRouteHydrating) return;
+
+  activity._profileRouteVisible = true;
+  activity._profileRouteHydrating = true;
+  route.textContent = "Loading route...";
+  route.classList.remove("route-unavailable");
+  try {
+    await hydrateProfileRoute(route, run, false, () => activity._profileRouteVisible && activity.isConnected);
+  } finally {
+    activity._profileRouteHydrating = false;
+  }
+}
+
+function releaseProfileActivityRouteMap(activity) {
+  activity._profileRouteVisible = false;
+  const route = activity.querySelector(".profile-route-preview");
+  if (route) destroyProfileRouteMap(route, "");
 }
 
 function createProfileStat(label, value) {
@@ -949,6 +982,8 @@ function formatProfileActivity(run) {
   route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
   item.append(date, deleteButton, title, source, stats, route);
   item._profileRun = run;
+  item._profileRouteVisible = false;
+  item._profileRouteHydrating = false;
   const open = () => openProfileActivityDetail(run);
   item.addEventListener("click", open);
   item.addEventListener("keydown", event => {
@@ -1064,14 +1099,13 @@ async function loadProfileActivities() {
   profileRouteObserver?.disconnect();
   profileRouteObserver = new IntersectionObserver(entries => {
     entries.forEach(entry => {
-      if (!entry.isIntersecting) return;
-      profileRouteObserver.unobserve(entry.target);
-      const route = entry.target.querySelector(".profile-route-preview");
-      if (route && entry.target._profileRun?.archive_status === "ready") {
-        hydrateProfileRoute(route, entry.target._profileRun);
+      if (entry.isIntersecting) {
+        ensureProfileActivityRouteMap(entry.target);
+      } else {
+        releaseProfileActivityRouteMap(entry.target);
       }
     });
-  }, { root: profileView, rootMargin: "180px" });
+  }, { root: profileView, rootMargin: "260px 0px" });
   data.forEach(run => {
     const activity = formatProfileActivity(run);
     profileActivities.appendChild(activity);

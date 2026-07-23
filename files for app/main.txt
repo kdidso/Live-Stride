@@ -799,19 +799,19 @@ function createProfileElevationChart(routeData) {
   const minLabel = `${Math.round(rawMinElevation)} ft`;
   const maxLabel = `${Math.round(rawMaxElevation)} ft`;
   const distanceLabel = `${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi`;
-  const midElevation = (minElevation + maxElevation) / 2;
-  const gridRows = [maxElevation, midElevation, minElevation];
+  const midElevation = (rawMinElevation + rawMaxElevation) / 2;
+  const gridRows = [rawMaxElevation, midElevation, rawMinElevation];
   const distanceStep = maxDistance <= 4 ? 1 : maxDistance <= 15 ? 2 : maxDistance <= 30 ? 5 : 10;
   const distanceTicks = [];
   for (let tick = distanceStep; tick < maxDistance; tick += distanceStep) {
-    distanceTicks.push(tick);
+    if (maxDistance - tick > Math.max(0.75, distanceStep * 0.45)) {
+      distanceTicks.push(tick);
+    }
   }
   const gainFt = Number.isFinite(routeData.analysis.elevationGainM)
     ? `${Math.round(routeData.analysis.elevationGainM * 3.28084)} ft`
     : "--";
-  const maxElevationText = Number.isFinite(routeData.analysis.maxElevationM)
-    ? `${Math.round(routeData.analysis.maxElevationM * 3.28084)} ft`
-    : maxLabel;
+  const maxElevationText = maxLabel;
 
   const section = document.createElement("div");
   section.className = "profile-elevation-content";
@@ -842,9 +842,9 @@ function createProfileElevationChart(routeData) {
     <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#c9ced2" stroke-width="1.2"/>
     <path d="${areaPath}" fill="#b9b8b1" opacity="0.82"/>
     <path d="${linePath}" fill="none" stroke="#b1b0aa" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="${padding.left - 9}" y="${yFor(maxElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
+    <text x="${padding.left - 9}" y="${yFor(rawMaxElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
     <text x="${padding.left - 9}" y="${yFor(midElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${Math.round(midElevation)}</text>
-    <text x="${padding.left - 9}" y="${padding.top + plotHeight}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
+    <text x="${padding.left - 9}" y="${yFor(rawMinElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
     <text x="${padding.left - 12}" y="${padding.top + plotHeight - 2}" fill="#5f6870" font-size="12" text-anchor="end">ft</text>
     <text x="${padding.left}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13">0 mi</text>
     ${distanceTicks.map(value => {
@@ -1083,7 +1083,10 @@ async function ensureProfileActivityRouteMap(activity) {
   route.textContent = "Loading route...";
   route.classList.remove("route-unavailable");
   try {
-    await hydrateProfileRoute(route, run, false, () => activity._profileRouteVisible && activity.isConnected);
+    const routeData = await hydrateProfileRoute(route, run, false, () => activity._profileRouteVisible && activity.isConnected);
+    if (activity._profileRouteVisible && activity.isConnected) {
+      applyProfileRouteStats(run, activity._profileStats, routeData);
+    }
   } finally {
     activity._profileRouteHydrating = false;
   }
@@ -1093,6 +1096,35 @@ function releaseProfileActivityRouteMap(activity) {
   activity._profileRouteVisible = false;
   const route = activity.querySelector(".profile-route-preview");
   if (route) destroyProfileRouteMap(route, "");
+}
+
+function updateProfileStatValue(stat, value) {
+  const valueEl = stat?.querySelector("strong");
+  if (valueEl) valueEl.textContent = value;
+}
+
+function applyProfileRouteStats(run, stats, routeData) {
+  if (!run || !stats || !routeData?.analysis) return;
+  const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
+  const routeMiles = metersToMiles(routeDistanceM);
+  if (routeMiles > 0) {
+    updateProfileStatValue(stats.distanceStat, `${routeMiles.toFixed(2)} mi`);
+    updateProfileStatValue(
+      stats.paceStat,
+      formatProfileSecondsPerMile(Number(run.elapsed_time_ms || 0) / 1000 / routeMiles)
+    );
+  }
+  if (stats.movingStat) {
+    const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
+    updateProfileStatValue(stats.movingStat, movingTimeMs ? formatProfileDuration(movingTimeMs) : "--");
+  }
+  if (stats.gainStat) {
+    const elevationGainM = routeData.analysis.elevationGainM;
+    updateProfileStatValue(
+      stats.gainStat,
+      Number.isFinite(elevationGainM) ? `${Math.round(elevationGainM * 3.28084)} ft` : "--"
+    );
+  }
 }
 
 function createProfileStat(label, value) {
@@ -1135,16 +1167,16 @@ function formatProfileActivity(run) {
   source.textContent = run.source === "private" ? "Private run" : "Broadcast run";
   const stats = document.createElement("div");
   stats.className = "profile-activity-stats";
-  stats.append(
-    createProfileStat("Distance", `${miles.toFixed(2)} mi`),
-    createProfileStat("Pace", formatProfilePace(run)),
-    createProfileStat("Time", formatProfileDuration(run.elapsed_time_ms))
-  );
+  const distanceStat = createProfileStat("Distance", `${miles.toFixed(2)} mi`);
+  const paceStat = createProfileStat("Pace", formatProfilePace(run));
+  const timeStat = createProfileStat("Time", formatProfileDuration(run.elapsed_time_ms));
+  stats.append(distanceStat, paceStat, timeStat);
   const route = document.createElement("div");
   route.className = "profile-route-preview";
   route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
   item.append(date, deleteButton, title, source, stats, route);
   item._profileRun = run;
+  item._profileStats = { distanceStat, paceStat };
   item._profileRouteVisible = false;
   item._profileRouteHydrating = false;
   const open = () => openProfileActivityDetail(run);
@@ -1219,16 +1251,8 @@ async function openProfileActivityDetail(run) {
   if (routeData) {
     const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
     const routeMiles = metersToMiles(routeDistanceM);
-    if (routeMiles > 0) {
-      distanceStat.querySelector("strong").textContent = `${routeMiles.toFixed(2)} mi`;
-      paceStat.querySelector("strong").textContent = formatProfileSecondsPerMile(Number(run.elapsed_time_ms || 0) / 1000 / routeMiles);
-    }
+    applyProfileRouteStats(run, { distanceStat, paceStat, movingStat, gainStat }, routeData);
     const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
-    movingStat.querySelector("strong").textContent = movingTimeMs ? formatProfileDuration(movingTimeMs) : "--";
-    const elevationGainM = routeData.analysis.elevationGainM;
-    gainStat.querySelector("strong").textContent = Number.isFinite(elevationGainM)
-      ? `${Math.round(elevationGainM * 3.28084)} ft`
-      : "--";
     if (movingTimeMs && routeMiles > 0) {
       const movingSecondsPerMile = movingTimeMs / 1000 / routeMiles;
       const movingPace = createProfileStat("Moving pace", formatProfileSecondsPerMile(movingSecondsPerMile));

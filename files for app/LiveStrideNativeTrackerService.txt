@@ -434,8 +434,8 @@ private void uploadNativePoint(Location rawLocation) {
         );
     }
 
-    final double lat = location.getLatitude();
-    final double lon = location.getLongitude();
+    boolean heldPoint = false;
+    String holdReason = null;
     final boolean wasMapMatched = matchResult.matched;
     final String matchingState = matchResult.state.name().toLowerCase(java.util.Locale.US);
     final String matchedStructureType = matchResult.structureType;
@@ -454,6 +454,11 @@ private void uploadNativePoint(Location rawLocation) {
         segmentMeters = previousLocation.distanceTo(location);
 
         double elapsedSeconds = (pointTimeMs - previousPointTimeMs) / 1000.0;
+        if (elapsedSeconds <= 0.0) {
+            System.out.println("LiveStride native ignored zero/negative time point: " + elapsedSeconds);
+            return;
+        }
+
         boolean resumeAfterLongGap = elapsedSeconds > RESUME_ANCHOR_GAP_SECONDS
                 && segmentMeters > RESUME_ANCHOR_MIN_DISTANCE_METERS;
 
@@ -464,46 +469,45 @@ private void uploadNativePoint(Location rawLocation) {
                             + elapsedSeconds + " s"
             );
         } else {
-        double speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0.0;
-        double speedMph = speedMps * 2.23694;
+            double speedMps = segmentMeters / elapsedSeconds;
+            double speedMph = speedMps * 2.23694;
 
-        if (segmentMeters < 1.0) {
-            System.out.println("LiveStride native ignored tiny GPS movement: " + segmentMeters + " m");
-            return;
-        }
+            if (!matchResult.matched
+                    && (segmentMeters < 1.0 || speedMph < 1.0 || speedMph > 140.0)) {
+                heldPoint = true;
+                holdReason = segmentMeters < 1.0
+                        ? "tiny_movement"
+                        : speedMph < 1.0
+                        ? "low_speed"
+                        : "unrealistic_speed";
+                location = new Location(previousLocation);
+                segmentMeters = 0.0;
+                System.out.println(
+                        "LiveStride native recorded hold point: "
+                                + holdReason + " speed=" + speedMph + " mph"
+                );
+            } else {
+                double previousTotalDistanceMeters = totalDistanceMeters;
+                totalDistanceMeters += segmentMeters;
+                alertNotificationForMileSplit = updateMileSplit(
+                        previousTotalDistanceMeters,
+                        totalDistanceMeters,
+                        previousPointTimeMs,
+                        pointTimeMs
+                );
 
-        if (elapsedSeconds <= 0.0) {
-            System.out.println("LiveStride native ignored zero/negative time point: " + elapsedSeconds);
-            return;
-        }
+                double segmentMiles = segmentMeters / METERS_PER_MILE;
+                double elapsedMinutes = elapsedSeconds / 60.0;
 
-        if (speedMph < 1) {
-            System.out.println("LiveStride native ignored low-speed GPS drift: " + speedMph + " mph");
-            return;
-        }
-
-        if (speedMph > 140.0) {
-            System.out.println("LiveStride native ignored unrealistic GPS jump: " + speedMph + " mph");
-            return;
-        }
-
-        double previousTotalDistanceMeters = totalDistanceMeters;
-        totalDistanceMeters += segmentMeters;
-        alertNotificationForMileSplit = updateMileSplit(
-                previousTotalDistanceMeters,
-                totalDistanceMeters,
-                previousPointTimeMs,
-                pointTimeMs
-        );
-
-        double segmentMiles = segmentMeters / METERS_PER_MILE;
-        double elapsedMinutes = elapsedSeconds / 60.0;
-
-        if (segmentMiles > 0) {
-            instPaceMinPerMile = elapsedMinutes / segmentMiles;
-        }
+                if (segmentMiles > 0) {
+                    instPaceMinPerMile = elapsedMinutes / segmentMiles;
+                }
+            }
         }
     }
+
+    final double lat = location.getLatitude();
+    final double lon = location.getLongitude();
 
     double totalMiles = totalDistanceMeters / METERS_PER_MILE;
     double totalMinutes = (pointTimeMs - runStartTimeMs) / 60000.0;
@@ -519,6 +523,8 @@ private void uploadNativePoint(Location rawLocation) {
     final double finalDistanceMeters = totalDistanceMeters;
     final double finalInstPaceMinPerMile = instPaceMinPerMile;
     final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
+    final boolean finalHeldPoint = heldPoint;
+    final String finalHoldReason = holdReason;
     updateRunNotification(
             pointTimeMs,
             finalDistanceMeters,
@@ -556,28 +562,28 @@ private void uploadNativePoint(Location rawLocation) {
             body.put("inst_pace_min_per_mile", finalInstPaceMinPerMile);
             body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
             body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
-            body.put(
-                    "app_state",
-                    localOnly
-                            ? (wasMapMatched
-                            ? "private_native_map_matched"
-                            : "private_native")
-                            : wasMapMatched
-                            ? "foreground_service_map_matched"
-                            : "foreground_service"
-            );
-            body.put(
-                    "note",
-                    localOnly
-                            ? (wasMapMatched
-                            ? "Private local run point map matched to connected "
-                                    + matchedStructureType + " route during " + matchingState
-                            : "Private local run point stored only on this phone")
-                            : wasMapMatched
-                            ? "Map matched to connected " + matchedStructureType
-                                    + " route during " + matchingState
-                            : "Inserted from native Android GPS service with SQLite-backed local storage"
-            );
+            String appState = localOnly
+                    ? (wasMapMatched
+                    ? "private_native_map_matched"
+                    : "private_native")
+                    : wasMapMatched
+                    ? "foreground_service_map_matched"
+                    : "foreground_service";
+            String note = localOnly
+                    ? (wasMapMatched
+                    ? "Private local run point map matched to connected "
+                            + matchedStructureType + " route during " + matchingState
+                    : "Private local run point stored only on this phone")
+                    : wasMapMatched
+                    ? "Map matched to connected " + matchedStructureType
+                            + " route during " + matchingState
+                    : "Inserted from native Android GPS service with SQLite-backed local storage";
+            if (finalHeldPoint) {
+                appState = appState + "_hold";
+                note = note + "; repeated last accepted coordinate during " + finalHoldReason;
+            }
+            body.put("app_state", appState);
+            body.put("note", note);
 
             // Phase SQLite-1:
             // Save every native point locally first. This makes the phone-side record durable

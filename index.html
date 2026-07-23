@@ -1360,6 +1360,7 @@
     let startTime = null;
     let lastPointTime = null;
     let totalDistanceMeters = 0;
+    let stationaryHoldActive = false;
     let lastComputeTime = 0;
 
     let runnerTimerId = null;
@@ -3183,6 +3184,7 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
       pathCoords = [];
       nativePathCoords = [];
       totalDistanceMeters = 0;;
+      stationaryHoldActive = false;
       latestRunnerDistance = 0;
       latestRunnerPace = 0;
       latestRunnerAvgPace = 0;
@@ -3317,16 +3319,26 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
           return;
         }
 
-        if (!matchResult.matched && (segmentMeters < 1 || speedMph < 1.0 || speedMph > 140)) {
+        let shouldHoldStationaryPoint = !matchResult.matched && (segmentMeters < 1 || speedMph < 1.0 || speedMph > 140);
+        if (!matchResult.matched && stationaryHoldActive && segmentMeters < 4) {
+          shouldHoldStationaryPoint = true;
+        }
+
+        if (shouldHoldStationaryPoint) {
           heldPoint = true;
           holdReason = segmentMeters < 1
             ? "tiny_movement"
             : speedMph < 1.0
               ? "low_speed"
-              : "unrealistic_speed";
+              : speedMph > 140
+                ? "unrealistic_speed"
+                : "stationary_release_wait";
           effectiveCoord = [prev.lon, prev.lat];
           segmentMeters = 0;
+          stationaryHoldActive = true;
           console.warn(`Holding browser GPS point (${holdReason}):`, speedMph.toFixed(2), "mph");
+        } else {
+          stationaryHoldActive = false;
         }
 
         totalDistanceMeters += segmentMeters;
@@ -3468,6 +3480,7 @@ fetchElevation(effectiveCoord[1], effectiveCoord[0]).then(elev => {
       totalDistanceMeters = 0;
       startTime = null;
       lastPointTime = null;
+      stationaryHoldActive = false;
       lastComputeTime = 0;
       latestRunnerDistance = 0;
       latestRunnerPace = 0;

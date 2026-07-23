@@ -722,6 +722,91 @@ function createProfileRouteSvg(points, detailed = false) {
   return svg;
 }
 
+function createProfileElevationChart(points, detailed = false) {
+  const samples = [];
+  let distanceM = 0;
+  points.forEach((point, index) => {
+    if (index > 0) {
+      distanceM += haversineDistance(
+        [points[index - 1].lon, points[index - 1].lat],
+        [point.lon, point.lat]
+      );
+    }
+    if (Number.isFinite(point.elevation)) {
+      samples.push({
+        distanceMi: metersToMiles(distanceM),
+        elevationFt: point.elevation * 3.28084
+      });
+    }
+  });
+
+  if (samples.length < 2) {
+    const unavailable = document.createElement("div");
+    unavailable.className = "route-unavailable";
+    unavailable.textContent = "Elevation graph unavailable";
+    return unavailable;
+  }
+
+  const width = 720;
+  const height = detailed ? 190 : 128;
+  const padding = detailed
+    ? { top: 18, right: 26, bottom: 38, left: 58 }
+    : { top: 14, right: 18, bottom: 32, left: 52 };
+  const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
+  const elevations = samples.map(sample => sample.elevationFt);
+  const rawMinElevation = Math.min(...elevations);
+  const rawMaxElevation = Math.max(...elevations);
+  let minElevation = rawMinElevation;
+  let maxElevation = rawMaxElevation;
+  const elevationRange = Math.max(20, maxElevation - minElevation);
+  minElevation -= elevationRange * 0.12;
+  maxElevation += elevationRange * 0.12;
+
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xFor = distanceMi => padding.left + (distanceMi / maxDistance) * plotWidth;
+  const yFor = elevationFt => padding.top + ((maxElevation - elevationFt) / (maxElevation - minElevation)) * plotHeight;
+  const linePath = samples.map((sample, index) => {
+    return `${index ? "L" : "M"}${xFor(sample.distanceMi).toFixed(1)} ${yFor(sample.elevationFt).toFixed(1)}`;
+  }).join(" ");
+  const areaPath = `${linePath} L${xFor(maxDistance).toFixed(1)} ${padding.top + plotHeight} L${padding.left} ${padding.top + plotHeight} Z`;
+  const minLabel = `${Math.round(rawMinElevation)} ft`;
+  const maxLabel = `${Math.round(rawMaxElevation)} ft`;
+  const distanceLabel = `${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi`;
+  const midElevation = (minElevation + maxElevation) / 2;
+  const gridRows = [maxElevation, midElevation, minElevation];
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Elevation graph");
+  svg.classList.add("profile-elevation-chart");
+  svg.innerHTML = `
+    <rect width="${width}" height="${height}" fill="#f7fafb"/>
+    ${gridRows.map(value => {
+      const y = yFor(value).toFixed(1);
+      return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#dfe7eb" stroke-width="1"/>`;
+    }).join("")}
+    <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + plotHeight}" stroke="#9aabb6" stroke-width="1.2"/>
+    <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#9aabb6" stroke-width="1.2"/>
+    <path d="${areaPath}" fill="#c7f2f0" opacity="0.55"/>
+    <path d="${linePath}" fill="none" stroke="#00a9aa" stroke-width="${detailed ? 3.4 : 3}" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="${padding.left}" y="13" fill="#42545f" font-size="12" font-weight="700">Elevation</text>
+    <text x="${padding.left - 8}" y="${yFor(maxElevation).toFixed(1)}" fill="#667783" font-size="11" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
+    <text x="${padding.left - 8}" y="${yFor(minElevation).toFixed(1)}" fill="#667783" font-size="11" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
+    <text x="${padding.left}" y="${height - 10}" fill="#667783" font-size="11">0 mi</text>
+    <text x="${width - padding.right}" y="${height - 10}" fill="#667783" font-size="11" text-anchor="end">${distanceLabel}</text>
+  `;
+  return svg;
+}
+
+function renderProfileElevationChart(routeContainer, routeData, detailed = false) {
+  const graphContainer = routeContainer.nextElementSibling;
+  const expectedClass = detailed ? "profile-elevation-detail" : "profile-elevation-preview";
+  if (!graphContainer?.classList?.contains(expectedClass)) return;
+  graphContainer.replaceChildren(createProfileElevationChart(routeData.points, detailed));
+}
+
 function cloneMapStyle(style) {
   if (typeof style === "string") return style;
   try {
@@ -911,6 +996,7 @@ async function hydrateProfileRoute(container, run, detailed = false, shouldRende
     destroyProfileRouteMap(container);
     const { routeMap } = createProfileRouteMap(container, routeData.points, detailed);
     profileRouteMaps.set(container, routeMap);
+    renderProfileElevationChart(container, routeData, detailed);
     return routeData;
   } catch (error) {
     destroyProfileRouteMap(container);
@@ -991,7 +1077,10 @@ function formatProfileActivity(run) {
   const route = document.createElement("div");
   route.className = "profile-route-preview";
   route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
-  item.append(date, deleteButton, title, source, stats, route);
+  const elevation = document.createElement("div");
+  elevation.className = "profile-elevation-preview";
+  elevation.textContent = run.archive_status === "ready" ? "Loading elevation..." : "Elevation processing...";
+  item.append(date, deleteButton, title, source, stats, route, elevation);
   item._profileRun = run;
   item._profileRouteVisible = false;
   item._profileRouteHydrating = false;
@@ -1047,6 +1136,9 @@ async function openProfileActivityDetail(run) {
   const route = document.createElement("div");
   route.className = "profile-route-detail";
   route.textContent = "Loading route...";
+  const elevation = document.createElement("div");
+  elevation.className = "profile-elevation-detail";
+  elevation.textContent = "Loading elevation...";
   const stats = document.createElement("div");
   stats.className = "profile-detail-stats";
   const miles = Number(run.distance_m || 0) / 1609.344;
@@ -1059,7 +1151,7 @@ async function openProfileActivityDetail(run) {
   const hasCadence = run.avg_cadence_spm != null && Number.isFinite(Number(run.avg_cadence_spm)) && Number(run.avg_cadence_spm) > 0;
   const cadenceStat = createProfileStat("Average cadence", hasCadence ? `${Math.round(run.avg_cadence_spm)} spm` : "--");
   stats.append(distanceStat, paceStat, elapsedStat, movingStat, gainStat, cadenceStat);
-  detail.append(heading, subtitle, route, stats);
+  detail.append(heading, subtitle, route, elevation, stats);
   profileActivities.append(back, detail);
   const routeData = await hydrateProfileRoute(route, run, true);
   if (routeData) {

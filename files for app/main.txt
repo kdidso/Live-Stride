@@ -338,6 +338,29 @@ function addControls() {
     ...(isLightPhoneIII ? { fitBoundsOptions: { maxZoom: 17 } } : {})
   });
 
+  geoControl.on("geolocate", event => {
+    const geolocateButton = document.querySelector(".maplibregl-ctrl-geolocate");
+    const isActivelyFollowing = geolocateButton?.classList.contains(
+      "maplibregl-ctrl-geolocate-active"
+    );
+    if (!isLightPhoneIII ||
+        document.body.classList.contains("viewer-mode") ||
+        !isActivelyFollowing) {
+      return;
+    }
+
+    const longitude = event?.coords?.longitude;
+    const latitude = event?.coords?.latitude;
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
+
+    // Tag this as a geolocation camera update so MapLibre keeps ACTIVE_LOCK.
+    // Once the user pans, the control enters BACKGROUND and this stops running.
+    map.easeTo(
+      { center: [longitude, latitude], zoom: 17, duration: 500 },
+      { geolocateSource: true }
+    );
+  });
+
   map.addControl(geoControl, "bottom-right");
   requestAnimationFrame(() => {
     const geolocateButton = document.querySelector(".maplibregl-ctrl-geolocate");
@@ -526,12 +549,14 @@ function openProfileAuth() {
 
 function closeProfileView() {
   if (!profileView) return;
+  destroyProfileRouteMapsIn(profileView);
   profileView.style.display = "none";
   profileView.setAttribute("aria-hidden", "true");
 }
 
 const profileRouteCache = new Map();
 let profileRouteObserver = null;
+const profileRouteMaps = new WeakMap();
 
 function formatProfileDuration(elapsedMs) {
   const totalSeconds = Math.max(0, Math.round(Number(elapsedMs || 0) / 1000));
@@ -697,12 +722,176 @@ function createProfileRouteSvg(points, detailed = false) {
   return svg;
 }
 
+function cloneMapStyle(style) {
+  if (typeof style === "string") return style;
+  try {
+    return JSON.parse(JSON.stringify(style));
+  } catch (_) {
+    return style;
+  }
+}
+
+function destroyProfileRouteMap(container) {
+  const existing = profileRouteMaps.get(container);
+  if (!existing) return;
+
+  try {
+    existing.remove();
+  } catch (_) {}
+  profileRouteMaps.delete(container);
+}
+
+function destroyProfileRouteMapsIn(root) {
+  if (!root) return;
+  root
+    .querySelectorAll?.(".profile-route-preview, .profile-route-detail")
+    .forEach(container => destroyProfileRouteMap(container));
+}
+
+function createProfileRouteBounds(points) {
+  const bounds = new maplibregl.LngLatBounds();
+  points.forEach(point => bounds.extend([point.lon, point.lat]));
+  return bounds;
+}
+
+function addProfileRouteLayers(routeMap, points) {
+  const lineCoordinates = points.map(point => [point.lon, point.lat]);
+  const start = lineCoordinates[0];
+  const finish = lineCoordinates[lineCoordinates.length - 1];
+
+  routeMap.addSource("profile-route-line-source", {
+    type: "geojson",
+    data: {
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates: lineCoordinates
+      }
+    }
+  });
+
+  routeMap.addLayer({
+    id: "profile-route-line-halo",
+    type: "line",
+    source: "profile-route-line-source",
+    layout: {
+      "line-join": "round",
+      "line-cap": "round"
+    },
+    paint: {
+      "line-color": "#ffffff",
+      "line-width": 8,
+      "line-opacity": 0.92
+    }
+  });
+
+  routeMap.addLayer({
+    id: "profile-route-line",
+    type: "line",
+    source: "profile-route-line-source",
+    layout: {
+      "line-join": "round",
+      "line-cap": "round"
+    },
+    paint: {
+      "line-color": "#00d6d6",
+      "line-width": 4.5,
+      "line-opacity": 0.96
+    }
+  });
+
+  routeMap.addSource("profile-route-endpoints-source", {
+    type: "geojson",
+    data: {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: { kind: "start" },
+          geometry: { type: "Point", coordinates: start }
+        },
+        {
+          type: "Feature",
+          properties: { kind: "finish" },
+          geometry: { type: "Point", coordinates: finish }
+        }
+      ]
+    }
+  });
+
+  routeMap.addLayer({
+    id: "profile-route-endpoint-halo",
+    type: "circle",
+    source: "profile-route-endpoints-source",
+    paint: {
+      "circle-radius": 8,
+      "circle-color": "#ffffff",
+      "circle-opacity": 0.92
+    }
+  });
+
+  routeMap.addLayer({
+    id: "profile-route-endpoint",
+    type: "circle",
+    source: "profile-route-endpoints-source",
+    paint: {
+      "circle-radius": 5,
+      "circle-color": [
+        "match",
+        ["get", "kind"],
+        "start", "#17844b",
+        "finish", "#c83d32",
+        "#24415f"
+      ],
+      "circle-stroke-color": "#ffffff",
+      "circle-stroke-width": 1.5
+    }
+  });
+}
+
+function createProfileRouteMap(points, detailed = false) {
+  const mapEl = document.createElement("div");
+  mapEl.className = "profile-route-map";
+
+  const bounds = createProfileRouteBounds(points);
+  const center = bounds.getCenter();
+  const routeMap = new maplibregl.Map({
+    container: mapEl,
+    style: cloneMapStyle(liveStridePmtilesReady ? LIVESTRIDE_STYLE : STYLES.streets),
+    center: [center.lng, center.lat],
+    zoom: detailed ? 13 : 12,
+    interactive: false,
+    attributionControl: false
+  });
+
+  routeMap.once("load", () => {
+    try {
+      routeMap.fitBounds(bounds, {
+        padding: detailed ? 44 : 28,
+        duration: 0,
+        maxZoom: detailed ? 16 : 15
+      });
+      addProfileRouteLayers(routeMap, points);
+      requestAnimationFrame(() => routeMap.resize());
+    } catch (error) {
+      console.warn("Profile route map failed:", error);
+    }
+  });
+
+  setTimeout(() => routeMap.resize(), 150);
+  return { mapEl, routeMap };
+}
+
 async function hydrateProfileRoute(container, run, detailed = false) {
   try {
     const routeData = await loadProfileRoute(run.id);
-    container.replaceChildren(createProfileRouteSvg(routeData.points, detailed));
+    destroyProfileRouteMap(container);
+    const { mapEl, routeMap } = createProfileRouteMap(routeData.points, detailed);
+    profileRouteMaps.set(container, routeMap);
+    container.replaceChildren(mapEl);
     return routeData;
   } catch (error) {
+    destroyProfileRouteMap(container);
     container.textContent = "Route preview unavailable";
     container.classList.add("route-unavailable");
     console.warn("Profile route load failed:", error);
@@ -796,6 +985,7 @@ async function deleteProfileActivity(run, button) {
 async function openProfileActivityDetail(run) {
   if (!profileActivities) return;
   profileRouteObserver?.disconnect();
+  destroyProfileRouteMapsIn(profileActivities);
   profileActivities.innerHTML = "";
   const back = document.createElement("button");
   back.className = "profile-detail-back";
@@ -844,6 +1034,7 @@ async function openProfileActivityDetail(run) {
 
 async function loadProfileActivities() {
   if (!profileActivities || !profilesSession?.user) return;
+  destroyProfileRouteMapsIn(profileActivities);
   profileActivities.innerHTML = '<div class="profile-empty">Loading activities...</div>';
 
   const { data, error } = await profilesSupabaseClient

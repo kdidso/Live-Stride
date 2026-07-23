@@ -401,19 +401,75 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     .profile-elevation-detail {
-      margin: 16px 0 22px;
-      padding: 18px 18px 16px;
+      margin: 26px 0 4px;
+      padding: 24px 0 0;
       background: #fff;
       border-top: 1px solid #eef1f3;
-      border-bottom: 1px solid #eef1f3;
       color: #4b555f;
       overflow: hidden;
+    }
+
+    .profile-elevation-content {
+      display: grid;
+      gap: 12px;
+    }
+
+    .profile-elevation-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .profile-elevation-header h3 {
+      margin: 0;
+      color: #111820;
+      font-size: 22px;
+      line-height: 1.1;
+      font-weight: 800;
+    }
+
+    .profile-elevation-info {
+      display: grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border: 2px solid #111820;
+      border-radius: 50%;
+      color: #111820;
+      font-size: 15px;
+      font-weight: 800;
+      line-height: 1;
     }
 
     .profile-elevation-chart {
       display: block;
       width: 100%;
       height: auto;
+      min-height: 250px;
+    }
+
+    .profile-elevation-summary {
+      display: grid;
+      gap: 14px;
+      margin-top: 2px;
+      padding-bottom: 4px;
+    }
+
+    .profile-elevation-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 18px;
+      font-size: 16px;
+      color: #4b555f;
+    }
+
+    .profile-elevation-row strong {
+      color: #111820;
+      font-size: 18px;
+      font-weight: 800;
+      white-space: nowrap;
     }
 
     .profile-route-preview .maplibregl-ctrl,

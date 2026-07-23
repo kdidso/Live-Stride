@@ -411,7 +411,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
 
     .profile-elevation-content {
       display: grid;
-      gap: 12px;
+      gap: 18px;
     }
 
     .profile-elevation-header {
@@ -446,7 +446,8 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       display: block;
       width: 100%;
       height: auto;
-      min-height: 250px;
+      margin-top: 2px;
+      min-height: 320px;
     }
 
     .profile-elevation-summary {

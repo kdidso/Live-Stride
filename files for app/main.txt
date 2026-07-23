@@ -871,7 +871,9 @@ function createProfileRouteMap(container, points, detailed = false) {
     style: cloneMapStyle(liveStridePmtilesReady ? LIVESTRIDE_STYLE : STYLES.streets),
     center: [center.lng, center.lat],
     zoom: detailed ? 13 : 12,
-    interactive: false,
+    interactive: detailed,
+    dragRotate: false,
+    pitchWithRotate: false,
     attributionControl: false
   });
 

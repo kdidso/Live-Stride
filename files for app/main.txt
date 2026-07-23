@@ -859,9 +859,10 @@ function addProfileRouteLayers(routeMap, points) {
   });
 }
 
-function createProfileRouteMap(points, detailed = false) {
+function createProfileRouteMap(container, points, detailed = false) {
   const mapEl = document.createElement("div");
   mapEl.className = "profile-route-map";
+  container.replaceChildren(mapEl);
 
   const bounds = createProfileRouteBounds(points);
   const center = bounds.getCenter();
@@ -876,19 +877,28 @@ function createProfileRouteMap(points, detailed = false) {
 
   routeMap.once("load", () => {
     try {
-      routeMap.fitBounds(bounds, {
-        padding: detailed ? 44 : 28,
-        duration: 0,
-        maxZoom: detailed ? 16 : 15
+      requestAnimationFrame(() => {
+        routeMap.resize();
+        routeMap.fitBounds(bounds, {
+          padding: detailed ? 44 : 28,
+          duration: 0,
+          maxZoom: detailed ? 16 : 15
+        });
+        addProfileRouteLayers(routeMap, points);
       });
-      addProfileRouteLayers(routeMap, points);
-      requestAnimationFrame(() => routeMap.resize());
     } catch (error) {
       console.warn("Profile route map failed:", error);
     }
   });
 
-  setTimeout(() => routeMap.resize(), 150);
+  setTimeout(() => {
+    routeMap.resize();
+    routeMap.fitBounds(bounds, {
+      padding: detailed ? 44 : 28,
+      duration: 0,
+      maxZoom: detailed ? 16 : 15
+    });
+  }, 150);
   return { mapEl, routeMap };
 }
 
@@ -897,9 +907,8 @@ async function hydrateProfileRoute(container, run, detailed = false, shouldRende
     const routeData = await loadProfileRoute(run.id);
     if (shouldRender && !shouldRender()) return routeData;
     destroyProfileRouteMap(container);
-    const { mapEl, routeMap } = createProfileRouteMap(routeData.points, detailed);
+    const { routeMap } = createProfileRouteMap(container, routeData.points, detailed);
     profileRouteMaps.set(container, routeMap);
-    container.replaceChildren(mapEl);
     return routeData;
   } catch (error) {
     destroyProfileRouteMap(container);

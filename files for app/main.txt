@@ -627,6 +627,10 @@ async function loadProfileRoute(runId) {
 }
 
 function analyzeProfilePoints(points) {
+  const ELEVATION_GAIN_THRESHOLD_METERS = 10;
+  const MOVING_MIN_DISTANCE_METERS = 1;
+  const MOVING_MIN_SPEED_MPH = 1;
+  const MOVING_MAX_SPEED_MPH = 140;
   const elevationSamples = createProfileElevationSamples(points);
   const smoothedElevations = smoothProfileElevationSamples(elevationSamples);
   let elevationGainM = null;
@@ -650,10 +654,10 @@ function analyzeProfilePoints(points) {
     let anchor = smoothedElevations[0];
     for (let index = 1; index < smoothedElevations.length; index += 1) {
       const difference = smoothedElevations[index] - anchor;
-      if (difference >= 5) {
+      if (difference >= ELEVATION_GAIN_THRESHOLD_METERS) {
         elevationGainM += difference;
         anchor = smoothedElevations[index];
-      } else if (difference <= -5) {
+      } else if (difference <= -ELEVATION_GAIN_THRESHOLD_METERS) {
         elevationLossM += -difference;
         anchor = smoothedElevations[index];
       }
@@ -666,8 +670,19 @@ function analyzeProfilePoints(points) {
     if (!Number.isFinite(points[index - 1].time) || !Number.isFinite(points[index].time)) continue;
     const difference = points[index].time - points[index - 1].time;
     if (difference > 0) {
-      movingTimeMs += Math.min(difference, 1000);
-      timedSegments += 1;
+      const segmentMeters = haversineDistance(
+        [points[index - 1].lon, points[index - 1].lat],
+        [points[index].lon, points[index].lat]
+      );
+      const speedMph = (segmentMeters / (difference / 1000)) * 2.23694;
+      if (
+        segmentMeters >= MOVING_MIN_DISTANCE_METERS &&
+        speedMph >= MOVING_MIN_SPEED_MPH &&
+        speedMph <= MOVING_MAX_SPEED_MPH
+      ) {
+        movingTimeMs += difference;
+        timedSegments += 1;
+      }
     }
   }
 
@@ -1115,7 +1130,7 @@ function applyProfileRouteStats(run, stats, routeData) {
     );
   }
   if (stats.movingStat) {
-    const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
+    const movingTimeMs = routeData.analysis.movingTimeMs || run.moving_time_ms;
     updateProfileStatValue(stats.movingStat, movingTimeMs ? formatProfileDuration(movingTimeMs) : "--");
   }
   if (stats.gainStat) {
@@ -1252,7 +1267,7 @@ async function openProfileActivityDetail(run) {
     const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
     const routeMiles = metersToMiles(routeDistanceM);
     applyProfileRouteStats(run, { distanceStat, paceStat, movingStat, gainStat }, routeData);
-    const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
+    const movingTimeMs = routeData.analysis.movingTimeMs || run.moving_time_ms;
     if (movingTimeMs && routeMiles > 0) {
       const movingSecondsPerMile = movingTimeMs / 1000 / routeMiles;
       const movingPace = createProfileStat("Moving pace", formatProfileSecondsPerMile(movingSecondsPerMile));
@@ -4604,19 +4619,14 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
 
   let instPace = 0;
   let avgPace = 0;
+  let effectiveCoord = coord;
+  let heldPoint = false;
+  let holdReason = null;
 
   if (pathCoords.length > 0) {
     const prev = pathCoords[pathCoords.length - 1];
-    const segmentMeters = haversineDistance([prev.lon, prev.lat], coord);
-      const elapsedSeconds = lastPointTime ? (now - lastPointTime) / 1000 : 0;
-  const speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0;
-  const speedMph = speedMps * 2.23694;
-
-  // Ignore duplicate / nearly stationary GPS noise
-  if (segmentMeters < 1) {
-    console.warn("Ignoring tiny GPS movement:", segmentMeters.toFixed(2), "m");
-    return;
-  }
+    let segmentMeters = haversineDistance([prev.lon, prev.lat], coord);
+    const elapsedSeconds = lastPointTime ? (now - lastPointTime) / 1000 : 0;
 
   // Ignore impossible or bad timing points
   if (elapsedSeconds <= 0) {
@@ -4624,18 +4634,22 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     return;
   }
 
-  // Ignore very slow drift that is probably GPS wobble, not running/walking
-  if (speedMph < 1) {
-    console.warn("Ignoring low-speed GPS drift:", speedMph.toFixed(2), "mph");
-    return;
-  }
+    const speedMps = segmentMeters / elapsedSeconds;
+    const speedMph = speedMps * 2.23694;
 
-  // Ignore unrealistic jumps
-  if (speedMph > 140) {
-    console.warn("Ignoring unrealistic GPS jump:", speedMph.toFixed(2), "mph");
-    return;
-  }
-    totalDistanceMeters += segmentMeters;
+    if (segmentMeters < 1 || speedMph < 1 || speedMph > 140) {
+      heldPoint = true;
+      holdReason = segmentMeters < 1
+        ? "tiny_movement"
+        : speedMph < 1
+        ? "low_speed"
+        : "unrealistic_speed";
+      effectiveCoord = [prev.lon, prev.lat];
+      segmentMeters = 0;
+      console.warn("Recording hold point:", holdReason, speedMph.toFixed(2), "mph");
+    } else {
+      totalDistanceMeters += segmentMeters;
+    }
 
     const segmentMiles = metersToMiles(segmentMeters);
     const elapsedMin = lastPointTime ? (now - lastPointTime) / 60000 : 0;
@@ -4653,8 +4667,8 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
   const recordedAt = new Date(now).toISOString();
 
   const newPoint = {
-    lat: coord[1],
-    lon: coord[0],
+    lat: effectiveCoord[1],
+    lon: effectiveCoord[0],
     timestamp: now,
     time: recordedAt,
     elevation: elevMeters,
@@ -4662,7 +4676,9 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     distance: metersToMiles(totalDistanceMeters),
     distanceM: totalDistanceMeters,
     instPace,
-    avgPace
+    avgPace,
+    heldPoint,
+    holdReason
   };
 
   pathCoords.push(newPoint);
@@ -4680,7 +4696,7 @@ if (broadcasting && broadcastRef) {
     name: runnerName,
     run_id: activeRunId,
     finished: false,
-    current: [coord[0], coord[1]],
+    current: [effectiveCoord[0], effectiveCoord[1]],
     distance: latestRunnerDistance,
     pace: latestRunnerPace,
     avgPace: latestRunnerAvgPace,
@@ -4699,27 +4715,28 @@ if (activeRunId) {
   const pointPayload = {
     run_id: activeRunId,
     sequence_num: thisSequenceNum,
-    lat: coord[1],
-    lon: coord[0],
+    lat: effectiveCoord[1],
+    lon: effectiveCoord[0],
     accuracy: accuracy ?? null,
     elevation_m: elevMeters ?? null,
     recorded_at: recordedAt,
     inst_pace_min_per_mile: instPace,
     avg_pace_min_per_mile: avgPace,
-    distance_m: totalDistanceMeters
+    distance_m: totalDistanceMeters,
+    app_state: heldPoint ? `browser_hold_${holdReason}` : "browser_tracking"
   };
 
 //await safeInsertRunPoint(pointPayload);
 await safeUpdateRunSummary({
   total_distance_m: totalDistanceMeters,
-  latest_lat: coord[1],
-  latest_lon: coord[0],
+  latest_lat: effectiveCoord[1],
+  latest_lon: effectiveCoord[0],
   latest_timestamp: recordedAt
 });
 
 flushSupabaseQueue();
 
-fetchElevation(coord[1], coord[0]).then(elev => {
+fetchElevation(effectiveCoord[1], effectiveCoord[0]).then(elev => {
   if (elev == null) return;
 
   elevMeters = elev;

@@ -785,9 +785,9 @@ function createProfileElevationChart(routeData) {
     return unavailable;
   }
 
-  const width = 720;
-  const height = 300;
-  const padding = { top: 18, right: 18, bottom: 46, left: 62 };
+  const width = 760;
+  const height = 390;
+  const padding = { top: 28, right: 22, bottom: 64, left: 82 };
   const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
   const smoothedMeters = smoothProfileElevationSamples(samples);
   const chartSamples = samples.map((sample, index) => ({
@@ -855,17 +855,17 @@ function createProfileElevationChart(routeData) {
       return `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${padding.top + plotHeight}" stroke="#edf0f2" stroke-width="1"/>`;
     }).join("")}
     <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#c9ced2" stroke-width="1.2"/>
-    <path d="${areaPath}" fill="#b9b8b1" opacity="0.82"/>
-    <path d="${linePath}" fill="none" stroke="#b1b0aa" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="${padding.left - 9}" y="${yFor(rawMaxElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
-    <text x="${padding.left - 9}" y="${yFor(midElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${Math.round(midElevation)}</text>
-    <text x="${padding.left - 9}" y="${yFor(rawMinElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
-    <text x="${padding.left - 12}" y="${padding.top + plotHeight - 2}" fill="#5f6870" font-size="12" text-anchor="end">ft</text>
-    <text x="${padding.left}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13">0 mi</text>
+    <path d="${areaPath}" fill="#b9b8b1" opacity="0.85"/>
+    <path d="${linePath}" fill="none" stroke="#a9a8a2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="${padding.left - 11}" y="${yFor(rawMaxElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
+    <text x="${padding.left - 11}" y="${yFor(midElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${Math.round(midElevation)}</text>
+    <text x="${padding.left - 11}" y="${yFor(rawMinElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
+    <text x="${padding.left - 14}" y="${padding.top + plotHeight - 2}" fill="#4f5962" font-size="16" text-anchor="end">ft</text>
+    <text x="${padding.left}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18">0 mi</text>
     ${distanceTicks.map(value => {
-      return `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13" text-anchor="middle">${value.toFixed(0)} mi</text>`;
+      return `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="middle">${value.toFixed(0)} mi</text>`;
     }).join("")}
-    <text x="${width - padding.right}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13" text-anchor="end">${distanceLabel}</text>
+    <text x="${width - padding.right}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="end">${distanceLabel}</text>
   `;
 
   const summary = document.createElement("div");

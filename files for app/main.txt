@@ -574,6 +574,10 @@ function formatProfilePace(run) {
     const miles = Number(run.distance_m || 0) / 1609.344;
     secondsPerMile = miles > 0 ? Number(run.elapsed_time_ms || 0) / 1000 / miles : 0;
   }
+  return formatProfileSecondsPerMile(secondsPerMile);
+}
+
+function formatProfileSecondsPerMile(secondsPerMile) {
   if (!Number.isFinite(secondsPerMile) || secondsPerMile <= 0) return "--";
   const rounded = Math.round(secondsPerMile);
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")} /mi`;
@@ -623,32 +627,35 @@ async function loadProfileRoute(runId) {
 }
 
 function analyzeProfilePoints(points) {
-  const elevations = points.map(point => point.elevation).filter(Number.isFinite);
+  const elevationSamples = createProfileElevationSamples(points);
+  const smoothedElevations = smoothProfileElevationSamples(elevationSamples);
   let elevationGainM = null;
   let elevationLossM = null;
   let minElevationM = null;
   let maxElevationM = null;
+  let totalDistanceM = 0;
 
-  if (elevations.length >= 2) {
-    const smoothed = elevations.map((_, index) => {
-      const start = Math.max(0, index - 2);
-      const end = Math.min(elevations.length, index + 3);
-      const window = elevations.slice(start, end);
-      return window.reduce((sum, value) => sum + value, 0) / window.length;
-    });
-    minElevationM = Math.min(...smoothed);
-    maxElevationM = Math.max(...smoothed);
+  for (let index = 1; index < points.length; index += 1) {
+    totalDistanceM += haversineDistance(
+      [points[index - 1].lon, points[index - 1].lat],
+      [points[index].lon, points[index].lat]
+    );
+  }
+
+  if (smoothedElevations.length >= 2) {
+    minElevationM = Math.min(...smoothedElevations);
+    maxElevationM = Math.max(...smoothedElevations);
     elevationGainM = 0;
     elevationLossM = 0;
-    let anchor = smoothed[0];
-    for (let index = 1; index < smoothed.length; index += 1) {
-      const difference = smoothed[index] - anchor;
-      if (difference >= 1) {
+    let anchor = smoothedElevations[0];
+    for (let index = 1; index < smoothedElevations.length; index += 1) {
+      const difference = smoothedElevations[index] - anchor;
+      if (difference >= 5) {
         elevationGainM += difference;
-        anchor = smoothed[index];
-      } else if (difference <= -1) {
+        anchor = smoothedElevations[index];
+      } else if (difference <= -5) {
         elevationLossM += -difference;
-        anchor = smoothed[index];
+        anchor = smoothedElevations[index];
       }
     }
   }
@@ -669,8 +676,40 @@ function analyzeProfilePoints(points) {
     elevationLossM,
     minElevationM,
     maxElevationM,
+    totalDistanceM,
     movingTimeMs: timedSegments ? movingTimeMs : null
   };
+}
+
+function createProfileElevationSamples(points) {
+  const samples = [];
+  let distanceM = 0;
+  points.forEach((point, index) => {
+    if (index > 0) {
+      distanceM += haversineDistance(
+        [points[index - 1].lon, points[index - 1].lat],
+        [point.lon, point.lat]
+      );
+    }
+    if (Number.isFinite(point.elevation)) {
+      samples.push({
+        distanceM,
+        distanceMi: metersToMiles(distanceM),
+        elevationM: point.elevation,
+        elevationFt: point.elevation * 3.28084
+      });
+    }
+  });
+  return samples;
+}
+
+function smoothProfileElevationSamples(samples) {
+  return samples.map((_, index) => {
+    const start = Math.max(0, index - 4);
+    const end = Math.min(samples.length, index + 5);
+    const window = samples.slice(start, end);
+    return window.reduce((sum, sample) => sum + sample.elevationM, 0) / window.length;
+  });
 }
 
 function createProfileRouteSvg(points, detailed = false) {
@@ -722,24 +761,8 @@ function createProfileRouteSvg(points, detailed = false) {
   return svg;
 }
 
-function createProfileElevationChart(points, detailed = false) {
-  const samples = [];
-  let distanceM = 0;
-  points.forEach((point, index) => {
-    if (index > 0) {
-      distanceM += haversineDistance(
-        [points[index - 1].lon, points[index - 1].lat],
-        [point.lon, point.lat]
-      );
-    }
-    if (Number.isFinite(point.elevation)) {
-      samples.push({
-        distanceMi: metersToMiles(distanceM),
-        elevationFt: point.elevation * 3.28084
-      });
-    }
-  });
-
+function createProfileElevationChart(routeData) {
+  const samples = createProfileElevationSamples(routeData.points);
   if (samples.length < 2) {
     const unavailable = document.createElement("div");
     unavailable.className = "route-unavailable";
@@ -748,12 +771,15 @@ function createProfileElevationChart(points, detailed = false) {
   }
 
   const width = 720;
-  const height = detailed ? 190 : 128;
-  const padding = detailed
-    ? { top: 18, right: 26, bottom: 38, left: 58 }
-    : { top: 14, right: 18, bottom: 32, left: 52 };
+  const height = 330;
+  const padding = { top: 54, right: 26, bottom: 62, left: 58 };
   const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
-  const elevations = samples.map(sample => sample.elevationFt);
+  const smoothedMeters = smoothProfileElevationSamples(samples);
+  const chartSamples = samples.map((sample, index) => ({
+    distanceMi: sample.distanceMi,
+    elevationFt: smoothedMeters[index] * 3.28084
+  }));
+  const elevations = chartSamples.map(sample => sample.elevationFt);
   const rawMinElevation = Math.min(...elevations);
   const rawMaxElevation = Math.max(...elevations);
   let minElevation = rawMinElevation;
@@ -766,7 +792,7 @@ function createProfileElevationChart(points, detailed = false) {
   const plotHeight = height - padding.top - padding.bottom;
   const xFor = distanceMi => padding.left + (distanceMi / maxDistance) * plotWidth;
   const yFor = elevationFt => padding.top + ((maxElevation - elevationFt) / (maxElevation - minElevation)) * plotHeight;
-  const linePath = samples.map((sample, index) => {
+  const linePath = chartSamples.map((sample, index) => {
     return `${index ? "L" : "M"}${xFor(sample.distanceMi).toFixed(1)} ${yFor(sample.elevationFt).toFixed(1)}`;
   }).join(" ");
   const areaPath = `${linePath} L${xFor(maxDistance).toFixed(1)} ${padding.top + plotHeight} L${padding.left} ${padding.top + plotHeight} Z`;
@@ -775,6 +801,17 @@ function createProfileElevationChart(points, detailed = false) {
   const distanceLabel = `${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi`;
   const midElevation = (minElevation + maxElevation) / 2;
   const gridRows = [maxElevation, midElevation, minElevation];
+  const distanceStep = maxDistance <= 4 ? 1 : maxDistance <= 15 ? 2 : maxDistance <= 30 ? 5 : 10;
+  const distanceTicks = [];
+  for (let tick = distanceStep; tick < maxDistance; tick += distanceStep) {
+    distanceTicks.push(tick);
+  }
+  const gainFt = Number.isFinite(routeData.analysis.elevationGainM)
+    ? `${Math.round(routeData.analysis.elevationGainM * 3.28084)} ft`
+    : "--";
+  const maxElevationText = Number.isFinite(routeData.analysis.maxElevationM)
+    ? `${Math.round(routeData.analysis.maxElevationM * 3.28084)} ft`
+    : maxLabel;
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -782,29 +819,43 @@ function createProfileElevationChart(points, detailed = false) {
   svg.setAttribute("aria-label", "Elevation graph");
   svg.classList.add("profile-elevation-chart");
   svg.innerHTML = `
-    <rect width="${width}" height="${height}" fill="#f7fafb"/>
+    <rect width="${width}" height="${height}" fill="#ffffff"/>
+    <text x="0" y="22" fill="#111820" font-size="22" font-weight="800">Elevation</text>
+    <circle cx="${width - 16}" cy="16" r="11" fill="none" stroke="#111820" stroke-width="2"/>
+    <text x="${width - 16}" y="20" fill="#111820" font-size="15" font-weight="800" text-anchor="middle">i</text>
     ${gridRows.map(value => {
       const y = yFor(value).toFixed(1);
-      return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#dfe7eb" stroke-width="1"/>`;
+      return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#e8ecef" stroke-width="1"/>`;
     }).join("")}
-    <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + plotHeight}" stroke="#9aabb6" stroke-width="1.2"/>
-    <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#9aabb6" stroke-width="1.2"/>
-    <path d="${areaPath}" fill="#c7f2f0" opacity="0.55"/>
-    <path d="${linePath}" fill="none" stroke="#00a9aa" stroke-width="${detailed ? 3.4 : 3}" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="${padding.left}" y="13" fill="#42545f" font-size="12" font-weight="700">Elevation</text>
-    <text x="${padding.left - 8}" y="${yFor(maxElevation).toFixed(1)}" fill="#667783" font-size="11" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
-    <text x="${padding.left - 8}" y="${yFor(minElevation).toFixed(1)}" fill="#667783" font-size="11" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
-    <text x="${padding.left}" y="${height - 10}" fill="#667783" font-size="11">0 mi</text>
-    <text x="${width - padding.right}" y="${height - 10}" fill="#667783" font-size="11" text-anchor="end">${distanceLabel}</text>
+    ${distanceTicks.map(value => {
+      const x = xFor(value).toFixed(1);
+      return `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${padding.top + plotHeight}" stroke="#edf0f2" stroke-width="1"/>`;
+    }).join("")}
+    <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#c9ced2" stroke-width="1.2"/>
+    <path d="${areaPath}" fill="#b9b8b1" opacity="0.82"/>
+    <path d="${linePath}" fill="none" stroke="#b1b0aa" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="${padding.left - 9}" y="${yFor(maxElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
+    <text x="${padding.left - 9}" y="${yFor(midElevation).toFixed(1)}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${Math.round(midElevation)}</text>
+    <text x="${padding.left - 9}" y="${padding.top + plotHeight}" fill="#5f6870" font-size="13" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
+    <text x="${padding.left - 12}" y="${padding.top + plotHeight - 2}" fill="#5f6870" font-size="12" text-anchor="end">ft</text>
+    <text x="${padding.left}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13">0 mi</text>
+    ${distanceTicks.map(value => {
+      return `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13" text-anchor="middle">${value.toFixed(0)} mi</text>`;
+    }).join("")}
+    <text x="${width - padding.right}" y="${padding.top + plotHeight + 32}" fill="#5f6870" font-size="13" text-anchor="end">${distanceLabel}</text>
+    <text x="0" y="${height - 50}" fill="#4b555f" font-size="16">Elevation Gain</text>
+    <text x="${width}" y="${height - 50}" fill="#111820" font-size="17" font-weight="800" text-anchor="end">${gainFt}</text>
+    <text x="0" y="${height - 12}" fill="#4b555f" font-size="16">Max Elevation</text>
+    <text x="${width}" y="${height - 12}" fill="#111820" font-size="17" font-weight="800" text-anchor="end">${maxElevationText}</text>
   `;
   return svg;
 }
 
 function renderProfileElevationChart(routeContainer, routeData, detailed = false) {
+  if (!detailed) return;
   const graphContainer = routeContainer.nextElementSibling;
-  const expectedClass = detailed ? "profile-elevation-detail" : "profile-elevation-preview";
-  if (!graphContainer?.classList?.contains(expectedClass)) return;
-  graphContainer.replaceChildren(createProfileElevationChart(routeData.points, detailed));
+  if (!graphContainer?.classList?.contains("profile-elevation-detail")) return;
+  graphContainer.replaceChildren(createProfileElevationChart(routeData));
 }
 
 function cloneMapStyle(style) {
@@ -1077,10 +1128,7 @@ function formatProfileActivity(run) {
   const route = document.createElement("div");
   route.className = "profile-route-preview";
   route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
-  const elevation = document.createElement("div");
-  elevation.className = "profile-elevation-preview";
-  elevation.textContent = run.archive_status === "ready" ? "Loading elevation..." : "Elevation processing...";
-  item.append(date, deleteButton, title, source, stats, route, elevation);
+  item.append(date, deleteButton, title, source, stats, route);
   item._profileRun = run;
   item._profileRouteVisible = false;
   item._profileRouteHydrating = false;
@@ -1146,8 +1194,7 @@ async function openProfileActivityDetail(run) {
   const paceStat = createProfileStat("Average pace", formatProfilePace(run));
   const elapsedStat = createProfileStat("Elapsed time", formatProfileDuration(run.elapsed_time_ms));
   const movingStat = createProfileStat("Moving time", run.moving_time_ms ? formatProfileDuration(run.moving_time_ms) : "Calculating...");
-  const hasStoredGain = run.elevation_gain_m != null && Number.isFinite(Number(run.elevation_gain_m));
-  const gainStat = createProfileStat("Elevation gain", hasStoredGain ? `${Math.round(Number(run.elevation_gain_m) * 3.28084)} ft` : "Calculating...");
+  const gainStat = createProfileStat("Elevation gain", "Calculating...");
   const hasCadence = run.avg_cadence_spm != null && Number.isFinite(Number(run.avg_cadence_spm)) && Number(run.avg_cadence_spm) > 0;
   const cadenceStat = createProfileStat("Average cadence", hasCadence ? `${Math.round(run.avg_cadence_spm)} spm` : "--");
   stats.append(distanceStat, paceStat, elapsedStat, movingStat, gainStat, cadenceStat);
@@ -1155,16 +1202,21 @@ async function openProfileActivityDetail(run) {
   profileActivities.append(back, detail);
   const routeData = await hydrateProfileRoute(route, run, true);
   if (routeData) {
+    const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
+    const routeMiles = metersToMiles(routeDistanceM);
+    if (routeMiles > 0) {
+      distanceStat.querySelector("strong").textContent = `${routeMiles.toFixed(2)} mi`;
+      paceStat.querySelector("strong").textContent = formatProfileSecondsPerMile(Number(run.elapsed_time_ms || 0) / 1000 / routeMiles);
+    }
     const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
     movingStat.querySelector("strong").textContent = movingTimeMs ? formatProfileDuration(movingTimeMs) : "--";
-    const elevationGainM = hasStoredGain ? Number(run.elevation_gain_m) : routeData.analysis.elevationGainM;
+    const elevationGainM = routeData.analysis.elevationGainM;
     gainStat.querySelector("strong").textContent = Number.isFinite(elevationGainM)
       ? `${Math.round(elevationGainM * 3.28084)} ft`
       : "--";
-    if (movingTimeMs && miles > 0) {
-      const movingSecondsPerMile = movingTimeMs / 1000 / miles;
-      const rounded = Math.round(movingSecondsPerMile);
-      const movingPace = createProfileStat("Moving pace", `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")} /mi`);
+    if (movingTimeMs && routeMiles > 0) {
+      const movingSecondsPerMile = movingTimeMs / 1000 / routeMiles;
+      const movingPace = createProfileStat("Moving pace", formatProfileSecondsPerMile(movingSecondsPerMile));
       stats.append(movingPace);
     }
   }

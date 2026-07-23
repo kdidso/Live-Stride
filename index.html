@@ -123,6 +123,17 @@
     .profile-route-preview, .profile-route-detail { display: grid; place-items: center; min-height: 190px; margin: 14px -16px -16px; background: #eef3f1; color: #667783; overflow: hidden; }
     .profile-route-detail { min-height: 300px; margin: 18px 0 8px; border: 1px solid #d5dde3; border-radius: 6px; }
     .profile-route-svg { display: block; width: 100%; height: 100%; min-height: inherit; }
+    .profile-route-map { width: 100%; height: 100%; min-height: inherit; }
+    .profile-elevation-detail { margin: 26px 0 4px; padding: 24px 0 0; background: #fff; border-top: 1px solid #eef1f3; color: #4b555f; overflow: hidden; }
+    .profile-elevation-content { display: grid; gap: 18px; }
+    .profile-elevation-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .profile-elevation-header h3 { margin: 0; color: #111820; font-size: 22px; line-height: 1.1; font-weight: 800; }
+    .profile-elevation-info { display: grid; place-items: center; width: 24px; height: 24px; border: 2px solid #111820; border-radius: 50%; color: #111820; font-size: 15px; font-weight: 800; line-height: 1; }
+    .profile-elevation-chart { display: block; width: 100%; height: auto; margin-top: 2px; min-height: 320px; }
+    .profile-elevation-summary { display: grid; gap: 14px; margin-top: 2px; padding-bottom: 4px; }
+    .profile-elevation-row { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; font-size: 16px; color: #4b555f; }
+    .profile-elevation-row strong { color: #111820; font-size: 18px; font-weight: 800; white-space: nowrap; }
+    .profile-route-preview .maplibregl-ctrl, .profile-route-detail .maplibregl-ctrl { display: none !important; }
     .profile-detail-back { justify-self: start; width: auto; margin-bottom: 14px; padding: 9px 14px; background: #e6edf1; color: #24343f; }
     .profile-activity-detail { padding: 20px; text-align: left; }
     .profile-activity-detail h2, .profile-activity-detail p { margin: 0; }
@@ -584,18 +595,22 @@
     }
     const browserProfileRouteCache = new Map();
     let browserProfileRouteObserver = null;
+    const browserProfileRouteMaps = new WeakMap();
     function profileDuration(ms) {
       const total = Math.max(0, Math.round(Number(ms || 0) / 1000));
       const hours = Math.floor(total / 3600), minutes = Math.floor(total % 3600 / 60), seconds = total % 60;
       return hours ? `${hours}:${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}` : `${minutes}:${String(seconds).padStart(2,"0")}`;
     }
+    function browserFormatSecondsPerMile(seconds) {
+      if (!Number.isFinite(seconds) || seconds <= 0) return "--";
+      const rounded = Math.round(seconds);
+      return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2,"0")} /mi`;
+    }
     function profilePace(run) {
       let seconds = Number(run.avg_pace_sec_per_km) * 1.609344;
       const miles = Number(run.distance_m || 0) / 1609.344;
       if (!(seconds > 0)) seconds = miles > 0 ? Number(run.elapsed_time_ms || 0) / 1000 / miles : 0;
-      if (!(seconds > 0)) return "--";
-      seconds = Math.round(seconds);
-      return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2,"0")} /mi`;
+      return browserFormatSecondsPerMile(seconds);
     }
     function profileStat(label, value) {
       const node = document.createElement("div"); node.className = "profile-stat";
@@ -631,53 +646,292 @@
       try { return await request; } catch (error) { browserProfileRouteCache.delete(runId); throw error; }
     }
     function analyzeBrowserProfilePoints(points) {
-      const elevations = points.map(point => point.elevation).filter(Number.isFinite);
+      const ELEVATION_GAIN_THRESHOLD_METERS = 10;
+      const MOVING_MIN_DISTANCE_METERS = 1;
+      const MOVING_MIN_SPEED_MPH = 1;
+      const MOVING_MAX_SPEED_MPH = 140;
+      const elevationSamples = createBrowserProfileElevationSamples(points);
+      const smoothedElevations = smoothBrowserProfileElevationSamples(elevationSamples);
       let elevationGainM = null;
-      if (elevations.length >= 2) {
-        const smoothed = elevations.map((_, index) => {
-          const window = elevations.slice(Math.max(0, index - 2), Math.min(elevations.length, index + 3));
-          return window.reduce((sum, value) => sum + value, 0) / window.length;
-        });
+      let elevationLossM = null;
+      let minElevationM = null;
+      let maxElevationM = null;
+      let totalDistanceM = 0;
+
+      for (let index = 1; index < points.length; index += 1) {
+        totalDistanceM += haversineDistance(
+          [points[index - 1].lon, points[index - 1].lat],
+          [points[index].lon, points[index].lat]
+        );
+      }
+
+      if (smoothedElevations.length >= 2) {
+        minElevationM = Math.min(...smoothedElevations);
+        maxElevationM = Math.max(...smoothedElevations);
         elevationGainM = 0;
-        let anchor = smoothed[0];
-        for (let index = 1; index < smoothed.length; index += 1) {
-          const difference = smoothed[index] - anchor;
-          if (difference >= 1) { elevationGainM += difference; anchor = smoothed[index]; }
-          else if (difference <= -1) anchor = smoothed[index];
+        elevationLossM = 0;
+        let anchor = smoothedElevations[0];
+        for (let index = 1; index < smoothedElevations.length; index += 1) {
+          const difference = smoothedElevations[index] - anchor;
+          if (difference >= ELEVATION_GAIN_THRESHOLD_METERS) {
+            elevationGainM += difference;
+            anchor = smoothedElevations[index];
+          } else if (difference <= -ELEVATION_GAIN_THRESHOLD_METERS) {
+            elevationLossM += -difference;
+            anchor = smoothedElevations[index];
+          }
         }
       }
       let movingTimeMs = 0, timedSegments = 0;
       for (let index = 1; index < points.length; index += 1) {
         if (!Number.isFinite(points[index - 1].time) || !Number.isFinite(points[index].time)) continue;
         const difference = points[index].time - points[index - 1].time;
-        if (difference > 0) { movingTimeMs += Math.min(difference, 1000); timedSegments += 1; }
+        if (difference > 0) {
+          const segmentMeters = haversineDistance(
+            [points[index - 1].lon, points[index - 1].lat],
+            [points[index].lon, points[index].lat]
+          );
+          const speedMph = (segmentMeters / (difference / 1000)) * 2.23694;
+          if (
+            segmentMeters >= MOVING_MIN_DISTANCE_METERS &&
+            speedMph >= MOVING_MIN_SPEED_MPH &&
+            speedMph <= MOVING_MAX_SPEED_MPH
+          ) {
+            movingTimeMs += difference;
+            timedSegments += 1;
+          }
+        }
       }
-      return { elevationGainM, movingTimeMs: timedSegments ? movingTimeMs : null };
+      return { elevationGainM, elevationLossM, minElevationM, maxElevationM, totalDistanceM, movingTimeMs: timedSegments ? movingTimeMs : null };
     }
-    function profileRouteSvg(points, detailed = false) {
-      const width = 720, height = detailed ? 430 : 280, padding = detailed ? 34 : 22;
-      const averageLat = points.reduce((sum, point) => sum + point.lat, 0) / points.length;
-      const lonScale = Math.max(.2, Math.cos(averageLat * Math.PI / 180));
-      const projected = points.map(point => ({ x: point.lon * lonScale, y: -point.lat }));
-      const xs = projected.map(point => point.x), ys = projected.map(point => point.y);
-      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-      const rangeX = Math.max(.000001, maxX - minX), rangeY = Math.max(.000001, maxY - minY);
-      const scale = Math.min((width - padding * 2) / rangeX, (height - padding * 2) / rangeY);
-      const offsetX = (width - rangeX * scale) / 2, offsetY = (height - rangeY * scale) / 2;
-      const locate = point => ({ x: offsetX + (point.x - minX) * scale, y: offsetY + (point.y - minY) * scale });
-      const path = projected.map((point, index) => { const p = locate(point); return `${index ? "L" : "M"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`; }).join(" ");
-      const start = locate(projected[0]), finish = locate(projected[projected.length - 1]);
+    function createBrowserProfileElevationSamples(points) {
+      const samples = [];
+      let distanceM = 0;
+      points.forEach((point, index) => {
+        if (index > 0) {
+          distanceM += haversineDistance(
+            [points[index - 1].lon, points[index - 1].lat],
+            [point.lon, point.lat]
+          );
+        }
+        if (Number.isFinite(point.elevation)) {
+          samples.push({
+            distanceM,
+            distanceMi: metersToMiles(distanceM),
+            elevationM: point.elevation,
+            elevationFt: point.elevation * 3.28084
+          });
+        }
+      });
+      return samples;
+    }
+    function smoothBrowserProfileElevationSamples(samples) {
+      return samples.map((_, index) => {
+        const start = Math.max(0, index - 4);
+        const end = Math.min(samples.length, index + 5);
+        const window = samples.slice(start, end);
+        return window.reduce((sum, sample) => sum + sample.elevationM, 0) / window.length;
+      });
+    }
+    function createBrowserProfileElevationChart(routeData) {
+      const samples = createBrowserProfileElevationSamples(routeData.points);
+      if (samples.length < 2) {
+        const unavailable = document.createElement("div");
+        unavailable.className = "route-unavailable";
+        unavailable.textContent = "Elevation graph unavailable";
+        return unavailable;
+      }
+      const width = 760;
+      const height = 390;
+      const padding = { top: 28, right: 22, bottom: 64, left: 82 };
+      const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
+      const smoothedMeters = smoothBrowserProfileElevationSamples(samples);
+      const chartSamples = samples.map((sample, index) => ({
+        distanceMi: sample.distanceMi,
+        elevationFt: smoothedMeters[index] * 3.28084
+      }));
+      const elevations = chartSamples.map(sample => sample.elevationFt);
+      const rawMinElevation = Math.min(...elevations);
+      const rawMaxElevation = Math.max(...elevations);
+      let minElevation = rawMinElevation;
+      let maxElevation = rawMaxElevation;
+      const elevationRange = Math.max(20, maxElevation - minElevation);
+      minElevation -= elevationRange * 0.12;
+      maxElevation += elevationRange * 0.12;
+      const plotWidth = width - padding.left - padding.right;
+      const plotHeight = height - padding.top - padding.bottom;
+      const xFor = distanceMi => padding.left + (distanceMi / maxDistance) * plotWidth;
+      const yFor = elevationFt => padding.top + ((maxElevation - elevationFt) / (maxElevation - minElevation)) * plotHeight;
+      const linePath = chartSamples.map((sample, index) => `${index ? "L" : "M"}${xFor(sample.distanceMi).toFixed(1)} ${yFor(sample.elevationFt).toFixed(1)}`).join(" ");
+      const areaPath = `${linePath} L${xFor(maxDistance).toFixed(1)} ${padding.top + plotHeight} L${padding.left} ${padding.top + plotHeight} Z`;
+      const minLabel = `${Math.round(rawMinElevation)} ft`;
+      const maxLabel = `${Math.round(rawMaxElevation)} ft`;
+      const distanceLabel = `${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi`;
+      const midElevation = (rawMinElevation + rawMaxElevation) / 2;
+      const gridRows = [rawMaxElevation, midElevation, rawMinElevation];
+      const distanceStep = maxDistance <= 4 ? 1 : maxDistance <= 15 ? 2 : maxDistance <= 30 ? 5 : 10;
+      const distanceTicks = [];
+      for (let tick = distanceStep; tick < maxDistance; tick += distanceStep) {
+        if (maxDistance - tick > Math.max(0.75, distanceStep * 0.45)) distanceTicks.push(tick);
+      }
+      const gainFt = Number.isFinite(routeData.analysis.elevationGainM)
+        ? `${Math.round(routeData.analysis.elevationGainM * 3.28084)} ft`
+        : "--";
+      const section = document.createElement("div");
+      section.className = "profile-elevation-content";
+      const header = document.createElement("div");
+      header.className = "profile-elevation-header";
+      const title = document.createElement("h3");
+      title.textContent = "Elevation";
+      const info = document.createElement("span");
+      info.className = "profile-elevation-info";
+      info.textContent = "i";
+      header.append(title, info);
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      svg.setAttribute("viewBox", `0 0 ${width} ${height}`); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "Saved activity route"); svg.classList.add("profile-route-svg");
-      svg.innerHTML = `<rect width="${width}" height="${height}" fill="#eef3f1"/><path d="M0 ${height*.28} Q${width*.28} ${height*.12} ${width*.52} ${height*.34} T${width} ${height*.22}" fill="none" stroke="#fff" stroke-width="16"/><path d="M${width*.18} 0 Q${width*.25} ${height*.5} ${width*.08} ${height}" fill="none" stroke="#fff" stroke-width="10"/><path d="${path}" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/><path d="${path}" fill="none" stroke="#ef5b2a" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="${start.x}" cy="${start.y}" r="7" fill="#fff" stroke="#17844b" stroke-width="5"/><circle cx="${finish.x}" cy="${finish.y}" r="7" fill="#fff" stroke="#c83d32" stroke-width="5"/>`;
-      return svg;
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", "Elevation graph");
+      svg.classList.add("profile-elevation-chart");
+      svg.innerHTML = `
+        <rect width="${width}" height="${height}" fill="#ffffff"/>
+        ${gridRows.map(value => `<line x1="${padding.left}" y1="${yFor(value).toFixed(1)}" x2="${width - padding.right}" y2="${yFor(value).toFixed(1)}" stroke="#e8ecef" stroke-width="1"/>`).join("")}
+        ${distanceTicks.map(value => `<line x1="${xFor(value).toFixed(1)}" y1="${padding.top}" x2="${xFor(value).toFixed(1)}" y2="${padding.top + plotHeight}" stroke="#edf0f2" stroke-width="1"/>`).join("")}
+        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#c9ced2" stroke-width="1.2"/>
+        <path d="${areaPath}" fill="#b9b8b1" opacity="0.85"/>
+        <path d="${linePath}" fill="none" stroke="#a9a8a2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="${padding.left - 11}" y="${yFor(rawMaxElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
+        <text x="${padding.left - 11}" y="${yFor(midElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${Math.round(midElevation)}</text>
+        <text x="${padding.left - 11}" y="${yFor(rawMinElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
+        <text x="${padding.left - 14}" y="${padding.top + plotHeight - 2}" fill="#4f5962" font-size="16" text-anchor="end">ft</text>
+        <text x="${padding.left}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18">0 mi</text>
+        ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="middle">${value.toFixed(0)} mi</text>`).join("")}
+        <text x="${width - padding.right}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="end">${distanceLabel}</text>
+      `;
+      const summary = document.createElement("div");
+      summary.className = "profile-elevation-summary";
+      const gainRow = document.createElement("div");
+      gainRow.className = "profile-elevation-row";
+      gainRow.innerHTML = `<span>Elevation Gain</span><strong>${gainFt}</strong>`;
+      const maxRow = document.createElement("div");
+      maxRow.className = "profile-elevation-row";
+      maxRow.innerHTML = `<span>Max Elevation</span><strong>${maxLabel}</strong>`;
+      summary.append(gainRow, maxRow);
+      section.append(header, svg, summary);
+      return section;
     }
-    async function hydrateBrowserProfileRoute(container, run, detailed = false) {
-      try { const routeData = await profileRoute(run.id); container.replaceChildren(profileRouteSvg(routeData.points, detailed)); return routeData; }
-      catch (error) { container.textContent = "Route preview unavailable"; console.warn("Profile route load failed:", error); return null; }
+    function renderBrowserProfileElevationChart(routeContainer, routeData, detailed = false) {
+      if (!detailed) return;
+      const graphContainer = routeContainer.closest(".profile-activity-detail")?.querySelector(".profile-elevation-detail");
+      if (!graphContainer?.classList?.contains("profile-elevation-detail")) return;
+      graphContainer.replaceChildren(createBrowserProfileElevationChart(routeData));
+    }
+    function cloneMapStyle(style) {
+      if (typeof style === "string") return style;
+      try { return JSON.parse(JSON.stringify(style)); } catch (_) { return style; }
+    }
+    function destroyBrowserProfileRouteMap(container, placeholder = null) {
+      const existing = browserProfileRouteMaps.get(container);
+      if (existing) {
+        try { existing.remove(); } catch (_) {}
+        browserProfileRouteMaps.delete(container);
+      }
+      if (placeholder != null) {
+        container.textContent = placeholder;
+        container.classList.remove("route-unavailable");
+      }
+    }
+    function destroyBrowserProfileRouteMapsIn(root) {
+      root?.querySelectorAll?.(".profile-route-preview, .profile-route-detail")
+        .forEach(container => destroyBrowserProfileRouteMap(container));
+    }
+    function createBrowserProfileRouteBounds(points) {
+      const bounds = new maplibregl.LngLatBounds();
+      points.forEach(point => bounds.extend([point.lon, point.lat]));
+      return bounds;
+    }
+    function addBrowserProfileRouteLayers(routeMap, points) {
+      const lineCoordinates = points.map(point => [point.lon, point.lat]);
+      const start = lineCoordinates[0];
+      const finish = lineCoordinates[lineCoordinates.length - 1];
+      routeMap.addSource("profile-route-line-source", { type: "geojson", data: { type: "Feature", geometry: { type: "LineString", coordinates: lineCoordinates } } });
+      routeMap.addLayer({ id: "profile-route-line-halo", type: "line", source: "profile-route-line-source", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#ffffff", "line-width": 8, "line-opacity": 0.92 } });
+      routeMap.addLayer({ id: "profile-route-line", type: "line", source: "profile-route-line-source", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#00d6d6", "line-width": 4.5, "line-opacity": 0.96 } });
+      routeMap.addSource("profile-route-endpoints-source", { type: "geojson", data: { type: "FeatureCollection", features: [
+        { type: "Feature", properties: { kind: "start" }, geometry: { type: "Point", coordinates: start } },
+        { type: "Feature", properties: { kind: "finish" }, geometry: { type: "Point", coordinates: finish } }
+      ] } });
+      routeMap.addLayer({ id: "profile-route-endpoint-halo", type: "circle", source: "profile-route-endpoints-source", paint: { "circle-radius": 8, "circle-color": "#ffffff", "circle-opacity": 0.92 } });
+      routeMap.addLayer({ id: "profile-route-endpoint", type: "circle", source: "profile-route-endpoints-source", paint: { "circle-radius": 5, "circle-color": ["match", ["get", "kind"], "start", "#17844b", "finish", "#c83d32", "#24415f"], "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5 } });
+    }
+    function createBrowserProfileRouteMap(container, points, detailed = false) {
+      const mapEl = document.createElement("div");
+      mapEl.className = "profile-route-map";
+      container.replaceChildren(mapEl);
+      const bounds = createBrowserProfileRouteBounds(points);
+      const center = bounds.getCenter();
+      const routeMap = new maplibregl.Map({
+        container: mapEl,
+        style: cloneMapStyle(STYLES?.liveStride || STYLES?.streets),
+        center: [center.lng, center.lat],
+        zoom: detailed ? 13 : 12,
+        interactive: detailed,
+        dragRotate: false,
+        pitchWithRotate: false,
+        attributionControl: false
+      });
+      routeMap.once("load", () => {
+        requestAnimationFrame(() => {
+          routeMap.resize();
+          routeMap.fitBounds(bounds, { padding: detailed ? 44 : 28, duration: 0, maxZoom: detailed ? 16 : 15 });
+          addBrowserProfileRouteLayers(routeMap, points);
+        });
+      });
+      setTimeout(() => {
+        routeMap.resize();
+        routeMap.fitBounds(bounds, { padding: detailed ? 44 : 28, duration: 0, maxZoom: detailed ? 16 : 15 });
+      }, 150);
+      return routeMap;
+    }
+    async function hydrateBrowserProfileRoute(container, run, detailed = false, shouldRender = null) {
+      try {
+        const routeData = await profileRoute(run.id);
+        if (shouldRender && !shouldRender()) return routeData;
+        destroyBrowserProfileRouteMap(container);
+        const routeMap = createBrowserProfileRouteMap(container, routeData.points, detailed);
+        browserProfileRouteMaps.set(container, routeMap);
+        renderBrowserProfileElevationChart(container, routeData, detailed);
+        return routeData;
+      } catch (error) {
+        destroyBrowserProfileRouteMap(container);
+        container.textContent = "Route preview unavailable";
+        container.classList.add("route-unavailable");
+        console.warn("Profile route load failed:", error);
+        return null;
+      }
+    }
+    function updateBrowserProfileStatValue(stat, value) {
+      const valueEl = stat?.querySelector("strong");
+      if (valueEl) valueEl.textContent = value;
+    }
+    function applyBrowserProfileRouteStats(run, stats, routeData) {
+      if (!run || !stats || !routeData?.analysis) return;
+      const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
+      const routeMiles = metersToMiles(routeDistanceM);
+      if (routeMiles > 0) {
+        updateBrowserProfileStatValue(stats.distanceStat, `${routeMiles.toFixed(2)} mi`);
+        updateBrowserProfileStatValue(stats.paceStat, browserFormatSecondsPerMile(Number(run.elapsed_time_ms || 0) / 1000 / routeMiles));
+      }
+      if (stats.movingStat) {
+        const movingTimeMs = routeData.analysis.movingTimeMs || run.moving_time_ms;
+        updateBrowserProfileStatValue(stats.movingStat, movingTimeMs ? profileDuration(movingTimeMs) : "--");
+      }
+      if (stats.gainStat) {
+        const elevationGainM = routeData.analysis.elevationGainM;
+        updateBrowserProfileStatValue(stats.gainStat, Number.isFinite(elevationGainM) ? `${Math.round(elevationGainM * 3.28084)} ft` : "--");
+      }
     }
     async function openBrowserProfileDetail(run) {
-      browserProfileRouteObserver?.disconnect(); profileActivities.innerHTML = "";
+      browserProfileRouteObserver?.disconnect(); destroyBrowserProfileRouteMapsIn(profileActivities); profileActivities.innerHTML = "";
       const back = document.createElement("button"); back.className = "profile-detail-back"; back.textContent = "Back to activities"; back.addEventListener("click", loadBrowserProfileActivities);
       const detail = document.createElement("article"); detail.className = "profile-activity-detail";
       const heading = document.createElement("h2"); heading.textContent = run.title || "Saved Run";
@@ -688,17 +942,23 @@
       const movingStat = profileStat("Moving time", run.moving_time_ms ? profileDuration(run.moving_time_ms) : "Calculating...");
       const hasStoredGain = run.elevation_gain_m != null && Number.isFinite(Number(run.elevation_gain_m));
       const gainStat = profileStat("Elevation gain", hasStoredGain ? `${Math.round(run.elevation_gain_m * 3.28084)} ft` : "Calculating...");
-      stats.append(profileStat("Distance", `${miles.toFixed(2)} mi`), profileStat("Average pace", profilePace(run)), profileStat("Elapsed time", profileDuration(run.elapsed_time_ms)), movingStat, gainStat, profileStat("Average cadence", run.avg_cadence_spm != null && Number(run.avg_cadence_spm) > 0 ? `${Math.round(run.avg_cadence_spm)} spm` : "--"));
-      detail.append(heading, subtitle, route, stats); profileActivities.append(back, detail);
+      const distanceStat = profileStat("Distance", `${miles.toFixed(2)} mi`);
+      const paceStat = profileStat("Average pace", profilePace(run));
+      stats.append(distanceStat, paceStat, profileStat("Elapsed time", profileDuration(run.elapsed_time_ms)), movingStat, gainStat, profileStat("Average cadence", run.avg_cadence_spm != null && Number(run.avg_cadence_spm) > 0 ? `${Math.round(run.avg_cadence_spm)} spm` : "--"));
+      const elevation = document.createElement("div");
+      elevation.className = "profile-elevation-detail";
+      elevation.textContent = "Loading elevation...";
+      detail.append(heading, subtitle, route, stats, elevation); profileActivities.append(back, detail);
       const routeData = await hydrateBrowserProfileRoute(route, run, true);
       if (routeData) {
-        const movingTimeMs = run.moving_time_ms || routeData.analysis.movingTimeMs;
+        applyBrowserProfileRouteStats(run, { distanceStat, paceStat, movingStat, gainStat }, routeData);
+        const movingTimeMs = routeData.analysis.movingTimeMs || run.moving_time_ms;
         movingStat.querySelector("strong").textContent = movingTimeMs ? profileDuration(movingTimeMs) : "--";
-        const elevationGainM = hasStoredGain ? Number(run.elevation_gain_m) : routeData.analysis.elevationGainM;
+        const elevationGainM = routeData.analysis.elevationGainM;
         gainStat.querySelector("strong").textContent = Number.isFinite(elevationGainM) ? `${Math.round(elevationGainM * 3.28084)} ft` : "--";
-        if (movingTimeMs && miles > 0) {
-          const seconds = Math.round(movingTimeMs / 1000 / miles);
-          stats.append(profileStat("Moving pace", `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2,"0")} /mi`));
+        const routeMiles = metersToMiles(routeData.analysis.totalDistanceM || Number(run.distance_m || 0));
+        if (movingTimeMs && routeMiles > 0) {
+          stats.append(profileStat("Moving pace", browserFormatSecondsPerMile(movingTimeMs / 1000 / routeMiles)));
         }
       }
     }
@@ -709,9 +969,11 @@
       const title = document.createElement("strong"); title.className = "profile-activity-title"; title.textContent = run.title || "Saved Run";
       const source = document.createElement("span"); source.className = "profile-activity-source"; source.textContent = run.source === "private" ? "Private run" : "Broadcast run";
       const stats = document.createElement("div"); stats.className = "profile-activity-stats"; const miles = Number(run.distance_m || 0) / 1609.344;
-      stats.append(profileStat("Distance", `${miles.toFixed(2)} mi`), profileStat("Pace", profilePace(run)), profileStat("Time", profileDuration(run.elapsed_time_ms)));
+      const distanceStat = profileStat("Distance", `${miles.toFixed(2)} mi`);
+      const paceStat = profileStat("Pace", profilePace(run));
+      stats.append(distanceStat, paceStat, profileStat("Time", profileDuration(run.elapsed_time_ms)));
       const route = document.createElement("div"); route.className = "profile-route-preview"; route.textContent = run.archive_status === "ready" ? "Loading route..." : "Route processing...";
-      item.append(date, deleteButton, title, source, stats, route); item._profileRun = run;
+      item.append(date, deleteButton, title, source, stats, route); item._profileRun = run; item._profileStats = { distanceStat, paceStat };
       const open = () => openBrowserProfileDetail(run); item.addEventListener("click", open); item.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } }); return item;
     }
     async function deleteBrowserProfileActivity(run, button) {
@@ -733,7 +995,15 @@
       profileActivities.innerHTML = "";
       if (error) { profileActivities.innerHTML = '<div class="profile-empty">Activities could not be loaded right now.</div>'; return; }
       if (!data?.length) { profileActivities.innerHTML = '<div class="profile-empty">No saved runs yet.</div>'; return; }
-      browserProfileRouteObserver?.disconnect(); browserProfileRouteObserver = new IntersectionObserver(entries => entries.forEach(entry => { if (!entry.isIntersecting) return; browserProfileRouteObserver.unobserve(entry.target); const route = entry.target.querySelector(".profile-route-preview"); if (route && entry.target._profileRun?.archive_status === "ready") hydrateBrowserProfileRoute(route, entry.target._profileRun); }), { root: profileView, rootMargin: "180px" });
+      browserProfileRouteObserver?.disconnect(); browserProfileRouteObserver = new IntersectionObserver(entries => entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        browserProfileRouteObserver.unobserve(entry.target);
+        const route = entry.target.querySelector(".profile-route-preview");
+        if (route && entry.target._profileRun?.archive_status === "ready") {
+          hydrateBrowserProfileRoute(route, entry.target._profileRun, false, () => entry.target.isConnected)
+            .then(routeData => applyBrowserProfileRouteStats(entry.target._profileRun, entry.target._profileStats, routeData));
+        }
+      }), { root: profileView, rootMargin: "180px" });
       data.forEach(run => { const item = browserProfileActivity(run); profileActivities.appendChild(item); browserProfileRouteObserver.observe(item); });
     }
     function applyProfilesSession(session) {
@@ -2987,15 +3257,14 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
         return;
       }
 
-      if (isFollowing) {
-        map.setCenter(coord);
-      }
-
       if (!bridgeTunnelMatcher) {
         bridgeTunnelMatcher = createBridgeTunnelMatcher();
       }
       const matchResult = bridgeTunnelMatcher.process(coord, accuracy, now);
       coord = matchResult.coord;
+      let effectiveCoord = coord;
+      let heldPoint = false;
+      let holdReason = null;
 
       if (matchResult.state !== lastPublishedMatchingState) {
         lastPublishedMatchingState = matchResult.state;
@@ -3038,30 +3307,26 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
 
       if (pathCoords.length > 0) {
         const prev = pathCoords[pathCoords.length - 1];
-        const segmentMeters = haversineDistance([prev.lon, prev.lat], coord);
+        let segmentMeters = haversineDistance([prev.lon, prev.lat], coord);
         const elapsedSeconds = lastPointTime ? (now - lastPointTime) / 1000 : 0;
         const speedMps = elapsedSeconds > 0 ? segmentMeters / elapsedSeconds : 0;
         const speedMph = speedMps * 2.23694;
-
-        // Keep browser filtering aligned with the app version.
-        if (segmentMeters < 1) {
-          console.warn("Ignoring tiny GPS movement:", segmentMeters.toFixed(2), "m");
-          return;
-        }
 
         if (elapsedSeconds <= 0) {
           console.warn("Ignoring zero/negative time point:", elapsedSeconds);
           return;
         }
 
-        if (speedMph < 1.0) {
-          console.warn("Ignoring stopped/very slow GPS drift:", speedMph.toFixed(2), "mph");
-          return;
-        }
-
-        if (speedMph > 140) {
-          console.warn("Ignoring unrealistic GPS jump:", speedMph.toFixed(2), "mph");
-          return;
+        if (!matchResult.matched && (segmentMeters < 1 || speedMph < 1.0 || speedMph > 140)) {
+          heldPoint = true;
+          holdReason = segmentMeters < 1
+            ? "tiny_movement"
+            : speedMph < 1.0
+              ? "low_speed"
+              : "unrealistic_speed";
+          effectiveCoord = [prev.lon, prev.lat];
+          segmentMeters = 0;
+          console.warn(`Holding browser GPS point (${holdReason}):`, speedMph.toFixed(2), "mph");
         }
 
         totalDistanceMeters += segmentMeters;
@@ -3078,12 +3343,15 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
       }
 
       lastPointTime = now;
+      if (isFollowing) {
+        map.setCenter(effectiveCoord);
+      }
 
       const recordedAt = new Date(now).toISOString();
 
       const newPoint = {
-        lat: coord[1],
-        lon: coord[0],
+        lat: effectiveCoord[1],
+        lon: effectiveCoord[0],
         timestamp: now,
         time: recordedAt,
         elevation: elevMeters,
@@ -3091,7 +3359,9 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
         distance: metersToMiles(totalDistanceMeters),
         distanceM: totalDistanceMeters,
         instPace,
-        avgPace
+        avgPace,
+        heldPoint,
+        holdReason
       };
 
       pathCoords.push(newPoint);
@@ -3108,7 +3378,7 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
           name: runnerName,
           run_id: activeRunId,
           finished: false,
-          current: [coord[0], coord[1]],
+          current: [effectiveCoord[0], effectiveCoord[1]],
           distance: latestRunnerDistance,
           pace: latestRunnerPace,
           avgPace: latestRunnerAvgPace,
@@ -3127,14 +3397,16 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
         const pointPayload = {
           run_id: activeRunId,
           sequence_num: thisSequenceNum,
-          lat: coord[1],
-          lon: coord[0],
+          lat: effectiveCoord[1],
+          lon: effectiveCoord[0],
           accuracy: accuracy ?? null,
           elevation_m: elevMeters ?? null,
           recorded_at: recordedAt,
           inst_pace_min_per_mile: instPace,
           avg_pace_min_per_mile: avgPace,
-          distance_m: totalDistanceMeters
+          distance_m: totalDistanceMeters,
+          app_state: heldPoint ? `browser_hold_${holdReason || "stationary"}` : "browser_tracking",
+          note: heldPoint ? `Held browser point at previous coordinate due to ${holdReason || "stationary"}.` : null
         };
 
         // Browser no longer writes live point/stat rows to run_points.
@@ -3143,13 +3415,13 @@ function hideViewerStatusSoon(message = null, delayMs = 3000) {
 
         safeUpdateRunSummary({
           total_distance_m: totalDistanceMeters,
-          latest_lat: coord[1],
-          latest_lon: coord[0],
+          latest_lat: effectiveCoord[1],
+          latest_lon: effectiveCoord[0],
           latest_timestamp: recordedAt,
           runner_heartbeat_at: new Date().toISOString()
         }).then(() => flushSupabaseQueue());
 
-fetchElevation(coord[1], coord[0]).then(elev => {
+fetchElevation(effectiveCoord[1], effectiveCoord[0]).then(elev => {
   if (elev == null) return;
 
   elevMeters = elev;

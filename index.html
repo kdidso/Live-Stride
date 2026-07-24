@@ -128,7 +128,6 @@
     .profile-elevation-content { display: grid; gap: 18px; }
     .profile-elevation-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
     .profile-elevation-header h3 { margin: 0; color: #111820; font-size: 22px; line-height: 1.1; font-weight: 800; }
-    .profile-elevation-info { display: grid; place-items: center; width: 24px; height: 24px; border: 2px solid #111820; border-radius: 50%; color: #111820; font-size: 15px; font-weight: 800; line-height: 1; }
     .profile-elevation-chart { display: block; width: 100%; height: auto; margin-top: 2px; min-height: 320px; }
     .profile-elevation-summary { display: grid; gap: 14px; margin-top: 2px; padding-bottom: 4px; }
     .profile-elevation-row { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; font-size: 16px; color: #4b555f; }
@@ -143,6 +142,13 @@
       .profile-activity-stats, .profile-detail-stats { grid-template-columns: repeat(2,minmax(0,1fr)); row-gap: 14px; }
       .profile-stat:nth-child(odd) { padding-left: 0; border-left: 0; }
       .profile-stat strong { font-size: 16px; }
+      .profile-elevation-detail { margin-top: 22px; padding-top: 22px; }
+      .profile-elevation-content { gap: 12px; }
+      .profile-elevation-header h3 { font-size: 24px; }
+      .profile-elevation-chart { width: calc(100% + 18px); max-width: none; min-height: 390px; margin-left: -9px; margin-right: -9px; }
+      .profile-elevation-summary { margin-top: 0; gap: 12px; }
+      .profile-elevation-row { font-size: 17px; }
+      .profile-elevation-row strong { font-size: 20px; }
     }
     #profileSignOutBtn { margin-top: 20px; background: #6b7680; }
 
@@ -646,7 +652,7 @@
       try { return await request; } catch (error) { browserProfileRouteCache.delete(runId); throw error; }
     }
     function analyzeBrowserProfilePoints(points) {
-      const ELEVATION_GAIN_THRESHOLD_METERS = 10;
+      const ELEVATION_GAIN_THRESHOLD_METERS = 5;
       const MOVING_MIN_DISTANCE_METERS = 1;
       const MOVING_MIN_SPEED_MPH = 1;
       const MOVING_MAX_SPEED_MPH = 140;
@@ -783,10 +789,7 @@
       header.className = "profile-elevation-header";
       const title = document.createElement("h3");
       title.textContent = "Elevation";
-      const info = document.createElement("span");
-      info.className = "profile-elevation-info";
-      info.textContent = "i";
-      header.append(title, info);
+      header.append(title);
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
       svg.setAttribute("role", "img");

@@ -530,10 +530,10 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       }
 
       .profile-elevation-chart {
-        width: calc(100% + 18px);
+        width: 100%;
         max-width: none;
-        margin-left: -9px;
-        margin-right: -9px;
+        margin-left: 0;
+        margin-right: 0;
       }
 
       .profile-elevation-summary {

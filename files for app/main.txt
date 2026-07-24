@@ -1702,7 +1702,22 @@ async function handleExportPageMessage(event) {
         end_lon: Number.isFinite(Number(run.latest_lon)) ? Number(run.latest_lon) : null,
         point_count: Math.max(0, Number(data.pointCount || 0))
       };
-      await saveGpxToProfile(String(data.content || ""), metadata);
+      const gpx = String(data.content || "");
+      let analysisPoints = await getBroadcastRunAnalysisPoints(metadata.source_run_id);
+      if (analysisPoints.length < 2) {
+        analysisPoints = parseGpxAnalysisPoints(gpx);
+      }
+      const analysis = buildProfileRunAnalysis(analysisPoints, metadata, {
+        source: "broadcast",
+        sourceRunId: metadata.source_run_id
+      });
+      if (Number.isFinite(Number(analysis?.summary?.distance_m)) && Number(analysis.summary.distance_m) > 0) {
+        metadata.distance_m = Number(analysis.summary.distance_m);
+      }
+      if (Number.isFinite(Number(analysis?.summary?.point_count)) && Number(analysis.summary.point_count) > 0) {
+        metadata.point_count = Number(analysis.summary.point_count);
+      }
+      await saveGpxToProfile(gpx, metadata, null, analysis);
       replyToExportPage({ type: "saveToProfileResult", ok: true });
     } catch (err) {
       replyToExportPage({
@@ -4237,6 +4252,139 @@ function buildSavedRunMetadata(runData, source, overrides = {}) {
   };
 }
 
+function parseGpxAnalysisPoints(gpx) {
+  if (!gpx) return [];
+  const xml = new DOMParser().parseFromString(String(gpx), "application/xml");
+  if (xml.querySelector("parsererror")) return [];
+  return Array.from(xml.querySelectorAll("trkpt"))
+    .map((point, index) => {
+      const elevationText = point.querySelector("ele")?.textContent;
+      const timeText = point.querySelector("time")?.textContent;
+      const elevation = elevationText == null ? null : Number(elevationText);
+      const timestamp = timeText ? Date.parse(timeText) : null;
+      return {
+        sequenceNum: index + 1,
+        lat: Number(point.getAttribute("lat")),
+        lon: Number(point.getAttribute("lon")),
+        timestamp: Number.isFinite(timestamp) ? timestamp : null,
+        time: timeText || null,
+        elevation: Number.isFinite(elevation) ? elevation : null,
+        distanceM: null,
+        instPace: null,
+        avgPace: null
+      };
+    })
+    .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+}
+
+async function getBroadcastRunAnalysisPoints(runId) {
+  if (!isUuid(runId)) return [];
+  const { data, error } = await supabaseClient
+    .from("run_points")
+    .select("*")
+    .eq("run_id", runId)
+    .order("sequence_num", { ascending: true });
+  if (error) {
+    console.warn("Could not load broadcast run points for profile analysis:", error);
+    return [];
+  }
+  return (data || [])
+    .map(normalizeRunPoint)
+    .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+}
+
+function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
+  const points = Array.isArray(pointsInput)
+    ? pointsInput.filter(point => Number.isFinite(point?.lat) && Number.isFinite(point?.lon))
+    : [];
+  sortRunPoints(points);
+
+  let cumulativeDistanceM = 0;
+  const samples = points.map((point, index) => {
+    const previous = index > 0 ? points[index - 1] : null;
+    const timestamp = Number(point.timestamp);
+    const previousTimestamp = Number(previous?.timestamp);
+    const segmentDistanceM = previous
+      ? haversineDistance([previous.lon, previous.lat], [point.lon, point.lat])
+      : 0;
+    const hasStoredDistance = Number.isFinite(Number(point.distanceM)) && Number(point.distanceM) >= 0;
+    cumulativeDistanceM = hasStoredDistance ? Number(point.distanceM) : cumulativeDistanceM + segmentDistanceM;
+
+    const segmentElapsedSec = previous && Number.isFinite(timestamp) && Number.isFinite(previousTimestamp)
+      ? Math.max(0, (timestamp - previousTimestamp) / 1000)
+      : 0;
+    const derivedSpeedMps = segmentElapsedSec > 0 ? segmentDistanceM / segmentElapsedSec : null;
+    const pointPaceSecPerMile = Number.isFinite(Number(point.instPace)) && Number(point.instPace) > 0
+      ? Number(point.instPace) * 60
+      : derivedSpeedMps > 0
+      ? 1609.344 / derivedSpeedMps
+      : null;
+
+    return {
+      sequence_num: point.sequenceNum ?? index + 1,
+      recorded_at: point.time || (Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null),
+      elapsed_sec: Number.isFinite(timestamp) && Number.isFinite(Number(points[0]?.timestamp))
+        ? Math.max(0, (timestamp - Number(points[0].timestamp)) / 1000)
+        : null,
+      lat: Number(point.lat),
+      lon: Number(point.lon),
+      elevation_m: Number.isFinite(Number(point.elevation)) ? Number(point.elevation) : null,
+      distance_m: cumulativeDistanceM,
+      distance_mi: metersToMiles(cumulativeDistanceM),
+      segment_distance_m: segmentDistanceM,
+      segment_elapsed_sec: segmentElapsedSec,
+      speed_mps: derivedSpeedMps,
+      pace_sec_per_mile: Number.isFinite(pointPaceSecPerMile) ? pointPaceSecPerMile : null,
+      avg_pace_sec_per_mile: Number.isFinite(Number(point.avgPace)) && Number(point.avgPace) > 0
+        ? Number(point.avgPace) * 60
+        : null
+    };
+  });
+
+  const analyzedPoints = points.map(point => ({
+    ...point,
+    time: Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : point.time
+  }));
+  const analyzed = analyzeProfilePoints(analyzedPoints);
+  const distanceM = cumulativeDistanceM > 0
+    ? cumulativeDistanceM
+    : Number.isFinite(Number(metadata.distance_m)) && Number(metadata.distance_m) > 0
+    ? Number(metadata.distance_m)
+    : 0;
+  const elapsedMs = Number.isFinite(Number(metadata.elapsed_time_ms)) && Number(metadata.elapsed_time_ms) > 0
+    ? Number(metadata.elapsed_time_ms)
+    : points.length >= 2 && Number.isFinite(Number(points[0].timestamp)) && Number.isFinite(Number(points[points.length - 1].timestamp))
+    ? Math.max(0, Number(points[points.length - 1].timestamp) - Number(points[0].timestamp))
+    : null;
+  const averagePaceSecPerMile = distanceM > 0 && elapsedMs != null
+    ? (elapsedMs / 1000) / metersToMiles(distanceM)
+    : null;
+
+  return {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    source: metadata.source || options.source || null,
+    source_run_id: metadata.source_run_id || options.sourceRunId || null,
+    summary: {
+      title: metadata.title || null,
+      started_at: metadata.started_at || null,
+      finished_at: metadata.finished_at || null,
+      distance_m: distanceM,
+      distance_mi: metersToMiles(distanceM),
+      elapsed_time_ms: elapsedMs,
+      moving_time_ms: Number.isFinite(Number(metadata.moving_time_ms)) ? Number(metadata.moving_time_ms) : analyzed.movingTimeMs,
+      average_pace_sec_per_mile: averagePaceSecPerMile,
+      average_pace_sec_per_km: averagePaceSecPerMile != null ? averagePaceSecPerMile / 1.609344 : null,
+      elevation_gain_m: analyzed.elevationGainM,
+      elevation_loss_m: analyzed.elevationLossM,
+      min_elevation_m: analyzed.minElevationM,
+      max_elevation_m: analyzed.maxElevationM,
+      point_count: samples.length
+    },
+    samples
+  };
+}
+
 async function requireProfilesSession() {
   const { data, error } = await profilesSupabaseClient.auth.getSession();
   if (error) throw error;
@@ -4248,7 +4396,7 @@ async function requireProfilesSession() {
   return data.session;
 }
 
-async function saveGpxToProfile(gpx, metadata, onStatus = null) {
+async function saveGpxToProfile(gpx, metadata, onStatus = null, analysis = null) {
   if (!gpx || !metadata) throw new Error("This run could not be prepared for your profile.");
   const session = await requireProfilesSession();
   onStatus?.("Creating your profile activity...");
@@ -4264,12 +4412,13 @@ async function saveGpxToProfile(gpx, metadata, onStatus = null) {
     .single();
   if (insertError) throw insertError;
 
-  onStatus?.("Uploading the completed GPX securely...");
+  onStatus?.(analysis ? "Uploading the completed GPX and analysis securely..." : "Uploading the completed GPX securely...");
   const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
     body: {
       action: "upload-gpx",
       savedRunId: savedRun.id,
-      gpx
+      gpx,
+      analysis
     }
   });
   if (error || !data?.ready) {
@@ -4285,6 +4434,17 @@ async function saveGpxToProfile(gpx, metadata, onStatus = null) {
   return savedRun.id;
 }
 
+async function savePrivateRunDataToProfile(runData, sourceRunId = null) {
+  const resolvedSourceRunId = sourceRunId || runData?.runId || null;
+  const metadata = buildSavedRunMetadata(runData, "private", { sourceRunId: resolvedSourceRunId });
+  const gpx = convertToGpx(runData);
+  const analysis = buildProfileRunAnalysis(runData.pathCoords, metadata, {
+    source: "private",
+    sourceRunId: resolvedSourceRunId
+  });
+  await saveGpxToProfile(gpx, metadata, updateProfileSaveProgress, analysis);
+}
+
 async function savePrivateRunToProfile(runId) {
   await requireProfilesSession();
   showProfileSaveProgress("Loading the selected run from this phone...");
@@ -4292,10 +4452,8 @@ async function savePrivateRunToProfile(runId) {
     const runData = await getPrivateRunDataById(runId);
     updateProfileSaveProgress("Completing any missing elevation values...");
     await fillMissingPrivateRunElevations(runData);
-    updateProfileSaveProgress("Preparing the completed GPX file...");
-    const metadata = buildSavedRunMetadata(runData, "private", { sourceRunId: runId });
-    const gpx = convertToGpx(runData);
-    await saveGpxToProfile(gpx, metadata, updateProfileSaveProgress);
+    updateProfileSaveProgress("Preparing the completed GPX and analysis file...");
+    await savePrivateRunDataToProfile(runData, runId);
     hideProfileSaveProgress();
     alert("Run saved to your LiveStride Profile.");
   } catch (err) {
@@ -4358,6 +4516,7 @@ async function sharePrivateRunById(runId) {
 async function getCurrentPrivateRunData() {
   if (pathCoords.length > 0) {
     return {
+      runId: activeRunId,
       startTime,
       pathCoords,
       totalDistanceMiles: metersToMiles(totalDistanceMeters),
@@ -5174,6 +5333,11 @@ exportGpxBtn.onclick = async () => {
         label: "Share GPX",
         description: "Send the GPX file to another app without saving to Downloads.",
         value: "share"
+      },
+      {
+        label: "Save to Profile",
+        description: "Add this private run to your LiveStride Profile.",
+        value: "profile"
       }
     ]);
     if (!action) return;
@@ -5188,6 +5352,16 @@ exportGpxBtn.onclick = async () => {
       alert("GPX saved to Downloads.");
     } else if (action === "share") {
       await shareGpx(filename, gpx, "Share your LiveStride GPX file.");
+    } else if (action === "profile") {
+      showProfileSaveProgress("Preparing this private run for your profile...");
+      try {
+        await savePrivateRunDataToProfile(runData, runData.runId || activeRunId);
+        hideProfileSaveProgress();
+        alert("Run saved to your LiveStride Profile.");
+      } catch (profileError) {
+        hideProfileSaveProgress();
+        throw profileError;
+      }
     }
   } catch (err) {
     console.error("Unexpected export error:", err);

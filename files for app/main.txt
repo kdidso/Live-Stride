@@ -787,10 +787,10 @@ function createProfileElevationChart(routeData) {
   }
 
   const isMobileElevationChart = Boolean(window.matchMedia?.("(max-width: 520px)")?.matches);
-  const width = 760;
-  const height = isMobileElevationChart ? 520 : 390;
+  const width = isMobileElevationChart ? 860 : 760;
+  const height = isMobileElevationChart ? 540 : 390;
   const padding = isMobileElevationChart
-    ? { top: 18, right: 16, bottom: 68, left: 78 }
+    ? { top: 20, right: 64, bottom: 74, left: 120 }
     : { top: 28, right: 22, bottom: 64, left: 82 };
   const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
   const smoothedMeters = smoothProfileElevationSamples(samples);
@@ -830,6 +830,7 @@ function createProfileElevationChart(routeData) {
   const gainFt = Number.isFinite(routeData.analysis.elevationGainM)
     ? `${Math.round(routeData.analysis.elevationGainM * 3.28084)} ft`
     : "--";
+  const minElevationText = minLabel;
   const maxElevationText = maxLabel;
 
   const section = document.createElement("div");
@@ -874,10 +875,13 @@ function createProfileElevationChart(routeData) {
   const gainRow = document.createElement("div");
   gainRow.className = "profile-elevation-row";
   gainRow.innerHTML = `<span>Elevation Gain</span><strong>${gainFt}</strong>`;
+  const minRow = document.createElement("div");
+  minRow.className = "profile-elevation-row";
+  minRow.innerHTML = `<span>Min Elevation</span><strong>${minElevationText}</strong>`;
   const maxRow = document.createElement("div");
   maxRow.className = "profile-elevation-row";
   maxRow.innerHTML = `<span>Max Elevation</span><strong>${maxElevationText}</strong>`;
-  summary.append(gainRow, maxRow);
+  summary.append(gainRow, minRow, maxRow);
   section.append(header, svg, summary);
   return section;
 }

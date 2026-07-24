@@ -145,7 +145,7 @@
       .profile-elevation-detail { margin-top: 22px; padding-top: 22px; }
       .profile-elevation-content { gap: 12px; }
       .profile-elevation-header h3 { font-size: 24px; }
-      .profile-elevation-chart { width: calc(100% + 18px); max-width: none; min-height: 390px; margin-left: -9px; margin-right: -9px; }
+      .profile-elevation-chart { width: calc(100% + 18px); max-width: none; margin-left: -9px; margin-right: -9px; }
       .profile-elevation-summary { margin-top: 0; gap: 12px; }
       .profile-elevation-row { font-size: 17px; }
       .profile-elevation-row strong { font-size: 20px; }
@@ -747,9 +747,12 @@
         unavailable.textContent = "Elevation graph unavailable";
         return unavailable;
       }
+      const isMobileElevationChart = Boolean(window.matchMedia?.("(max-width: 520px)")?.matches);
       const width = 760;
-      const height = 390;
-      const padding = { top: 28, right: 22, bottom: 64, left: 82 };
+      const height = isMobileElevationChart ? 520 : 390;
+      const padding = isMobileElevationChart
+        ? { top: 18, right: 16, bottom: 68, left: 78 }
+        : { top: 28, right: 22, bottom: 64, left: 82 };
       const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
       const smoothedMeters = smoothBrowserProfileElevationSamples(samples);
       const chartSamples = samples.map((sample, index) => ({

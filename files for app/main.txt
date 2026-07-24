@@ -788,7 +788,7 @@ function createProfileElevationChart(routeData) {
 
   const isMobileElevationChart = Boolean(window.matchMedia?.("(max-width: 520px)")?.matches);
   const width = isMobileElevationChart ? 860 : 760;
-  const height = isMobileElevationChart ? 540 : 390;
+  const height = isMobileElevationChart ? 720 : 390;
   const padding = isMobileElevationChart
     ? { top: 20, right: 64, bottom: 74, left: 120 }
     : { top: 28, right: 22, bottom: 64, left: 82 };

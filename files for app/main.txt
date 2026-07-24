@@ -628,7 +628,7 @@ async function loadProfileRoute(runId) {
 }
 
 function analyzeProfilePoints(points) {
-  const ELEVATION_GAIN_THRESHOLD_METERS = 10;
+  const ELEVATION_GAIN_THRESHOLD_METERS = 5;
   const MOVING_MIN_DISTANCE_METERS = 1;
   const MOVING_MIN_SPEED_MPH = 1;
   const MOVING_MAX_SPEED_MPH = 140;
@@ -835,10 +835,7 @@ function createProfileElevationChart(routeData) {
   header.className = "profile-elevation-header";
   const title = document.createElement("h3");
   title.textContent = "Elevation";
-  const info = document.createElement("span");
-  info.className = "profile-elevation-info";
-  info.textContent = "i";
-  header.append(title, info);
+  header.append(title);
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -2608,24 +2605,27 @@ function buildSequenceLineSegments(points) {
     const sequence = point.sequenceNum;
     const timestamp = Number.isFinite(point.timestamp) ? point.timestamp : null;
     const distanceFromPrevious = previousPoint
-      ? haversineDistance(previousPoint, point)
+      ? haversineDistance([previousPoint.lon, previousPoint.lat], pointCoords)
       : 0;
+    const isPreviewConnection = previousPoint?.previewSampled || point.previewSampled;
+    const hasSequenceBreak = !isPreviewConnection &&
+      previousSequence != null &&
+      sequence != null &&
+      sequence - previousSequence > 1;
+    const hasTimedBreak = previousTimestamp != null &&
+      timestamp != null &&
+      timestamp - previousTimestamp > NATIVE_PATH_BREAK_GAP_MS &&
+      Number.isFinite(distanceFromPrevious) &&
+      distanceFromPrevious > NATIVE_PATH_BREAK_DISTANCE_METERS;
+    const hasLongJump = Number.isFinite(distanceFromPrevious) &&
+      distanceFromPrevious > ROUTE_RENDER_BREAK_DISTANCE_METERS;
 
     if (
       currentSegment.length > 0 &&
       (
-        (
-          previousSequence != null &&
-          sequence != null &&
-          sequence - previousSequence > 1
-        ) ||
-        (
-          previousTimestamp != null &&
-          timestamp != null &&
-          timestamp - previousTimestamp > NATIVE_PATH_BREAK_GAP_MS &&
-          distanceFromPrevious > NATIVE_PATH_BREAK_DISTANCE_METERS
-        ) ||
-        distanceFromPrevious > ROUTE_RENDER_BREAK_DISTANCE_METERS
+        hasSequenceBreak ||
+        hasTimedBreak ||
+        hasLongJump
       )
     ) {
       if (currentSegment.length > 1) {
@@ -2665,7 +2665,10 @@ function hasSequenceGap(points) {
         Number.isFinite(previousTimestamp) &&
         Number.isFinite(currentTimestamp) &&
         currentTimestamp - previousTimestamp > NATIVE_PATH_BREAK_GAP_MS &&
-        haversineDistance(points[i - 1], points[i]) > NATIVE_PATH_BREAK_DISTANCE_METERS
+        haversineDistance(
+          [points[i - 1].lon, points[i - 1].lat],
+          [points[i].lon, points[i].lat]
+        ) > NATIVE_PATH_BREAK_DISTANCE_METERS
       )
     ) {
       return true;
@@ -3257,19 +3260,50 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
   const appendOnly = Boolean(options.appendOnly);
   const renderPath = options.renderPath !== false;
   const updateSplits = options.updateSplits !== false;
+  const isPreviewSnapshot = snapshot.preview === true;
   const points = Array.isArray(snapshot.points) ? snapshot.points : [];
   const latestRaw = snapshot.latestPoint && typeof snapshot.latestPoint === "object"
     ? snapshot.latestPoint
     : null;
+  const normalizeSnapshotPoint = rawPoint => {
+    const normalized = normalizeNativeRunPoint(rawPoint);
+    if (isPreviewSnapshot) {
+      normalized.previewSampled = true;
+    }
+    return normalized;
+  };
 
   if (includeFullPath || pathCoords.length === 0 || !runnerNativeDisplayActive) {
-    pathCoords = points.map(normalizeNativeRunPoint).filter(point =>
+    pathCoords = points.map(normalizeSnapshotPoint).filter(point =>
       point.sequenceNum != null && Number.isFinite(point.lat) && Number.isFinite(point.lon)
     );
   } else if (appendOnly) {
-    appendRunnerNativeDisplayPoints(points);
+    points
+      .map(normalizeSnapshotPoint)
+      .filter(point =>
+        point.sequenceNum != null && Number.isFinite(point.lat) && Number.isFinite(point.lon)
+      )
+      .forEach(point => {
+        pathCoords.push(point);
+      });
   } else {
-    points.forEach(upsertRunnerNativeDisplayPoint);
+    points.forEach(point => {
+      const normalized = normalizeSnapshotPoint(point);
+      if (normalized.sequenceNum == null) return;
+
+      const existingIndex = pathCoords.findIndex(existing =>
+        existing.sequenceNum != null && existing.sequenceNum === normalized.sequenceNum
+      );
+
+      if (existingIndex >= 0) {
+        pathCoords[existingIndex] = {
+          ...pathCoords[existingIndex],
+          ...normalized
+        };
+      } else {
+        pathCoords.push(normalized);
+      }
+    });
   }
 
   if (pathCoords.length > 0) {

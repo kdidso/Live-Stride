@@ -1479,7 +1479,141 @@
       return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
     }
 
-    async function saveGpxToProfile(gpx, metadata) {
+    function parseGpxAnalysisPoints(gpx) {
+      if (!gpx) return [];
+      const xml = new DOMParser().parseFromString(String(gpx), "application/xml");
+      if (xml.querySelector("parsererror")) return [];
+      return Array.from(xml.querySelectorAll("trkpt"))
+        .map((point, index) => {
+          const elevationText = point.querySelector("ele")?.textContent;
+          const timeText = point.querySelector("time")?.textContent;
+          const elevation = elevationText == null ? null : Number(elevationText);
+          const timestamp = timeText ? Date.parse(timeText) : null;
+          return {
+            sequenceNum: index + 1,
+            lat: Number(point.getAttribute("lat")),
+            lon: Number(point.getAttribute("lon")),
+            timestamp: Number.isFinite(timestamp) ? timestamp : null,
+            time: timeText || null,
+            elevation: Number.isFinite(elevation) ? elevation : null,
+            distanceM: null,
+            instPace: null,
+            avgPace: null
+          };
+        })
+        .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+    }
+
+    async function getBroadcastRunAnalysisPoints(runId) {
+      if (!isUuid(runId)) return [];
+      const { data, error } = await supabaseClient
+        .from("run_points")
+        .select("*")
+        .eq("run_id", runId)
+        .order("sequence_num", { ascending: true });
+      if (error) {
+        console.warn("Could not load broadcast run points for profile analysis:", error);
+        return [];
+      }
+      return (data || [])
+        .map(normalizeRunPoint)
+        .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+    }
+
+    function buildProfileRunAnalysis(pointsInput, metadata = {}) {
+      const points = Array.isArray(pointsInput)
+        ? pointsInput.filter(point => Number.isFinite(point?.lat) && Number.isFinite(point?.lon))
+        : [];
+      points.sort((a, b) => {
+        if (a.sequenceNum != null && b.sequenceNum != null) return a.sequenceNum - b.sequenceNum;
+        return (a.timestamp || 0) - (b.timestamp || 0);
+      });
+
+      let cumulativeDistanceM = 0;
+      const samples = points.map((point, index) => {
+        const previous = index > 0 ? points[index - 1] : null;
+        const timestamp = Number(point.timestamp);
+        const previousTimestamp = Number(previous?.timestamp);
+        const segmentDistanceM = previous ? haversineDistance([previous.lon, previous.lat], [point.lon, point.lat]) : 0;
+        cumulativeDistanceM = Number.isFinite(Number(point.distanceM)) && Number(point.distanceM) >= 0
+          ? Number(point.distanceM)
+          : cumulativeDistanceM + segmentDistanceM;
+        const segmentElapsedSec = previous && Number.isFinite(timestamp) && Number.isFinite(previousTimestamp)
+          ? Math.max(0, (timestamp - previousTimestamp) / 1000)
+          : 0;
+        const speedMps = segmentElapsedSec > 0 ? segmentDistanceM / segmentElapsedSec : null;
+        const paceSecPerMile = Number.isFinite(Number(point.instPace)) && Number(point.instPace) > 0
+          ? Number(point.instPace) * 60
+          : speedMps > 0
+          ? 1609.344 / speedMps
+          : null;
+        const elevation = Number(point.elevation);
+        return {
+          sequence_num: point.sequenceNum ?? index + 1,
+          recorded_at: point.time || (Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null),
+          elapsed_sec: Number.isFinite(timestamp) && Number.isFinite(Number(points[0]?.timestamp))
+            ? Math.max(0, (timestamp - Number(points[0].timestamp)) / 1000)
+            : null,
+          lat: Number(point.lat),
+          lon: Number(point.lon),
+          elevation_m: Number.isFinite(elevation) ? elevation : null,
+          distance_m: cumulativeDistanceM,
+          distance_mi: metersToMiles(cumulativeDistanceM),
+          segment_distance_m: segmentDistanceM,
+          segment_elapsed_sec: segmentElapsedSec,
+          speed_mps: speedMps,
+          pace_sec_per_mile: Number.isFinite(paceSecPerMile) ? paceSecPerMile : null,
+          avg_pace_sec_per_mile: Number.isFinite(Number(point.avgPace)) && Number(point.avgPace) > 0
+            ? Number(point.avgPace) * 60
+            : null
+        };
+      });
+
+      const analyzedPoints = points.map(point => ({
+        ...point,
+        time: Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : point.time
+      }));
+      const analyzed = analyzeBrowserProfilePoints(analyzedPoints);
+      const distanceM = cumulativeDistanceM > 0
+        ? cumulativeDistanceM
+        : Number.isFinite(Number(metadata.distance_m)) && Number(metadata.distance_m) > 0
+        ? Number(metadata.distance_m)
+        : 0;
+      const elapsedMs = Number.isFinite(Number(metadata.elapsed_time_ms)) && Number(metadata.elapsed_time_ms) > 0
+        ? Number(metadata.elapsed_time_ms)
+        : points.length >= 2 && Number.isFinite(Number(points[0].timestamp)) && Number.isFinite(Number(points[points.length - 1].timestamp))
+        ? Math.max(0, Number(points[points.length - 1].timestamp) - Number(points[0].timestamp))
+        : null;
+      const averagePaceSecPerMile = distanceM > 0 && elapsedMs != null
+        ? (elapsedMs / 1000) / metersToMiles(distanceM)
+        : null;
+
+      return {
+        schema_version: 1,
+        generated_at: new Date().toISOString(),
+        source: metadata.source || null,
+        source_run_id: metadata.source_run_id || null,
+        summary: {
+          title: metadata.title || null,
+          started_at: metadata.started_at || null,
+          finished_at: metadata.finished_at || null,
+          distance_m: distanceM,
+          distance_mi: metersToMiles(distanceM),
+          elapsed_time_ms: elapsedMs,
+          moving_time_ms: Number.isFinite(Number(metadata.moving_time_ms)) ? Number(metadata.moving_time_ms) : analyzed.movingTimeMs,
+          average_pace_sec_per_mile: averagePaceSecPerMile,
+          average_pace_sec_per_km: averagePaceSecPerMile != null ? averagePaceSecPerMile / 1.609344 : null,
+          elevation_gain_m: analyzed.elevationGainM,
+          elevation_loss_m: analyzed.elevationLossM,
+          min_elevation_m: analyzed.minElevationM,
+          max_elevation_m: analyzed.maxElevationM,
+          point_count: samples.length
+        },
+        samples
+      };
+    }
+
+    async function saveGpxToProfile(gpx, metadata, analysis = null) {
       const { data: sessionData, error: sessionError } = await profilesSupabaseClient.auth.getSession();
       if (sessionError) throw sessionError;
       applyProfilesSession(sessionData?.session || null);
@@ -1496,7 +1630,7 @@
       if (insertError) throw insertError;
 
       const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
-        body: { action: "upload-gpx", savedRunId: savedRun.id, gpx }
+        body: { action: "upload-gpx", savedRunId: savedRun.id, gpx, analysis }
       });
       if (error || !data?.ready) {
         await profilesSupabaseClient.from("saved_runs").update({ archive_status: "failed" }).eq("id", savedRun.id);
@@ -1555,7 +1689,7 @@
           const run = data.run || {};
           const startedAt = run.started_at || new Date().toISOString();
           const finishedAt = run.finished_at || startedAt;
-          await saveGpxToProfile(String(data.content || ""), {
+          const metadata = {
             source: "broadcast",
             source_run_id: isUuid(run.id) ? run.id : null,
             title: `${run.runner_name || "LiveStride"} - ${new Date(startedAt).toLocaleString()}`,
@@ -1568,7 +1702,20 @@
             end_lat: Number.isFinite(Number(run.latest_lat)) ? Number(run.latest_lat) : null,
             end_lon: Number.isFinite(Number(run.latest_lon)) ? Number(run.latest_lon) : null,
             point_count: Math.max(0, Number(data.pointCount || 0))
-          });
+          };
+          const gpx = String(data.content || "");
+          let analysisPoints = await getBroadcastRunAnalysisPoints(metadata.source_run_id);
+          if (analysisPoints.length < 2) {
+            analysisPoints = parseGpxAnalysisPoints(gpx);
+          }
+          const analysis = buildProfileRunAnalysis(analysisPoints, metadata);
+          if (Number.isFinite(Number(analysis?.summary?.distance_m)) && Number(analysis.summary.distance_m) > 0) {
+            metadata.distance_m = Number(analysis.summary.distance_m);
+          }
+          if (Number.isFinite(Number(analysis?.summary?.point_count)) && Number(analysis.summary.point_count) > 0) {
+            metadata.point_count = Number(analysis.summary.point_count);
+          }
+          await saveGpxToProfile(gpx, metadata, analysis);
         };
         saveBroadcastRun().then(() => {
           replyToExportPage({ type: "saveToProfileResult", ok: true });

@@ -400,7 +400,8 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       min-height: inherit;
     }
 
-    .profile-elevation-detail {
+    .profile-elevation-detail,
+    .profile-pace-detail {
       margin: 26px 0 4px;
       padding: 24px 0 0;
       background: #fff;
@@ -409,7 +410,8 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       overflow: hidden;
     }
 
-    .profile-elevation-content {
+    .profile-elevation-content,
+    .profile-pace-content {
       display: grid;
       gap: 18px;
     }
@@ -430,6 +432,14 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     .profile-elevation-chart {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin-top: 2px;
+      min-height: 320px;
+    }
+
+    .profile-pace-chart {
       display: block;
       width: 100%;
       height: auto;
@@ -516,12 +526,14 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
         font-size: 16px;
       }
 
-      .profile-elevation-detail {
+      .profile-elevation-detail,
+      .profile-pace-detail {
         margin-top: 22px;
         padding-top: 22px;
       }
 
-      .profile-elevation-content {
+      .profile-elevation-content,
+      .profile-pace-content {
         gap: 12px;
       }
 
@@ -530,6 +542,14 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       }
 
       .profile-elevation-chart {
+        width: 100%;
+        max-width: none;
+        min-height: 0;
+        margin-left: 0;
+        margin-right: 0;
+      }
+
+      .profile-pace-chart {
         width: 100%;
         max-width: none;
         min-height: 0;

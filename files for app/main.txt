@@ -786,9 +786,12 @@ function createProfileElevationChart(routeData) {
     return unavailable;
   }
 
+  const isMobileElevationChart = Boolean(window.matchMedia?.("(max-width: 520px)")?.matches);
   const width = 760;
-  const height = 390;
-  const padding = { top: 28, right: 22, bottom: 64, left: 82 };
+  const height = isMobileElevationChart ? 520 : 390;
+  const padding = isMobileElevationChart
+    ? { top: 18, right: 16, bottom: 68, left: 78 }
+    : { top: 28, right: 22, bottom: 64, left: 82 };
   const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
   const smoothedMeters = smoothProfileElevationSamples(samples);
   const chartSamples = samples.map((sample, index) => ({

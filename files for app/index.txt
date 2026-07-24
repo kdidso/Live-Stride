@@ -532,6 +532,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       .profile-elevation-chart {
         width: 100%;
         max-width: none;
+        min-height: 0;
         margin-left: 0;
         margin-right: 0;
       }

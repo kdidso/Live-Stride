@@ -145,7 +145,7 @@
       .profile-elevation-detail { margin-top: 22px; padding-top: 22px; }
       .profile-elevation-content { gap: 12px; }
       .profile-elevation-header h3 { font-size: 24px; }
-      .profile-elevation-chart { width: 100%; max-width: none; margin-left: 0; margin-right: 0; }
+      .profile-elevation-chart { width: 100%; max-width: none; min-height: 0; margin-left: 0; margin-right: 0; }
       .profile-elevation-summary { margin-top: 0; gap: 12px; }
       .profile-elevation-row { font-size: 17px; }
       .profile-elevation-row strong { font-size: 20px; }
@@ -749,7 +749,7 @@
       }
       const isMobileElevationChart = Boolean(window.matchMedia?.("(max-width: 520px)")?.matches);
       const width = isMobileElevationChart ? 860 : 760;
-      const height = isMobileElevationChart ? 540 : 390;
+      const height = isMobileElevationChart ? 720 : 390;
       const padding = isMobileElevationChart
         ? { top: 20, right: 64, bottom: 74, left: 120 }
         : { top: 28, right: 22, bottom: 64, left: 82 };

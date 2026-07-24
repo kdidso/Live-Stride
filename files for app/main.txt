@@ -584,6 +584,33 @@ function formatProfileSecondsPerMile(secondsPerMile) {
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")} /mi`;
 }
 
+function normalizeProfileRunAnalysis(analysis) {
+  if (!analysis || typeof analysis !== "object") return null;
+  const samples = Array.isArray(analysis.samples) ? analysis.samples : [];
+  const summary = analysis.summary && typeof analysis.summary === "object" ? analysis.summary : {};
+  return {
+    ...analysis,
+    summary,
+    samples: samples
+      .map((sample, index) => ({
+        sequence_num: Number.isFinite(Number(sample.sequence_num)) ? Number(sample.sequence_num) : index + 1,
+        recorded_at: sample.recorded_at || null,
+        elapsed_sec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null,
+        lat: Number(sample.lat),
+        lon: Number(sample.lon),
+        elevation_m: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) : null,
+        distance_m: Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null,
+        distance_mi: Number.isFinite(Number(sample.distance_mi)) ? Number(sample.distance_mi) : null,
+        segment_distance_m: Number.isFinite(Number(sample.segment_distance_m)) ? Number(sample.segment_distance_m) : null,
+        segment_elapsed_sec: Number.isFinite(Number(sample.segment_elapsed_sec)) ? Number(sample.segment_elapsed_sec) : null,
+        speed_mps: Number.isFinite(Number(sample.speed_mps)) ? Number(sample.speed_mps) : null,
+        pace_sec_per_mile: Number.isFinite(Number(sample.pace_sec_per_mile)) ? Number(sample.pace_sec_per_mile) : null,
+        avg_pace_sec_per_mile: Number.isFinite(Number(sample.avg_pace_sec_per_mile)) ? Number(sample.avg_pace_sec_per_mile) : null
+      }))
+      .filter(sample => Number.isFinite(sample.lat) && Number.isFinite(sample.lon))
+  };
+}
+
 async function loadProfileRoute(runId) {
   if (profileRouteCache.has(runId)) return profileRouteCache.get(runId);
   const request = (async () => {
@@ -616,7 +643,11 @@ async function loadProfileRoute(runId) {
       })
       .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
     if (points.length < 2) throw new Error("This activity has too few route points.");
-    return { points, analysis: analyzeProfilePoints(points) };
+    return {
+      points,
+      analysis: analyzeProfilePoints(points),
+      storedAnalysis: normalizeProfileRunAnalysis(data.analysis)
+    };
   })();
   profileRouteCache.set(runId, request);
   try {
@@ -882,6 +913,229 @@ function createProfileElevationChart(routeData) {
   maxRow.className = "profile-elevation-row";
   maxRow.innerHTML = `<span>Max Elevation</span><strong>${maxElevationText}</strong>`;
   summary.append(gainRow, minRow, maxRow);
+  section.append(header, svg, summary);
+  return section;
+}
+
+function getProfileSummaryValue(routeData, key) {
+  const stored = Number(routeData?.storedAnalysis?.summary?.[key]);
+  if (Number.isFinite(stored)) return stored;
+  const run = routeData?.run;
+  if (key === "distance_m") return Number(run?.distance_m || routeData?.analysis?.totalDistanceM || 0);
+  if (key === "elapsed_time_ms") return Number(run?.elapsed_time_ms || 0);
+  if (key === "moving_time_ms") return Number(routeData?.analysis?.movingTimeMs || run?.moving_time_ms || 0);
+  if (key === "average_pace_sec_per_mile") {
+    const miles = metersToMiles(getProfileSummaryValue(routeData, "distance_m"));
+    const elapsedMs = getProfileSummaryValue(routeData, "elapsed_time_ms");
+    return miles > 0 && elapsedMs > 0 ? elapsedMs / 1000 / miles : null;
+  }
+  return null;
+}
+
+function createProfilePaceSamples(routeData) {
+  const storedSamples = routeData?.storedAnalysis?.samples || [];
+  const sourceSamples = storedSamples.length >= 2
+    ? storedSamples
+    : (routeData?.points || []).map((point, index) => ({
+        sequence_num: index + 1,
+        lat: point.lat,
+        lon: point.lon,
+        elevation_m: point.elevation,
+        recorded_at: Number.isFinite(point.time) ? new Date(point.time).toISOString() : null
+      }));
+  let distanceM = 0;
+  let lastUsableDistanceM = 0;
+  return sourceSamples.map((sample, index) => {
+    const previous = index > 0 ? sourceSamples[index - 1] : null;
+    const segmentDistanceM = Number.isFinite(Number(sample.segment_distance_m)) && Number(sample.segment_distance_m) >= 0
+      ? Number(sample.segment_distance_m)
+      : previous
+      ? haversineDistance([previous.lon, previous.lat], [sample.lon, sample.lat])
+      : 0;
+    const storedDistanceM = Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
+    if (storedDistanceM != null && (index === 0 || storedDistanceM > lastUsableDistanceM || segmentDistanceM === 0)) {
+      distanceM = Math.max(storedDistanceM, distanceM);
+    } else {
+      distanceM += segmentDistanceM;
+    }
+    lastUsableDistanceM = distanceM;
+    const timestamp = sample.recorded_at ? Date.parse(sample.recorded_at) : null;
+    const previousTimestamp = previous?.recorded_at ? Date.parse(previous.recorded_at) : null;
+    const elapsedSec = Number.isFinite(Number(sample.segment_elapsed_sec)) && Number(sample.segment_elapsed_sec) > 0
+      ? Number(sample.segment_elapsed_sec)
+      : Number.isFinite(timestamp) && Number.isFinite(previousTimestamp)
+      ? Math.max(0, (timestamp - previousTimestamp) / 1000)
+      : null;
+    const derivedSpeed = elapsedSec > 0 ? segmentDistanceM / elapsedSec : null;
+    const pace = Number.isFinite(Number(sample.pace_sec_per_mile)) && Number(sample.pace_sec_per_mile) > 0
+      ? Number(sample.pace_sec_per_mile)
+      : derivedSpeed > 0
+      ? 1609.344 / derivedSpeed
+      : null;
+    return {
+      distanceMi: metersToMiles(distanceM),
+      elevationFt: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) * 3.28084 : null,
+      paceSecPerMile: Number.isFinite(pace) ? pace : null,
+      elapsedSec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null
+    };
+  }).filter(sample => Number.isFinite(sample.distanceMi));
+}
+
+function percentileProfileValue(values, fraction) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)));
+  return sorted[index];
+}
+
+function formatProfilePaceTick(secondsPerMile) {
+  if (!Number.isFinite(secondsPerMile)) return "--";
+  const rounded = Math.round(secondsPerMile / 30) * 30;
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
+}
+
+function getProfileFastestSplit(routeData) {
+  const samples = createProfilePaceSamples(routeData);
+  if (samples.length < 2) return null;
+  const totalDistance = samples[samples.length - 1].distanceMi;
+  const sourceSamples = routeData?.storedAnalysis?.samples || [];
+  const finishMile = Math.floor(totalDistance);
+  let fastest = null;
+  for (let mile = 1; mile <= finishMile; mile += 1) {
+    const startDistance = mile - 1;
+    const endDistance = mile;
+    const startSample = samples.find(sample => sample.distanceMi >= startDistance);
+    const endSample = samples.find(sample => sample.distanceMi >= endDistance);
+    const startSource = sourceSamples[samples.indexOf(startSample)];
+    const endSource = sourceSamples[samples.indexOf(endSample)];
+    const startTime = startSource?.recorded_at ? Date.parse(startSource.recorded_at) : null;
+    const endTime = endSource?.recorded_at ? Date.parse(endSource.recorded_at) : null;
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) continue;
+    const seconds = (endTime - startTime) / 1000;
+    fastest = fastest == null ? seconds : Math.min(fastest, seconds);
+  }
+  return fastest;
+}
+
+function createProfilePaceChart(routeData, run) {
+  const samples = createProfilePaceSamples(routeData);
+  const paceSamples = samples.filter(sample =>
+    Number.isFinite(sample.paceSecPerMile) &&
+    sample.paceSecPerMile >= 180 &&
+    sample.paceSecPerMile <= 2400
+  );
+  if (samples.length < 2 || paceSamples.length < 2) {
+    const unavailable = document.createElement("div");
+    unavailable.className = "route-unavailable";
+    unavailable.textContent = "Pace graph unavailable";
+    return unavailable;
+  }
+
+  const isMobileChart = Boolean(window.matchMedia?.("(max-width: 520px)")?.matches);
+  const width = isMobileChart ? 860 : 760;
+  const height = isMobileChart ? 720 : 430;
+  const padding = isMobileChart
+    ? { top: 28, right: 58, bottom: 78, left: 118 }
+    : { top: 30, right: 26, bottom: 66, left: 84 };
+  const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xFor = distanceMi => padding.left + (distanceMi / maxDistance) * plotWidth;
+
+  const paceValues = paceSamples.map(sample => sample.paceSecPerMile);
+  const fastPace = Math.max(240, Math.floor((percentileProfileValue(paceValues, 0.08) || 360) / 60) * 60);
+  const slowPace = Math.min(2400, Math.max(900, Math.ceil((percentileProfileValue(paceValues, 0.92) || 900) / 60) * 60));
+  const yForPace = pace => padding.top + ((pace - fastPace) / Math.max(60, slowPace - fastPace)) * plotHeight;
+  const paceLineSamples = paceSamples.map(sample => ({
+    ...sample,
+    pace: Math.min(slowPace, Math.max(fastPace, sample.paceSecPerMile))
+  }));
+
+  const elevationSamples = samples.filter(sample => Number.isFinite(sample.elevationFt));
+  const hasElevation = elevationSamples.length >= 2;
+  const elevationValues = elevationSamples.map(sample => sample.elevationFt);
+  const minElevation = hasElevation ? Math.min(...elevationValues) : 0;
+  const maxElevation = hasElevation ? Math.max(...elevationValues) : 1;
+  const elevationRange = Math.max(20, maxElevation - minElevation);
+  const yForElevation = elevationFt => padding.top + ((maxElevation + elevationRange * 0.06 - elevationFt) / (elevationRange * 1.16)) * plotHeight;
+
+  const pacePath = paceLineSamples.map((sample, index) =>
+    `${index ? "L" : "M"}${xFor(sample.distanceMi).toFixed(1)} ${yForPace(sample.pace).toFixed(1)}`
+  ).join(" ");
+  const paceAreaPath = `${pacePath} L${xFor(paceLineSamples[paceLineSamples.length - 1].distanceMi).toFixed(1)} ${padding.top + plotHeight} L${xFor(paceLineSamples[0].distanceMi).toFixed(1)} ${padding.top + plotHeight} Z`;
+  const elevationPath = elevationSamples.map((sample, index) =>
+    `${index ? "L" : "M"}${xFor(sample.distanceMi).toFixed(1)} ${yForElevation(sample.elevationFt).toFixed(1)}`
+  ).join(" ");
+  const elevationAreaPath = hasElevation
+    ? `${elevationPath} L${xFor(maxDistance).toFixed(1)} ${padding.top + plotHeight} L${padding.left} ${padding.top + plotHeight} Z`
+    : "";
+  const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms") || Number(run?.moving_time_ms || 0);
+  const elapsedMs = getProfileSummaryValue(routeData, "elapsed_time_ms") || Number(run?.elapsed_time_ms || 0);
+  const distanceM = getProfileSummaryValue(routeData, "distance_m") || routeData?.analysis?.totalDistanceM || Number(run?.distance_m || 0);
+  const distanceMi = metersToMiles(distanceM);
+  const avgElapsedPace = getProfileSummaryValue(routeData, "average_pace_sec_per_mile") || (distanceMi > 0 && elapsedMs > 0 ? elapsedMs / 1000 / distanceMi : null);
+  const avgMovingPace = distanceMi > 0 && movingTimeMs > 0 ? movingTimeMs / 1000 / distanceMi : avgElapsedPace;
+  const avgLineY = Number.isFinite(avgMovingPace)
+    ? yForPace(Math.min(slowPace, Math.max(fastPace, avgMovingPace)))
+    : null;
+  const distanceStep = maxDistance <= 4 ? 1 : maxDistance <= 15 ? 2 : maxDistance <= 30 ? 5 : 10;
+  const distanceTicks = [];
+  for (let tick = distanceStep; tick < maxDistance; tick += distanceStep) {
+    if (maxDistance - tick > Math.max(0.75, distanceStep * 0.45)) distanceTicks.push(tick);
+  }
+  const paceTicks = [fastPace, (fastPace + slowPace) / 2, slowPace];
+  const fastestSplit = getProfileFastestSplit(routeData);
+
+  const section = document.createElement("div");
+  section.className = "profile-pace-content";
+  const header = document.createElement("div");
+  header.className = "profile-elevation-header";
+  const title = document.createElement("h3");
+  title.textContent = "Pace";
+  header.append(title);
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Pace graph with elevation");
+  svg.classList.add("profile-pace-chart");
+  svg.innerHTML = `
+    <rect width="${width}" height="${height}" fill="#ffffff"/>
+    ${paceTicks.map(value => {
+      const y = yForPace(value).toFixed(1);
+      return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#d9dde1" stroke-width="1.5"/>`;
+    }).join("")}
+    ${distanceTicks.map(value => {
+      const x = xFor(value).toFixed(1);
+      return `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${padding.top + plotHeight}" stroke="#d9dde1" stroke-width="1.5"/>`;
+    }).join("")}
+    <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#c5cbd0" stroke-width="1.4"/>
+    ${hasElevation ? `<path d="${elevationAreaPath}" fill="#b9b8b1" opacity="0.48"/>` : ""}
+    <path d="${paceAreaPath}" fill="#1f73d8" opacity="0.76"/>
+    <path d="${pacePath}" fill="none" stroke="#1f73d8" stroke-width="2.4" stroke-linejoin="round"/>
+    ${Number.isFinite(avgLineY) ? `<line x1="${padding.left}" y1="${avgLineY.toFixed(1)}" x2="${width - padding.right}" y2="${avgLineY.toFixed(1)}" stroke="#111820" stroke-width="2.2" stroke-dasharray="10 8" opacity="0.78"/>` : ""}
+    ${paceTicks.map(value => `<text x="${padding.left - 16}" y="${yForPace(value).toFixed(1)}" fill="#3f4850" font-size="20" text-anchor="end" dominant-baseline="middle">${formatProfilePaceTick(value)}</text>`).join("")}
+    <text x="${padding.left - 16}" y="${padding.top + plotHeight - 4}" fill="#3f4850" font-size="20" text-anchor="end">/mi</text>
+    <text x="${padding.left}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20">0 mi</text>
+    ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="middle">${value.toFixed(0)} mi</text>`).join("")}
+    <text x="${width - padding.right}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="end">${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi</text>
+  `;
+
+  const summary = document.createElement("div");
+  summary.className = "profile-elevation-summary profile-pace-summary";
+  [
+    ["Avg Pace", formatProfileSecondsPerMile(avgMovingPace)],
+    ["Moving Time", movingTimeMs ? formatProfileDuration(movingTimeMs) : "--"],
+    ["Avg Elapsed Pace", formatProfileSecondsPerMile(avgElapsedPace)],
+    ["Elapsed Time", elapsedMs ? formatProfileDuration(elapsedMs) : "--"],
+    ["Fastest Split", fastestSplit ? formatProfileSecondsPerMile(fastestSplit) : "--"]
+  ].forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "profile-elevation-row";
+    row.innerHTML = `<span>${label}</span><strong>${value}</strong>`;
+    summary.append(row);
+  });
+
   section.append(header, svg, summary);
   return section;
 }
@@ -1254,6 +1508,9 @@ async function openProfileActivityDetail(run) {
   const elevation = document.createElement("div");
   elevation.className = "profile-elevation-detail";
   elevation.textContent = "Loading elevation...";
+  const pace = document.createElement("div");
+  pace.className = "profile-pace-detail";
+  pace.textContent = "Loading pace...";
   const stats = document.createElement("div");
   stats.className = "profile-detail-stats";
   const miles = Number(run.distance_m || 0) / 1609.344;
@@ -1265,10 +1522,11 @@ async function openProfileActivityDetail(run) {
   const hasCadence = run.avg_cadence_spm != null && Number.isFinite(Number(run.avg_cadence_spm)) && Number(run.avg_cadence_spm) > 0;
   const cadenceStat = createProfileStat("Average cadence", hasCadence ? `${Math.round(run.avg_cadence_spm)} spm` : "--");
   stats.append(distanceStat, paceStat, elapsedStat, movingStat, gainStat, cadenceStat);
-  detail.append(heading, subtitle, route, stats, elevation);
+  detail.append(heading, subtitle, route, stats, elevation, pace);
   profileActivities.append(back, detail);
   const routeData = await hydrateProfileRoute(route, run, true);
   if (routeData) {
+    routeData.run = run;
     const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
     const routeMiles = metersToMiles(routeDistanceM);
     applyProfileRouteStats(run, { distanceStat, paceStat, movingStat, gainStat }, routeData);
@@ -1278,6 +1536,10 @@ async function openProfileActivityDetail(run) {
       const movingPace = createProfileStat("Moving pace", formatProfileSecondsPerMile(movingSecondsPerMile));
       stats.append(movingPace);
     }
+    pace.replaceChildren(createProfilePaceChart(routeData, run));
+  } else {
+    pace.textContent = "Pace graph unavailable";
+    pace.classList.add("route-unavailable");
   }
 }
 
@@ -4307,8 +4569,13 @@ function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
     const segmentDistanceM = previous
       ? haversineDistance([previous.lon, previous.lat], [point.lon, point.lat])
       : 0;
-    const hasStoredDistance = Number.isFinite(Number(point.distanceM)) && Number(point.distanceM) >= 0;
-    cumulativeDistanceM = hasStoredDistance ? Number(point.distanceM) : cumulativeDistanceM + segmentDistanceM;
+    const storedDistanceM = Number(point.distanceM);
+    const hasStoredDistance = Number.isFinite(storedDistanceM) && (
+      index === 0 ||
+      storedDistanceM > cumulativeDistanceM ||
+      (segmentDistanceM === 0 && storedDistanceM === cumulativeDistanceM)
+    );
+    cumulativeDistanceM = hasStoredDistance ? storedDistanceM : cumulativeDistanceM + segmentDistanceM;
 
     const segmentElapsedSec = previous && Number.isFinite(timestamp) && Number.isFinite(previousTimestamp)
       ? Math.max(0, (timestamp - previousTimestamp) / 1000)

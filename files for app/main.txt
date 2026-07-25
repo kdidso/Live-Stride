@@ -870,7 +870,13 @@ function createProfileElevationChart(routeData) {
   header.className = "profile-elevation-header";
   const title = document.createElement("h3");
   title.textContent = "Elevation";
-  header.append(title);
+  header.append(
+    title,
+    createProfileChartInfoButton(
+      "Elevation",
+      "Elevation values come from the elevation data saved with the run. The graph smooths those values for readability. Elevation gain adds meaningful uphill changes using a 5 meter threshold, so tiny GPS/elevation noise is ignored."
+    )
+  );
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -900,6 +906,18 @@ function createProfileElevationChart(routeData) {
     }).join("")}
     <text x="${width - padding.right}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="end">${distanceLabel}</text>
   `;
+  attachProfileChartScrubber(svg, {
+    width,
+    height,
+    padding,
+    plotWidth,
+    plotHeight,
+    maxDistance,
+    samples: chartSamples,
+    getY: sample => yFor(sample.elevationFt),
+    formatPrimary: sample => `${Math.round(sample.elevationFt)} ft`,
+    formatSecondary: sample => `${sample.distanceMi.toFixed(2)} mi`
+  });
 
   const summary = document.createElement("div");
   summary.className = "profile-elevation-summary";
@@ -992,6 +1010,137 @@ function formatProfilePaceTick(secondsPerMile) {
   if (!Number.isFinite(secondsPerMile)) return "--";
   const rounded = Math.round(secondsPerMile / 30) * 30;
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
+}
+
+function showProfileChartInfo(title, message) {
+  if (typeof showChoiceModal === "function") {
+    showChoiceModal(title, [{ label: "OK", description: message, value: "ok" }]);
+  } else {
+    alert(`${title}\n\n${message}`);
+  }
+}
+
+function createProfileChartInfoButton(title, message) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "profile-chart-info-btn";
+  button.setAttribute("aria-label", `${title} information`);
+  button.textContent = "i";
+  button.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    showProfileChartInfo(title, message);
+  };
+  return button;
+}
+
+function attachProfileChartScrubber(svg, config) {
+  const {
+    width,
+    height,
+    padding,
+    plotWidth,
+    plotHeight,
+    maxDistance,
+    samples,
+    getY,
+    getMarkerY,
+    formatPrimary,
+    formatSecondary
+  } = config;
+  if (!svg || !samples?.length || !Number.isFinite(maxDistance) || maxDistance <= 0) return;
+
+  const ns = "http://www.w3.org/2000/svg";
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  const xFor = distanceMi => padding.left + (distanceMi / maxDistance) * plotWidth;
+  const nearestSampleFor = distanceMi => samples.reduce((nearest, sample) => {
+    if (!nearest) return sample;
+    return Math.abs(sample.distanceMi - distanceMi) < Math.abs(nearest.distanceMi - distanceMi) ? sample : nearest;
+  }, null);
+
+  const group = document.createElementNS(ns, "g");
+  group.setAttribute("class", "profile-chart-scrubber");
+  group.setAttribute("visibility", "hidden");
+
+  const guide = document.createElementNS(ns, "line");
+  guide.setAttribute("y1", String(padding.top));
+  guide.setAttribute("y2", String(padding.top + plotHeight));
+  guide.setAttribute("stroke", "#111820");
+  guide.setAttribute("stroke-width", "2.8");
+  guide.setAttribute("opacity", "0.85");
+
+  const marker = document.createElementNS(ns, "circle");
+  marker.setAttribute("r", "6.5");
+  marker.setAttribute("fill", "#111820");
+  marker.setAttribute("stroke", "#ffffff");
+  marker.setAttribute("stroke-width", "3");
+
+  const bubble = document.createElementNS(ns, "g");
+  const bubbleRect = document.createElementNS(ns, "rect");
+  bubbleRect.setAttribute("rx", "12");
+  bubbleRect.setAttribute("ry", "12");
+  bubbleRect.setAttribute("width", "168");
+  bubbleRect.setAttribute("height", "74");
+  bubbleRect.setAttribute("fill", "#1f73d8");
+  bubbleRect.setAttribute("opacity", "0.96");
+  const bubbleText = document.createElementNS(ns, "text");
+  bubbleText.setAttribute("x", "18");
+  bubbleText.setAttribute("y", "30");
+  bubbleText.setAttribute("fill", "#ffffff");
+  bubbleText.setAttribute("font-size", "24");
+  bubbleText.setAttribute("font-weight", "800");
+  const bubbleSubtext = document.createElementNS(ns, "text");
+  bubbleSubtext.setAttribute("x", "18");
+  bubbleSubtext.setAttribute("y", "56");
+  bubbleSubtext.setAttribute("fill", "#ffffff");
+  bubbleSubtext.setAttribute("font-size", "18");
+  bubble.append(bubbleRect, bubbleText, bubbleSubtext);
+
+  group.append(guide, marker, bubble);
+
+  const overlay = document.createElementNS(ns, "rect");
+  overlay.setAttribute("x", String(padding.left));
+  overlay.setAttribute("y", String(padding.top));
+  overlay.setAttribute("width", String(plotWidth));
+  overlay.setAttribute("height", String(plotHeight));
+  overlay.setAttribute("fill", "transparent");
+  overlay.setAttribute("class", "profile-chart-scrubber-hitbox");
+
+  const update = event => {
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const svgX = ((event.clientX - rect.left) / rect.width) * width;
+    const clampedX = clamp(svgX, padding.left, padding.left + plotWidth);
+    const distanceMi = ((clampedX - padding.left) / plotWidth) * maxDistance;
+    const sample = nearestSampleFor(distanceMi);
+    if (!sample) return;
+    const x = xFor(sample.distanceMi);
+    const y = clamp(getMarkerY ? getMarkerY(sample) : getY(sample), padding.top, padding.top + plotHeight);
+    const bubbleWidth = 168;
+    const bubbleHeight = 74;
+    const bubbleX = clamp(x - bubbleWidth / 2, 4, width - bubbleWidth - 4);
+    const bubbleY = y - bubbleHeight - 18 < 4 ? y + 18 : y - bubbleHeight - 18;
+
+    guide.setAttribute("x1", x.toFixed(1));
+    guide.setAttribute("x2", x.toFixed(1));
+    marker.setAttribute("cx", x.toFixed(1));
+    marker.setAttribute("cy", y.toFixed(1));
+    bubble.setAttribute("transform", `translate(${bubbleX.toFixed(1)} ${bubbleY.toFixed(1)})`);
+    bubbleText.textContent = formatPrimary(sample);
+    bubbleSubtext.textContent = formatSecondary(sample);
+    group.setAttribute("visibility", "visible");
+  };
+
+  overlay.addEventListener("pointerdown", event => {
+    overlay.setPointerCapture?.(event.pointerId);
+    update(event);
+  });
+  overlay.addEventListener("pointermove", event => {
+    if (event.buttons || event.pointerType === "mouse") update(event);
+  });
+  overlay.addEventListener("click", update);
+
+  svg.append(group, overlay);
 }
 
 function smoothProfilePaceSamples(paceSamples, maxDistanceMi) {
@@ -1114,7 +1263,13 @@ function createProfilePaceChart(routeData, run) {
   header.className = "profile-elevation-header";
   const title = document.createElement("h3");
   title.textContent = "Pace";
-  header.append(title);
+  header.append(
+    title,
+    createProfileChartInfoButton(
+      "Pace",
+      "The blue pace line averages instantaneous pace over rolling 0.05 mile segments. The gray shape behind it is elevation for the same distance. The dashed line is your average moving pace."
+    )
+  );
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -1142,6 +1297,19 @@ function createProfilePaceChart(routeData, run) {
     ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="middle">${value.toFixed(0)} mi</text>`).join("")}
     <text x="${width - padding.right}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="end">${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi</text>
   `;
+  attachProfileChartScrubber(svg, {
+    width,
+    height,
+    padding,
+    plotWidth,
+    plotHeight,
+    maxDistance,
+    samples: paceLineSamples,
+    getY: sample => yForPace(sample.pace),
+    getMarkerY: sample => yForPace(Math.min(slowPace, Math.max(fastPace, sample.paceSecPerMile))),
+    formatPrimary: sample => formatProfileSecondsPerMile(sample.paceSecPerMile),
+    formatSecondary: sample => `${sample.distanceMi.toFixed(2)} mi`
+  });
 
   const summary = document.createElement("div");
   summary.className = "profile-elevation-summary profile-pace-summary";

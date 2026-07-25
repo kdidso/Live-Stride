@@ -1033,6 +1033,7 @@
       const ns = "http://www.w3.org/2000/svg";
       const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
       const xFor = distanceMi => padding.left + (distanceMi / maxDistance) * plotWidth;
+      const isFinePointerDevice = () => window.matchMedia?.("(hover: hover) and (pointer: fine)")?.matches;
       const nearestSampleFor = distanceMi => samples.reduce((nearest, sample) => {
         if (!nearest) return sample;
         return Math.abs(sample.distanceMi - distanceMi) < Math.abs(nearest.distanceMi - distanceMi) ? sample : nearest;
@@ -1100,7 +1101,9 @@
         const bubbleWidth = 168;
         const bubbleHeight = 74;
         const bubbleX = clamp(x - bubbleWidth / 2, 4, width - bubbleWidth - 4);
-        const bubbleY = y - bubbleHeight - 18 < 4 ? y + 18 : y - bubbleHeight - 18;
+        const pointerType = event.pointerType || "";
+        const pinBubbleToTop = pointerType === "mouse" || (!pointerType && isFinePointerDevice());
+        const bubbleY = pinBubbleToTop ? padding.top + 8 : y - bubbleHeight - 18 < 4 ? y + 18 : y - bubbleHeight - 18;
 
         guide.setAttribute("x1", x.toFixed(1));
         guide.setAttribute("x2", x.toFixed(1));

@@ -1162,7 +1162,7 @@ function attachProfileChartScrubber(svg, config) {
     const bubbleX = clamp(x - bubbleWidth / 2, 4, width - bubbleWidth - 4);
     const pointerType = event.pointerType || "";
     const pinBubbleToTop = pointerType === "mouse" || (!pointerType && isFinePointerDevice());
-    const bubbleY = pinBubbleToTop ? padding.top + 8 : y - bubbleHeight - 18 < 4 ? y + 18 : y - bubbleHeight - 18;
+    const bubbleY = pinBubbleToTop ? Math.max(4, padding.top - bubbleHeight - 8) : y - bubbleHeight - 18 < 4 ? y + 18 : y - bubbleHeight - 18;
 
     guide.setAttribute("x1", x.toFixed(1));
     guide.setAttribute("x2", x.toFixed(1));

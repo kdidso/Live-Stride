@@ -1273,6 +1273,10 @@
         .sort((a, b) => a.distanceMi - b.distanceMi);
       if (samples.length < 2) return { elapsed: [], moving: [] };
       const summaryDistanceMi = metersToMiles(getBrowserProfileSummaryValue(routeData, "distance_m"));
+      const summaryElapsedMs = getBrowserProfileSummaryValue(routeData, "elapsed_time_ms");
+      const summaryElapsedSec = Number.isFinite(summaryElapsedMs) && summaryElapsedMs > 0
+        ? summaryElapsedMs / 1000
+        : null;
       const maxSampleDistanceMi = samples[samples.length - 1].distanceMi;
       const totalDistanceMi = Number.isFinite(summaryDistanceMi) && summaryDistanceMi > 0
         ? Math.min(summaryDistanceMi, Math.max(summaryDistanceMi, maxSampleDistanceMi))
@@ -1290,9 +1294,13 @@
         const endSample = interpolateBrowserProfileSampleAtDistance(samples, endMi);
         const startElapsedSec = getBrowserProfileSampleElapsedSec(startSample);
         const endElapsedSec = getBrowserProfileSampleElapsedSec(endSample);
-        const elapsedSec = Number.isFinite(startElapsedSec) && Number.isFinite(endElapsedSec) && endElapsedSec > startElapsedSec
+        const isFinalSplit = index === splitCount - 1;
+        let elapsedSec = Number.isFinite(startElapsedSec) && Number.isFinite(endElapsedSec) && endElapsedSec > startElapsedSec
           ? endElapsedSec - startElapsedSec
           : null;
+        if (isFinalSplit && Number.isFinite(summaryElapsedSec) && Number.isFinite(startElapsedSec) && summaryElapsedSec > startElapsedSec) {
+          elapsedSec = summaryElapsedSec - startElapsedSec;
+        }
 
         let movingSec = 0;
         for (let sampleIndex = 1; sampleIndex < samples.length; sampleIndex += 1) {

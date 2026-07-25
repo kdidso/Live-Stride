@@ -934,6 +934,25 @@
       const rounded = Math.round(secondsPerMile / 30) * 30;
       return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
     }
+    function smoothBrowserProfilePaceSamples(paceSamples, maxDistanceMi) {
+      const windowMi = 0.05;
+      const halfWindowMi = windowMi / 2;
+      const smoothed = [];
+      for (let centerMi = 0; centerMi <= maxDistanceMi + halfWindowMi; centerMi += windowMi) {
+        const leftMi = Math.max(0, centerMi - halfWindowMi);
+        const rightMi = Math.min(maxDistanceMi, centerMi + halfWindowMi);
+        const values = paceSamples
+          .filter(sample => sample.distanceMi >= leftMi && sample.distanceMi <= rightMi)
+          .map(sample => sample.paceSecPerMile)
+          .filter(Number.isFinite);
+        if (!values.length) continue;
+        smoothed.push({
+          distanceMi: Math.min(maxDistanceMi, Math.max(0, centerMi)),
+          paceSecPerMile: values.reduce((sum, value) => sum + value, 0) / values.length
+        });
+      }
+      return smoothed.length >= 2 ? smoothed : paceSamples;
+    }
     function getBrowserProfileFastestSplit(routeData) {
       const samples = createBrowserProfilePaceSamples(routeData);
       if (samples.length < 2) return null;
@@ -974,11 +993,12 @@
       const plotWidth = width - padding.left - padding.right;
       const plotHeight = height - padding.top - padding.bottom;
       const xFor = distanceMi => padding.left + (distanceMi / maxDistance) * plotWidth;
-      const paceValues = paceSamples.map(sample => sample.paceSecPerMile);
-      const fastPace = Math.max(240, Math.floor((browserProfilePercentile(paceValues, 0.08) || 360) / 60) * 60);
-      const slowPace = Math.min(2400, Math.max(900, Math.ceil((browserProfilePercentile(paceValues, 0.92) || 900) / 60) * 60));
+      const smoothedPaceSamples = smoothBrowserProfilePaceSamples(paceSamples, maxDistance);
+      const paceValues = smoothedPaceSamples.map(sample => sample.paceSecPerMile);
+      const fastPace = Math.min(840, Math.max(300, Math.floor((browserProfilePercentile(paceValues, 0.04) || 360) / 60) * 60));
+      const slowPace = 900;
       const yForPace = pace => padding.top + ((pace - fastPace) / Math.max(60, slowPace - fastPace)) * plotHeight;
-      const paceLineSamples = paceSamples.map(sample => ({ ...sample, pace: Math.min(slowPace, Math.max(fastPace, sample.paceSecPerMile)) }));
+      const paceLineSamples = smoothedPaceSamples.map(sample => ({ ...sample, pace: Math.min(slowPace, Math.max(fastPace, sample.paceSecPerMile)) }));
       const elevationSamples = samples.filter(sample => Number.isFinite(sample.elevationFt));
       const hasElevation = elevationSamples.length >= 2;
       const elevationValues = elevationSamples.map(sample => sample.elevationFt);
@@ -1021,12 +1041,12 @@
         ${paceTicks.map(value => `<line x1="${padding.left}" y1="${yForPace(value).toFixed(1)}" x2="${width - padding.right}" y2="${yForPace(value).toFixed(1)}" stroke="#d9dde1" stroke-width="1.5"/>`).join("")}
         ${distanceTicks.map(value => `<line x1="${xFor(value).toFixed(1)}" y1="${padding.top}" x2="${xFor(value).toFixed(1)}" y2="${padding.top + plotHeight}" stroke="#d9dde1" stroke-width="1.5"/>`).join("")}
         <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#c5cbd0" stroke-width="1.4"/>
-        ${hasElevation ? `<path d="${elevationAreaPath}" fill="#b9b8b1" opacity="0.48"/>` : ""}
-        <path d="${paceAreaPath}" fill="#1f73d8" opacity="0.76"/>
-        <path d="${pacePath}" fill="none" stroke="#1f73d8" stroke-width="2.4" stroke-linejoin="round"/>
+        ${hasElevation ? `<path d="${elevationAreaPath}" fill="#b9b8b1" opacity="0.62"/>` : ""}
+        <path d="${paceAreaPath}" fill="#1f73d8" opacity="0.34"/>
+        <path d="${pacePath}" fill="none" stroke="#1f73d8" stroke-width="3" stroke-linejoin="round"/>
         ${Number.isFinite(avgLineY) ? `<line x1="${padding.left}" y1="${avgLineY.toFixed(1)}" x2="${width - padding.right}" y2="${avgLineY.toFixed(1)}" stroke="#111820" stroke-width="2.2" stroke-dasharray="10 8" opacity="0.78"/>` : ""}
         ${paceTicks.map(value => `<text x="${padding.left - 16}" y="${yForPace(value).toFixed(1)}" fill="#3f4850" font-size="20" text-anchor="end" dominant-baseline="middle">${formatBrowserPaceTick(value)}</text>`).join("")}
-        <text x="${padding.left - 16}" y="${padding.top + plotHeight - 4}" fill="#3f4850" font-size="20" text-anchor="end">/mi</text>
+        <text x="${padding.left - 16}" y="${padding.top + plotHeight + 28}" fill="#3f4850" font-size="20" text-anchor="end">/mi</text>
         <text x="${padding.left}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20">0 mi</text>
         ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="middle">${value.toFixed(0)} mi</text>`).join("")}
         <text x="${width - padding.right}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="end">${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi</text>

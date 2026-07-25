@@ -401,7 +401,8 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     .profile-elevation-detail,
-    .profile-pace-detail {
+    .profile-pace-detail,
+    .profile-splits-detail {
       margin: 26px 0 4px;
       padding: 24px 0 0;
       background: #fff;
@@ -411,9 +412,68 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
     }
 
     .profile-elevation-content,
-    .profile-pace-content {
+    .profile-pace-content,
+    .profile-splits-content {
       display: grid;
       gap: 18px;
+    }
+
+    .profile-splits-group {
+      display: grid;
+      gap: 10px;
+    }
+
+    .profile-splits-group h4 {
+      margin: 4px 0 2px;
+      color: #111820;
+      font-size: 16px;
+      line-height: 1.2;
+      font-weight: 800;
+    }
+
+    .profile-splits-table {
+      display: grid;
+      gap: 9px;
+    }
+
+    .profile-splits-row {
+      display: grid;
+      grid-template-columns: 52px 76px minmax(100px, 1fr) 56px;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .profile-splits-header {
+      padding-bottom: 8px;
+      border-bottom: 1px solid #d9dde1;
+      color: #4b555f;
+      font-size: 15px;
+    }
+
+    .profile-split-mi,
+    .profile-split-pace,
+    .profile-split-elev {
+      color: #3f4850;
+      font-size: 16px;
+      line-height: 1.2;
+    }
+
+    .profile-split-elev {
+      text-align: right;
+    }
+
+    .profile-split-bar-track {
+      height: 30px;
+      display: flex;
+      align-items: center;
+    }
+
+    .profile-split-bar {
+      display: block;
+      height: 27px;
+      min-width: 18px;
+      border-radius: 5px;
+      background: #2f67c8;
     }
 
     .profile-elevation-header {
@@ -600,14 +660,39 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       }
 
       .profile-elevation-detail,
-      .profile-pace-detail {
+      .profile-pace-detail,
+      .profile-splits-detail {
         margin-top: 22px;
         padding-top: 22px;
       }
 
       .profile-elevation-content,
-      .profile-pace-content {
+      .profile-pace-content,
+      .profile-splits-content {
         gap: 12px;
+      }
+
+      .profile-splits-row {
+        grid-template-columns: 38px 62px minmax(74px, 1fr) 42px;
+        gap: 10px;
+      }
+
+      .profile-splits-group h4 {
+        font-size: 17px;
+      }
+
+      .profile-splits-header {
+        font-size: 14px;
+      }
+
+      .profile-split-mi,
+      .profile-split-pace,
+      .profile-split-elev {
+        font-size: 16px;
+      }
+
+      .profile-split-bar {
+        height: 26px;
       }
 
       .profile-elevation-header h3 {

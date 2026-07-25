@@ -814,9 +814,9 @@
       const yFor = elevationFt => padding.top + ((maxElevation - elevationFt) / (maxElevation - minElevation)) * plotHeight;
       const linePath = chartSamples.map((sample, index) => `${index ? "L" : "M"}${xFor(sample.distanceMi).toFixed(1)} ${yFor(sample.elevationFt).toFixed(1)}`).join(" ");
       const areaPath = `${linePath} L${xFor(maxDistance).toFixed(1)} ${padding.top + plotHeight} L${padding.left} ${padding.top + plotHeight} Z`;
-      const minLabel = `${Math.round(rawMinElevation)} ft`;
-      const maxLabel = `${Math.round(rawMaxElevation)} ft`;
-      const distanceLabel = `${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi`;
+      const minLabel = `${Math.round(rawMinElevation)}`;
+      const maxLabel = `${Math.round(rawMaxElevation)}`;
+      const distanceLabel = formatBrowserProfileChartDistance(maxDistance, maxDistance);
       const midElevation = (rawMinElevation + rawMaxElevation) / 2;
       const gridRows = [rawMaxElevation, midElevation, rawMinElevation];
       const distanceStep = maxDistance <= 4 ? 1 : maxDistance <= 15 ? 2 : maxDistance <= 30 ? 5 : 10;
@@ -827,7 +827,8 @@
       const gainFt = Number.isFinite(routeData.analysis.elevationGainM)
         ? `${Math.round(routeData.analysis.elevationGainM * 3.28084)} ft`
         : "--";
-      const minElevationText = minLabel;
+      const minElevationText = `${minLabel} ft`;
+      const maxElevationText = `${maxLabel} ft`;
       const section = document.createElement("div");
       section.className = "profile-elevation-content";
       const header = document.createElement("div");
@@ -851,13 +852,14 @@
         <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#c9ced2" stroke-width="1.2"/>
         <path d="${areaPath}" fill="#b9b8b1" opacity="0.85"/>
         <path d="${linePath}" fill="none" stroke="#a9a8a2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="${padding.left - 88}" y="${padding.top + plotHeight / 2}" fill="#4f5962" font-size="17" text-anchor="middle" transform="rotate(-90 ${padding.left - 88} ${padding.top + plotHeight / 2})">Elevation (ft)</text>
         <text x="${padding.left - 11}" y="${yFor(rawMaxElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${maxLabel}</text>
         <text x="${padding.left - 11}" y="${yFor(midElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${Math.round(midElevation)}</text>
         <text x="${padding.left - 11}" y="${yFor(rawMinElevation).toFixed(1)}" fill="#4f5962" font-size="18" text-anchor="end" dominant-baseline="middle">${minLabel}</text>
-        <text x="${padding.left - 14}" y="${padding.top + plotHeight - 2}" fill="#4f5962" font-size="16" text-anchor="end">ft</text>
-        <text x="${padding.left}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18">0 mi</text>
-        ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="middle">${value.toFixed(0)} mi</text>`).join("")}
+        <text x="${padding.left}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18">0</text>
+        ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="middle">${formatBrowserProfileChartDistance(value, maxDistance)}</text>`).join("")}
         <text x="${width - padding.right}" y="${padding.top + plotHeight + 42}" fill="#4f5962" font-size="18" text-anchor="end">${distanceLabel}</text>
+        <text x="${padding.left + plotWidth / 2}" y="${padding.top + plotHeight + 68}" fill="#4f5962" font-size="17" text-anchor="middle">Distance (mi)</text>
       `;
       attachBrowserProfileChartScrubber(svg, {
         width,
@@ -881,7 +883,7 @@
       minRow.innerHTML = `<span>Min Elevation</span><strong>${minElevationText}</strong>`;
       const maxRow = document.createElement("div");
       maxRow.className = "profile-elevation-row";
-      maxRow.innerHTML = `<span>Max Elevation</span><strong>${maxLabel}</strong>`;
+      maxRow.innerHTML = `<span>Max Elevation</span><strong>${maxElevationText}</strong>`;
       summary.append(gainRow, minRow, maxRow);
       section.append(header, svg, summary);
       return section;
@@ -1176,22 +1178,33 @@
     }
     function smoothBrowserProfilePaceSamples(paceSamples, maxDistanceMi) {
       const windowMi = 0.05;
-      const halfWindowMi = windowMi / 2;
       const smoothed = [];
-      for (let centerMi = 0; centerMi <= maxDistanceMi + halfWindowMi; centerMi += windowMi) {
-        const leftMi = Math.max(0, centerMi - halfWindowMi);
-        const rightMi = Math.min(maxDistanceMi, centerMi + halfWindowMi);
+      for (let startMi = 0; startMi < maxDistanceMi; startMi += windowMi) {
+        const leftMi = Math.max(0, startMi);
+        const rightMi = Math.min(maxDistanceMi, startMi + windowMi);
         const values = paceSamples
           .filter(sample => sample.distanceMi >= leftMi && sample.distanceMi <= rightMi)
           .map(sample => sample.paceSecPerMile)
           .filter(Number.isFinite);
         if (!values.length) continue;
         smoothed.push({
-          distanceMi: Math.min(maxDistanceMi, Math.max(0, centerMi)),
+          distanceMi: rightMi,
+          segmentStartMi: leftMi,
+          segmentEndMi: rightMi,
           paceSecPerMile: values.reduce((sum, value) => sum + value, 0) / values.length
         });
       }
       return smoothed.length >= 2 ? smoothed : paceSamples;
+    }
+    function formatBrowserProfileChartDistance(value, maxDistance = value) {
+      if (!Number.isFinite(value)) return "--";
+      if (Math.abs(value) < 0.005) return "0";
+      return value.toFixed(maxDistance >= 10 ? 1 : 2).replace(/\.?0+$/, "");
+    }
+    function formatBrowserProfileSegmentRange(sample) {
+      const endMi = Number.isFinite(sample?.segmentEndMi) ? sample.segmentEndMi : sample?.distanceMi;
+      const startMi = Number.isFinite(sample?.segmentStartMi) ? sample.segmentStartMi : Math.max(0, endMi - 0.05);
+      return `${formatBrowserProfileChartDistance(startMi, endMi)}-${formatBrowserProfileChartDistance(endMi, endMi)} mi`;
     }
     function getBrowserProfileFastestSplit(routeData) {
       const samples = createBrowserProfilePaceSamples(routeData);
@@ -1290,11 +1303,12 @@
         <path d="${paceAreaPath}" fill="#1f73d8" opacity="0.34"/>
         <path d="${pacePath}" fill="none" stroke="#1f73d8" stroke-width="3" stroke-linejoin="round"/>
         ${Number.isFinite(avgLineY) ? `<line x1="${padding.left}" y1="${avgLineY.toFixed(1)}" x2="${width - padding.right}" y2="${avgLineY.toFixed(1)}" stroke="#111820" stroke-width="2.2" stroke-dasharray="10 8" opacity="0.78"/>` : ""}
+        <text x="${padding.left + plotWidth / 2}" y="${padding.top - 8}" fill="#3f4850" font-size="17" text-anchor="middle">Average pace per segment (min/mi)</text>
         ${paceTicks.map(value => `<text x="${padding.left - 16}" y="${yForPace(value).toFixed(1)}" fill="#3f4850" font-size="20" text-anchor="end" dominant-baseline="middle">${formatBrowserPaceTick(value)}</text>`).join("")}
-        <text x="${padding.left - 16}" y="${padding.top + plotHeight + 28}" fill="#3f4850" font-size="20" text-anchor="end">/mi</text>
-        <text x="${padding.left}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20">0 mi</text>
-        ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="middle">${value.toFixed(0)} mi</text>`).join("")}
-        <text x="${width - padding.right}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="end">${maxDistance.toFixed(maxDistance >= 10 ? 1 : 2)} mi</text>
+        <text x="${padding.left}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20">0</text>
+        ${distanceTicks.map(value => `<text x="${xFor(value).toFixed(1)}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="middle">${formatBrowserProfileChartDistance(value, maxDistance)}</text>`).join("")}
+        <text x="${width - padding.right}" y="${padding.top + plotHeight + 44}" fill="#3f4850" font-size="20" text-anchor="end">${formatBrowserProfileChartDistance(maxDistance, maxDistance)}</text>
+        <text x="${padding.left + plotWidth / 2}" y="${padding.top + plotHeight + 70}" fill="#3f4850" font-size="17" text-anchor="middle">Cumulative distance (mi)</text>
       `;
       attachBrowserProfileChartScrubber(svg, {
         width,
@@ -1307,7 +1321,7 @@
         getY: sample => yForPace(sample.pace),
         getMarkerY: sample => yForPace(sample.pace),
         formatPrimary: sample => browserFormatSecondsPerMile(sample.paceSecPerMile),
-        formatSecondary: sample => `${sample.distanceMi.toFixed(2)} mi`
+        formatSecondary: sample => formatBrowserProfileSegmentRange(sample)
       });
       const summary = document.createElement("div");
       summary.className = "profile-elevation-summary profile-pace-summary";

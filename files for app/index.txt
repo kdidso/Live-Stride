@@ -407,7 +407,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       background: #fff;
       border-top: 1px solid #eef1f3;
       color: #4b555f;
-      overflow: hidden;
+      overflow: visible;
     }
 
     .profile-elevation-content,
@@ -469,6 +469,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       font-size: 14px;
       line-height: 1.4;
       text-align: left;
+      overflow-wrap: anywhere;
     }
 
     .profile-chart-info-popover::before {
@@ -621,7 +622,7 @@ body.viewer-mode .maplibregl-ctrl-geolocate {
       }
 
       .profile-chart-info-popover {
-        width: min(290px, calc(100vw - 36px));
+        width: min(260px, calc(100vw - 72px));
         font-size: 13px;
       }
 

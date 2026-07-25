@@ -605,7 +605,8 @@ function normalizeProfileRunAnalysis(analysis) {
         segment_elapsed_sec: Number.isFinite(Number(sample.segment_elapsed_sec)) ? Number(sample.segment_elapsed_sec) : null,
         speed_mps: Number.isFinite(Number(sample.speed_mps)) ? Number(sample.speed_mps) : null,
         pace_sec_per_mile: Number.isFinite(Number(sample.pace_sec_per_mile)) ? Number(sample.pace_sec_per_mile) : null,
-        avg_pace_sec_per_mile: Number.isFinite(Number(sample.avg_pace_sec_per_mile)) ? Number(sample.avg_pace_sec_per_mile) : null
+        avg_pace_sec_per_mile: Number.isFinite(Number(sample.avg_pace_sec_per_mile)) ? Number(sample.avg_pace_sec_per_mile) : null,
+        is_held: Boolean(sample.is_held || sample.held || sample.is_hold || sample.was_held || sample.hold)
       }))
       .filter(sample => Number.isFinite(sample.lat) && Number.isFinite(sample.lon))
   };
@@ -995,7 +996,12 @@ function createProfilePaceSamples(routeData) {
       distanceMi: metersToMiles(distanceM),
       elevationFt: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) * 3.28084 : null,
       paceSecPerMile: Number.isFinite(pace) ? pace : null,
-      elapsedSec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null
+      elapsedSec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null,
+      timestamp: Number.isFinite(timestamp) ? timestamp : null,
+      segmentElapsedSec: Number.isFinite(elapsedSec) ? elapsedSec : null,
+      segmentDistanceM: Number.isFinite(segmentDistanceM) ? segmentDistanceM : null,
+      speedMps: Number.isFinite(Number(sample.speed_mps)) ? Number(sample.speed_mps) : Number.isFinite(derivedSpeed) ? derivedSpeed : null,
+      isHeld: Boolean(sample.is_held || sample.held || sample.is_hold || sample.was_held || sample.hold)
     };
   }).filter(sample => Number.isFinite(sample.distanceMi));
 }
@@ -1289,6 +1295,181 @@ function getProfileFastestSplit(routeData) {
     fastest = fastest == null ? seconds : Math.min(fastest, seconds);
   }
   return fastest;
+}
+
+function interpolateProfileSampleAtDistance(samples, distanceMi) {
+  if (!samples.length || !Number.isFinite(distanceMi)) return null;
+  if (distanceMi <= samples[0].distanceMi) return { ...samples[0], distanceMi };
+  const last = samples[samples.length - 1];
+  if (distanceMi >= last.distanceMi) return { ...last, distanceMi };
+  const upperIndex = samples.findIndex(sample => sample.distanceMi >= distanceMi);
+  if (upperIndex <= 0) return { ...samples[0], distanceMi };
+  const lower = samples[upperIndex - 1];
+  const upper = samples[upperIndex];
+  const span = upper.distanceMi - lower.distanceMi;
+  const ratio = span > 0 ? (distanceMi - lower.distanceMi) / span : 0;
+  const interpolate = (a, b) => Number.isFinite(a) && Number.isFinite(b) ? a + (b - a) * ratio : Number.isFinite(b) ? b : a;
+  return {
+    ...upper,
+    distanceMi,
+    elevationFt: interpolate(lower.elevationFt, upper.elevationFt),
+    elapsedSec: interpolate(lower.elapsedSec, upper.elapsedSec),
+    timestamp: interpolate(lower.timestamp, upper.timestamp)
+  };
+}
+
+function getProfileSampleElapsedSec(sample) {
+  if (Number.isFinite(sample?.elapsedSec)) return sample.elapsedSec;
+  if (Number.isFinite(sample?.timestamp)) return sample.timestamp / 1000;
+  return null;
+}
+
+function isProfileMovingInterval(previous, current) {
+  const MIN_MOVING_SPEED_MPS = 0.44704;
+  const MAX_MOVING_SPEED_MPS = 62.5878;
+  if (previous?.isHeld || current?.isHeld) return false;
+  const speed = Number.isFinite(current?.speedMps) ? current.speedMps : null;
+  if (speed != null) return speed >= MIN_MOVING_SPEED_MPS && speed <= MAX_MOVING_SPEED_MPS;
+  const distanceM = Number.isFinite(current?.segmentDistanceM)
+    ? current.segmentDistanceM
+    : Math.max(0, (current?.distanceMi || 0) - (previous?.distanceMi || 0)) * 1609.344;
+  const elapsedSec = Number.isFinite(current?.segmentElapsedSec)
+    ? current.segmentElapsedSec
+    : Math.max(0, getProfileSampleElapsedSec(current) - getProfileSampleElapsedSec(previous));
+  if (!Number.isFinite(distanceM) || !Number.isFinite(elapsedSec) || elapsedSec <= 0 || distanceM < 1) return false;
+  const derivedSpeed = distanceM / elapsedSec;
+  return derivedSpeed >= MIN_MOVING_SPEED_MPS && derivedSpeed <= MAX_MOVING_SPEED_MPS;
+}
+
+function calculateProfileSplits(routeData) {
+  const samples = createProfilePaceSamples(routeData)
+    .filter(sample => Number.isFinite(sample.distanceMi))
+    .sort((a, b) => a.distanceMi - b.distanceMi);
+  if (samples.length < 2) return { elapsed: [], moving: [] };
+  const summaryDistanceMi = metersToMiles(getProfileSummaryValue(routeData, "distance_m"));
+  const maxSampleDistanceMi = samples[samples.length - 1].distanceMi;
+  const totalDistanceMi = Number.isFinite(summaryDistanceMi) && summaryDistanceMi > 0
+    ? Math.min(summaryDistanceMi, Math.max(summaryDistanceMi, maxSampleDistanceMi))
+    : maxSampleDistanceMi;
+  if (!Number.isFinite(totalDistanceMi) || totalDistanceMi <= 0) return { elapsed: [], moving: [] };
+
+  const splits = [];
+  const splitCount = Math.ceil(totalDistanceMi - 1e-6);
+  for (let index = 0; index < splitCount; index += 1) {
+    const startMi = index;
+    const endMi = Math.min(index + 1, totalDistanceMi);
+    const splitDistanceMi = endMi - startMi;
+    if (splitDistanceMi <= 0.01) continue;
+    const startSample = interpolateProfileSampleAtDistance(samples, startMi);
+    const endSample = interpolateProfileSampleAtDistance(samples, endMi);
+    const startElapsedSec = getProfileSampleElapsedSec(startSample);
+    const endElapsedSec = getProfileSampleElapsedSec(endSample);
+    const elapsedSec = Number.isFinite(startElapsedSec) && Number.isFinite(endElapsedSec) && endElapsedSec > startElapsedSec
+      ? endElapsedSec - startElapsedSec
+      : null;
+
+    let movingSec = 0;
+    for (let sampleIndex = 1; sampleIndex < samples.length; sampleIndex += 1) {
+      const previous = samples[sampleIndex - 1];
+      const current = samples[sampleIndex];
+      const intervalStartMi = previous.distanceMi;
+      const intervalEndMi = current.distanceMi;
+      const intervalDistanceMi = intervalEndMi - intervalStartMi;
+      if (intervalEndMi <= startMi || intervalStartMi >= endMi || intervalDistanceMi <= 0) continue;
+      if (!isProfileMovingInterval(previous, current)) continue;
+      const overlapStartMi = Math.max(startMi, intervalStartMi);
+      const overlapEndMi = Math.min(endMi, intervalEndMi);
+      const overlapRatio = (overlapEndMi - overlapStartMi) / intervalDistanceMi;
+      const intervalElapsedSec = Number.isFinite(current.segmentElapsedSec)
+        ? current.segmentElapsedSec
+        : getProfileSampleElapsedSec(current) - getProfileSampleElapsedSec(previous);
+      if (Number.isFinite(intervalElapsedSec) && intervalElapsedSec > 0 && overlapRatio > 0) {
+        movingSec += intervalElapsedSec * overlapRatio;
+      }
+    }
+
+    const elevationChangeFt = Number.isFinite(startSample?.elevationFt) && Number.isFinite(endSample?.elevationFt)
+      ? endSample.elevationFt - startSample.elevationFt
+      : null;
+    const label = splitDistanceMi >= 0.995
+      ? String(index + 1)
+      : formatProfileChartDistance(splitDistanceMi, totalDistanceMi);
+    splits.push({
+      label,
+      segmentStartMi: startMi,
+      segmentEndMi: endMi,
+      splitDistanceMi,
+      elevationChangeFt,
+      elapsedPaceSecPerMile: elapsedSec > 0 ? elapsedSec / splitDistanceMi : null,
+      movingPaceSecPerMile: movingSec > 0 ? movingSec / splitDistanceMi : elapsedSec > 0 ? elapsedSec / splitDistanceMi : null
+    });
+  }
+  return { elapsed: splits, moving: splits };
+}
+
+function formatProfileSplitPace(secondsPerMile) {
+  return formatProfileSecondsPerMile(secondsPerMile).replace(" /mi", "");
+}
+
+function formatProfileSplitElevation(elevationChangeFt) {
+  if (!Number.isFinite(elevationChangeFt)) return "--";
+  return String(Math.round(elevationChangeFt));
+}
+
+function createProfileSplitsTable(title, splits, paceKey) {
+  const group = document.createElement("div");
+  group.className = "profile-splits-group";
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  const table = document.createElement("div");
+  table.className = "profile-splits-table";
+  const header = document.createElement("div");
+  header.className = "profile-splits-row profile-splits-header";
+  header.innerHTML = "<span>Mi</span><span>Pace</span><span></span><span>Elev</span>";
+  table.append(header);
+
+  const paceValues = splits.map(split => split[paceKey]).filter(value => Number.isFinite(value) && value > 0);
+  const fastest = paceValues.length ? Math.min(...paceValues) : null;
+  const slowest = paceValues.length ? Math.max(...paceValues) : null;
+  splits.forEach(split => {
+    const row = document.createElement("div");
+    row.className = "profile-splits-row";
+    const pace = split[paceKey];
+    const range = Number.isFinite(fastest) && Number.isFinite(slowest) && slowest > fastest ? slowest - fastest : 1;
+    const widthPct = Number.isFinite(pace) ? 32 + ((slowest - pace) / range) * 68 : 18;
+    row.innerHTML = `
+      <span class="profile-split-mi">${split.label}</span>
+      <span class="profile-split-pace">${formatProfileSplitPace(pace)}</span>
+      <span class="profile-split-bar-track"><span class="profile-split-bar" style="width:${Math.max(18, Math.min(100, widthPct)).toFixed(1)}%"></span></span>
+      <span class="profile-split-elev">${formatProfileSplitElevation(split.elevationChangeFt)}</span>
+    `;
+    table.append(row);
+  });
+  group.append(heading, table);
+  return group;
+}
+
+function createProfileSplitsChart(routeData) {
+  const splitData = calculateProfileSplits(routeData);
+  if (!splitData.elapsed.length) {
+    const unavailable = document.createElement("div");
+    unavailable.className = "route-unavailable";
+    unavailable.textContent = "Splits unavailable";
+    return unavailable;
+  }
+  const section = document.createElement("div");
+  section.className = "profile-splits-content";
+  const header = document.createElement("div");
+  header.className = "profile-elevation-header";
+  const title = document.createElement("h3");
+  title.textContent = "Splits";
+  header.append(title);
+  section.append(
+    header,
+    createProfileSplitsTable("Elapsed splits", splitData.elapsed, "elapsedPaceSecPerMile"),
+    createProfileSplitsTable("Moving splits", splitData.moving, "movingPaceSecPerMile")
+  );
+  return section;
 }
 
 function createProfilePaceChart(routeData, run) {
@@ -1808,6 +1989,9 @@ async function openProfileActivityDetail(run) {
   const pace = document.createElement("div");
   pace.className = "profile-pace-detail";
   pace.textContent = "Loading pace...";
+  const splits = document.createElement("div");
+  splits.className = "profile-splits-detail";
+  splits.textContent = "Loading splits...";
   const stats = document.createElement("div");
   stats.className = "profile-detail-stats";
   const miles = Number(run.distance_m || 0) / 1609.344;
@@ -1819,7 +2003,7 @@ async function openProfileActivityDetail(run) {
   const hasCadence = run.avg_cadence_spm != null && Number.isFinite(Number(run.avg_cadence_spm)) && Number(run.avg_cadence_spm) > 0;
   const cadenceStat = createProfileStat("Average cadence", hasCadence ? `${Math.round(run.avg_cadence_spm)} spm` : "--");
   stats.append(distanceStat, paceStat, elapsedStat, movingStat, gainStat, cadenceStat);
-  detail.append(heading, subtitle, route, stats, elevation, pace);
+  detail.append(heading, subtitle, route, stats, elevation, pace, splits);
   profileActivities.append(back, detail);
   const routeData = await hydrateProfileRoute(route, run, true);
   if (routeData) {
@@ -1834,9 +2018,12 @@ async function openProfileActivityDetail(run) {
       stats.append(movingPace);
     }
     pace.replaceChildren(createProfilePaceChart(routeData, run));
+    splits.replaceChildren(createProfileSplitsChart(routeData));
   } else {
     pace.textContent = "Pace graph unavailable";
     pace.classList.add("route-unavailable");
+    splits.textContent = "Splits unavailable";
+    splits.classList.add("route-unavailable");
   }
 }
 

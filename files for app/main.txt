@@ -1115,6 +1115,7 @@ function attachProfileChartScrubber(svg, config) {
   marker.setAttribute("stroke-width", "3");
 
   const bubble = document.createElementNS(ns, "g");
+  bubble.style.cursor = "pointer";
   const bubbleRect = document.createElementNS(ns, "rect");
   bubbleRect.setAttribute("rx", "12");
   bubbleRect.setAttribute("ry", "12");
@@ -1135,8 +1136,6 @@ function attachProfileChartScrubber(svg, config) {
   bubbleSubtext.setAttribute("font-size", "18");
   bubble.append(bubbleRect, bubbleText, bubbleSubtext);
 
-  group.append(guide, marker, bubble);
-
   const overlay = document.createElementNS(ns, "rect");
   overlay.setAttribute("x", String(padding.left));
   overlay.setAttribute("y", String(padding.top));
@@ -1144,6 +1143,8 @@ function attachProfileChartScrubber(svg, config) {
   overlay.setAttribute("height", String(plotHeight));
   overlay.setAttribute("fill", "transparent");
   overlay.setAttribute("class", "profile-chart-scrubber-hitbox");
+
+  group.append(guide, marker, bubble);
 
   const update = event => {
     const rect = svg.getBoundingClientRect();
@@ -1169,6 +1170,15 @@ function attachProfileChartScrubber(svg, config) {
     bubbleSubtext.textContent = formatSecondary(sample);
     group.setAttribute("visibility", "visible");
   };
+
+  const dismiss = event => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    group.setAttribute("visibility", "hidden");
+  };
+  bubble.addEventListener("pointerdown", dismiss, { passive: false });
+  bubble.addEventListener("touchstart", dismiss, { passive: false });
+  bubble.addEventListener("click", dismiss);
 
   let dragging = false;
   let activePointerId = null;
@@ -1218,7 +1228,7 @@ function attachProfileChartScrubber(svg, config) {
   overlay.addEventListener("touchstart", handleTouchUpdate, { passive: false });
   overlay.addEventListener("touchmove", handleTouchUpdate, { passive: false });
 
-  svg.append(group, overlay);
+  svg.append(overlay, group);
 }
 
 function smoothProfilePaceSamples(paceSamples, maxDistanceMi) {

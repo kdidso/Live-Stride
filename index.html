@@ -129,7 +129,12 @@
     .profile-elevation-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
     .profile-elevation-header h3 { margin: 0; color: #111820; font-size: 22px; line-height: 1.1; font-weight: 800; }
     .profile-chart-info-btn { width: 38px; height: 38px; min-width: 38px; padding: 0; border: 3px solid #111820; border-radius: 50%; background: #fff; color: #111820; font-size: 22px; line-height: 1; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; }
-    .profile-chart-scrubber-hitbox { cursor: crosshair; touch-action: none; }
+    .profile-chart-info-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+    .profile-chart-info-popover { position: absolute; top: calc(100% + 10px); right: 0; z-index: 40; width: min(320px, calc(100vw - 48px)); padding: 14px 16px; border: 1px solid #d2dbe3; border-radius: 8px; background: #fff; box-shadow: 0 14px 32px rgba(17, 24, 32, 0.18); color: #28343d; font-size: 14px; line-height: 1.4; text-align: left; }
+    .profile-chart-info-popover::before { content: ""; position: absolute; top: -7px; right: 13px; width: 12px; height: 12px; border-left: 1px solid #d2dbe3; border-top: 1px solid #d2dbe3; background: #fff; transform: rotate(45deg); }
+    .profile-chart-info-popover strong, .profile-chart-info-popover span { display: block; }
+    .profile-chart-info-popover strong { margin-bottom: 6px; color: #111820; font-size: 15px; font-weight: 800; }
+    .profile-chart-scrubber-hitbox { cursor: crosshair; touch-action: none; -webkit-user-select: none; user-select: none; }
     .profile-elevation-chart { display: block; width: 100%; height: auto; margin-top: 2px; min-height: 320px; }
     .profile-pace-chart { display: block; width: 100%; height: auto; margin-top: 2px; min-height: 320px; }
     .profile-elevation-summary { display: grid; gap: 14px; margin-top: 2px; padding-bottom: 4px; }
@@ -149,6 +154,7 @@
       .profile-elevation-content, .profile-pace-content { gap: 12px; }
       .profile-elevation-header h3 { font-size: 24px; }
       .profile-chart-info-btn { width: 42px; height: 42px; min-width: 42px; font-size: 23px; }
+      .profile-chart-info-popover { width: min(290px, calc(100vw - 36px)); font-size: 13px; }
       .profile-elevation-chart { width: 100%; max-width: none; min-height: 0; margin-left: 0; margin-right: 0; }
       .profile-pace-chart { width: 100%; max-width: none; min-height: 0; margin-left: 0; margin-right: 0; }
       .profile-elevation-summary { margin-top: 0; gap: 12px; }
@@ -830,7 +836,7 @@
       title.textContent = "Elevation";
       const infoButton = createBrowserProfileChartInfoButton(
         "Elevation",
-        "Elevation values come from the elevation data saved with the run. The graph smooths those values for readability. Elevation gain adds meaningful uphill changes using a 5 meter threshold, so tiny GPS/elevation noise is ignored."
+        "LiveStride gets elevation from its elevation service, which looks up terrain height for each GPS point using the hosted MapTiler elevation dataset. The graph smooths those values for readability. Elevation gain adds meaningful uphill changes using a 5 meter threshold, so tiny GPS/elevation noise is ignored."
       );
       header.append(title, infoButton);
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -953,21 +959,60 @@
       const rounded = Math.round(secondsPerMile / 30) * 30;
       return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
     }
-    function showBrowserProfileChartInfo(title, message) {
-      alert(`${title}\n\n${message}`);
+    let browserProfileChartInfoDismissBound = false;
+    function closeBrowserProfileChartInfoPopovers(except = null) {
+      document.querySelectorAll(".profile-chart-info-popover").forEach(popover => {
+        if (popover !== except) popover.remove();
+      });
+      document.querySelectorAll(".profile-chart-info-btn[aria-expanded='true']").forEach(button => {
+        if (!except || !button.parentElement?.contains(except)) {
+          button.setAttribute("aria-expanded", "false");
+        }
+      });
+    }
+    function bindBrowserProfileChartInfoDismissal() {
+      if (browserProfileChartInfoDismissBound) return;
+      browserProfileChartInfoDismissBound = true;
+      document.addEventListener("click", event => {
+        if (!event.target?.closest?.(".profile-chart-info-wrap")) closeBrowserProfileChartInfoPopovers();
+      });
+      document.addEventListener("keydown", event => {
+        if (event.key === "Escape") closeBrowserProfileChartInfoPopovers();
+      });
     }
     function createBrowserProfileChartInfoButton(title, message) {
+      bindBrowserProfileChartInfoDismissal();
+      const wrapper = document.createElement("span");
+      wrapper.className = "profile-chart-info-wrap";
       const button = document.createElement("button");
       button.type = "button";
       button.className = "profile-chart-info-btn";
       button.setAttribute("aria-label", `${title} information`);
+      button.setAttribute("aria-expanded", "false");
       button.textContent = "i";
       button.onclick = event => {
         event.preventDefault();
         event.stopPropagation();
-        showBrowserProfileChartInfo(title, message);
+        const existing = wrapper.querySelector(".profile-chart-info-popover");
+        if (existing) {
+          existing.remove();
+          button.setAttribute("aria-expanded", "false");
+          return;
+        }
+        closeBrowserProfileChartInfoPopovers();
+        const popover = document.createElement("div");
+        popover.className = "profile-chart-info-popover";
+        popover.setAttribute("role", "note");
+        const heading = document.createElement("strong");
+        heading.textContent = title;
+        const body = document.createElement("span");
+        body.textContent = message;
+        popover.append(heading, body);
+        wrapper.append(popover);
+        button.setAttribute("aria-expanded", "true");
       };
-      return button;
+      wrapper.append(button);
+      return wrapper;
     }
     function attachBrowserProfileChartScrubber(svg, config) {
       const {
@@ -1066,14 +1111,53 @@
         group.setAttribute("visibility", "visible");
       };
 
+      let dragging = false;
+      let activePointerId = null;
+      const stopPointerDrag = event => {
+        if (activePointerId != null && event?.pointerId != null && event.pointerId !== activePointerId) return;
+        try {
+          if (activePointerId != null) overlay.releasePointerCapture?.(activePointerId);
+        } catch (_) {}
+        dragging = false;
+        activePointerId = null;
+        window.removeEventListener("pointermove", handlePointerMove, true);
+        window.removeEventListener("pointerup", stopPointerDrag, true);
+        window.removeEventListener("pointercancel", stopPointerDrag, true);
+      };
+      const handlePointerMove = event => {
+        if (!dragging && event.pointerType !== "mouse") return;
+        if (dragging && activePointerId != null && event.pointerId !== activePointerId) return;
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        update(event);
+      };
       overlay.addEventListener("pointerdown", event => {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        dragging = true;
+        activePointerId = event.pointerId;
         overlay.setPointerCapture?.(event.pointerId);
         update(event);
+        window.addEventListener("pointermove", handlePointerMove, true);
+        window.addEventListener("pointerup", stopPointerDrag, true);
+        window.addEventListener("pointercancel", stopPointerDrag, true);
+      }, { passive: false });
+      overlay.addEventListener("pointermove", handlePointerMove, { passive: false });
+      overlay.addEventListener("click", event => {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        update(event);
       });
-      overlay.addEventListener("pointermove", event => {
-        if (event.buttons || event.pointerType === "mouse") update(event);
-      });
-      overlay.addEventListener("click", update);
+      const touchPoint = event => event.touches?.[0] || event.changedTouches?.[0];
+      const handleTouchUpdate = event => {
+        const touch = touchPoint(event);
+        if (!touch) return;
+        event.preventDefault();
+        event.stopPropagation();
+        update(touch);
+      };
+      overlay.addEventListener("touchstart", handleTouchUpdate, { passive: false });
+      overlay.addEventListener("touchmove", handleTouchUpdate, { passive: false });
 
       svg.append(group, overlay);
     }

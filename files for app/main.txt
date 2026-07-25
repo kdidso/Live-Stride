@@ -1064,7 +1064,8 @@ function createProfilePaceChart(routeData, run) {
 
   const smoothedPaceSamples = smoothProfilePaceSamples(paceSamples, maxDistance);
   const paceValues = smoothedPaceSamples.map(sample => sample.paceSecPerMile);
-  const fastPace = Math.min(840, Math.max(300, Math.floor((percentileProfileValue(paceValues, 0.04) || 360) / 60) * 60));
+  const fastestSmoothedPace = paceValues.length ? Math.min(...paceValues) : 360;
+  const fastPace = Math.min(840, Math.max(300, Math.floor((fastestSmoothedPace || 360) / 60) * 60));
   const slowPace = 900;
   const yForPace = pace => padding.top + ((pace - fastPace) / Math.max(60, slowPace - fastPace)) * plotHeight;
   const paceLineSamples = smoothedPaceSamples.map(sample => ({

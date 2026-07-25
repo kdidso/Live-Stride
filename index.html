@@ -651,21 +651,27 @@
         ...analysis,
         summary,
         samples: samples
-          .map((sample, index) => ({
-            sequence_num: Number.isFinite(Number(sample.sequence_num)) ? Number(sample.sequence_num) : index + 1,
-            recorded_at: sample.recorded_at || null,
-            elapsed_sec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null,
-            lat: Number(sample.lat),
-            lon: Number(sample.lon),
-            elevation_m: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) : null,
-            distance_m: Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null,
-            distance_mi: Number.isFinite(Number(sample.distance_mi)) ? Number(sample.distance_mi) : null,
-            segment_distance_m: Number.isFinite(Number(sample.segment_distance_m)) ? Number(sample.segment_distance_m) : null,
-            segment_elapsed_sec: Number.isFinite(Number(sample.segment_elapsed_sec)) ? Number(sample.segment_elapsed_sec) : null,
-            speed_mps: Number.isFinite(Number(sample.speed_mps)) ? Number(sample.speed_mps) : null,
-            pace_sec_per_mile: Number.isFinite(Number(sample.pace_sec_per_mile)) ? Number(sample.pace_sec_per_mile) : null,
-            avg_pace_sec_per_mile: Number.isFinite(Number(sample.avg_pace_sec_per_mile)) ? Number(sample.avg_pace_sec_per_mile) : null
-          }))
+          .map((sample, index) => {
+            const distanceM = Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
+            return {
+              sequence_num: Number.isFinite(Number(sample.sequence_num)) ? Number(sample.sequence_num) : index + 1,
+              recorded_at: sample.recorded_at || null,
+              elapsed_sec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null,
+              lat: Number(sample.lat),
+              lon: Number(sample.lon),
+              elevation_m: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) : null,
+              distance_m: distanceM,
+              distance_mi: Number.isFinite(Number(sample.distance_mi))
+                ? Number(sample.distance_mi)
+                : distanceM != null
+                ? metersToMiles(distanceM)
+                : null,
+              segment_distance_m: Number.isFinite(Number(sample.segment_distance_m)) ? Number(sample.segment_distance_m) : null,
+              segment_elapsed_sec: Number.isFinite(Number(sample.segment_elapsed_sec)) ? Number(sample.segment_elapsed_sec) : null,
+              speed_mps: Number.isFinite(Number(sample.speed_mps)) ? Number(sample.speed_mps) : null,
+              pace_sec_per_mile: Number.isFinite(Number(sample.pace_sec_per_mile)) ? Number(sample.pace_sec_per_mile) : null
+            };
+          })
           .filter(sample => Number.isFinite(sample.lat) && Number.isFinite(sample.lon))
       };
     }
@@ -2241,7 +2247,7 @@
       if (!isUuid(runId)) return [];
       const { data, error } = await supabaseClient
         .from("run_points")
-        .select("*")
+        .select("sequence_num,lat,lon,recorded_at,elevation_m,distance_m,inst_pace_min_per_mile,avg_pace_min_per_mile")
         .eq("run_id", runId)
         .order("sequence_num", { ascending: true });
       if (error) {
@@ -2295,14 +2301,10 @@
           lon: Number(point.lon),
           elevation_m: Number.isFinite(elevation) ? elevation : null,
           distance_m: cumulativeDistanceM,
-          distance_mi: metersToMiles(cumulativeDistanceM),
           segment_distance_m: segmentDistanceM,
           segment_elapsed_sec: segmentElapsedSec,
           speed_mps: speedMps,
-          pace_sec_per_mile: Number.isFinite(paceSecPerMile) ? paceSecPerMile : null,
-          avg_pace_sec_per_mile: Number.isFinite(Number(point.avgPace)) && Number(point.avgPace) > 0
-            ? Number(point.avgPace) * 60
-            : null
+          pace_sec_per_mile: Number.isFinite(paceSecPerMile) ? paceSecPerMile : null
         };
       });
 
@@ -2335,13 +2337,10 @@
           started_at: metadata.started_at || null,
           finished_at: metadata.finished_at || null,
           distance_m: distanceM,
-          distance_mi: metersToMiles(distanceM),
           elapsed_time_ms: elapsedMs,
           moving_time_ms: Number.isFinite(Number(metadata.moving_time_ms)) ? Number(metadata.moving_time_ms) : analyzed.movingTimeMs,
           average_pace_sec_per_mile: averagePaceSecPerMile,
-          average_pace_sec_per_km: averagePaceSecPerMile != null ? averagePaceSecPerMile / 1.609344 : null,
           elevation_gain_m: analyzed.elevationGainM,
-          elevation_loss_m: analyzed.elevationLossM,
           min_elevation_m: analyzed.minElevationM,
           max_elevation_m: analyzed.maxElevationM,
           point_count: samples.length

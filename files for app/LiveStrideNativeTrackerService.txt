@@ -70,6 +70,7 @@ public class LiveStrideNativeTrackerService extends Service {
 
     public static final String ACTION_START = "START_NATIVE_TEST_RUN";
     public static final String ACTION_STOP = "STOP_NATIVE_TEST_RUN";
+    public static final String EXTRA_SKIP_FINISH_SYNC = "skipFinishSync";
 
     private FusedLocationProviderClient fusedLocationClient;
     private LocationCallback locationCallback;
@@ -197,9 +198,10 @@ public class LiveStrideNativeTrackerService extends Service {
         if (ACTION_STOP.equals(intent.getAction())) {
             restoreNativeRunConfig(intent);
             localOnly = intent.getBooleanExtra("localOnly", localOnly);
+            boolean skipFinishSync = intent.getBooleanExtra(EXTRA_SKIP_FINISH_SYNC, false);
             stopLocationUpdates();
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
-            if (!localOnly) {
+            if (!localOnly && !skipFinishSync) {
                 queueNativeFinishEvent();
             }
             long stoppedAtMs = System.currentTimeMillis();
@@ -207,10 +209,16 @@ public class LiveStrideNativeTrackerService extends Service {
             saveNativeTrackerState(false, stoppedAtMs, finalTimeMs);
             LiveStridePendingPointUploadJobService.schedule(this);
             new Thread(() -> {
-                LiveStridePendingPointUploadJobService.flushPendingFinishEvents(this);
+                if (!skipFinishSync) {
+                    LiveStridePendingPointUploadJobService.flushPendingFinishEvents(this);
+                }
                 LiveStridePendingPointUploadJobService.flushPendingPoints(this);
             }).start();
             stopForeground(true);
+            NotificationManager notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (notificationManager != null) {
+                notificationManager.cancel(NOTIFICATION_ID);
+            }
             stopSelf();
             return START_NOT_STICKY;
         }

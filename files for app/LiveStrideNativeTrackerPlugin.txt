@@ -201,6 +201,8 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
     public void stopNativeTestRun(PluginCall call) {
         Intent intent = new Intent(getContext(), LiveStrideNativeTrackerService.class);
         intent.setAction(LiveStrideNativeTrackerService.ACTION_STOP);
+        Boolean skipFinishSync = call.getBoolean("skipFinishSync", false);
+        intent.putExtra(LiveStrideNativeTrackerService.EXTRA_SKIP_FINISH_SYNC, skipFinishSync);
 
         getContext().startService(intent);
 

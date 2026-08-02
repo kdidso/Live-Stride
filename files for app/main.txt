@@ -2,6 +2,7 @@
 const { BackgroundGeolocation, Filesystem, Share, LiveStrideSync, LiveStrideNativeTracker, LiveStrideExport } = Capacitor.Plugins;
 const Directory = Filesystem.Directory;
 const Encoding  = Filesystem.Encoding;
+const BG_WATCHER_STORAGE_KEY = "livestride_background_geolocation_watch_id";
 
 // -> Firebase initialization
 // Assumes firebase is loaded globally via <script> before this module.
@@ -310,12 +311,63 @@ map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-lef
 let mapStyleReady = false;
 let runPathRenderPending = false;
 let nativePathRenderPending = false;
+let pendingRunnerNativeFocus = null;
 
 function schedulePendingRunPathRender() {
   requestAnimationFrame(() => {
     renderPendingRunPathIfReady();
     setTimeout(renderPendingRunPathIfReady, 250);
   });
+}
+
+function applyPendingRunnerNativeFocus() {
+  if (!pendingRunnerNativeFocus || !isFollowing) return;
+
+  const styleLoaded = typeof map?.isStyleLoaded === "function" ? map.isStyleLoaded() : true;
+  if (!map || !mapStyleReady || !styleLoaded) {
+    const attempts = pendingRunnerNativeFocus.attempts || 0;
+    if (attempts < 30) {
+      pendingRunnerNativeFocus.attempts = attempts + 1;
+      setTimeout(applyPendingRunnerNativeFocus, 250);
+    }
+    return;
+  }
+
+  const focus = pendingRunnerNativeFocus;
+  pendingRunnerNativeFocus = null;
+  const latestCenter = [focus.lon, focus.lat];
+
+  try {
+    if (focus.useFlyTo && map?.flyTo) {
+      map.flyTo({
+        center: latestCenter,
+        zoom: Math.max(map.getZoom?.() || 0, 16),
+        essential: true
+      });
+    } else {
+      map.setCenter(latestCenter);
+    }
+  } catch (err) {
+    console.warn("Native runner map recenter failed:", err);
+  }
+}
+
+function focusRunnerNativePointWhenReady(point, useFlyTo = true) {
+  if (
+    !point ||
+    !Number.isFinite(point.lon) ||
+    !Number.isFinite(point.lat)
+  ) {
+    return;
+  }
+
+  pendingRunnerNativeFocus = {
+    lon: point.lon,
+    lat: point.lat,
+    useFlyTo,
+    attempts: 0
+  };
+  applyPendingRunnerNativeFocus();
 }
 
 // -> Re-add geolocation control after style changes
@@ -374,8 +426,12 @@ map.on("style.load", () => {
   addControls();
   restoreRunPathLayersAfterStyleLoad();
   schedulePendingRunPathRender();
+  applyPendingRunnerNativeFocus();
 });
-map.on("idle", renderPendingRunPathIfReady);
+map.on("idle", () => {
+  renderPendingRunPathIfReady();
+  applyPendingRunnerNativeFocus();
+});
 
 // -> Tracking state
 let pathCoords = [];
@@ -3882,11 +3938,62 @@ async function startNativeComparisonRun(firebaseRunnerPath = null, options = {})
   }
 }
 
-async function stopNativeComparisonRun() {
+function rememberBackgroundWatcherId(id) {
+  bgWatchId = id;
+  if (id == null) return;
+
+  try {
+    localStorage.setItem(BG_WATCHER_STORAGE_KEY, String(id));
+  } catch (err) {
+    console.warn("Failed to remember background watcher id:", err);
+  }
+}
+
+async function stopBackgroundGeolocationWatcher() {
+  const watcherIds = new Set();
+  if (bgWatchId != null) {
+    watcherIds.add(String(bgWatchId));
+  }
+
+  try {
+    const savedWatcherId = localStorage.getItem(BG_WATCHER_STORAGE_KEY);
+    if (savedWatcherId) {
+      watcherIds.add(String(savedWatcherId));
+    }
+  } catch (err) {
+    console.warn("Failed to read saved background watcher id:", err);
+  }
+
+  bgWatchId = null;
+  try {
+    localStorage.removeItem(BG_WATCHER_STORAGE_KEY);
+  } catch (err) {
+    console.warn("Failed to clear saved background watcher id:", err);
+  }
+
+  if (!BackgroundGeolocation || watcherIds.size === 0) {
+    return false;
+  }
+
+  let stopped = false;
+  for (const watcherId of watcherIds) {
+    try {
+      await BackgroundGeolocation.removeWatcher({ id: watcherId });
+      stopped = true;
+    } catch (err) {
+      console.warn("Failed to remove background watcher:", err);
+    }
+  }
+  return stopped;
+}
+
+async function stopNativeComparisonRun(options = {}) {
   if (!LiveStrideNativeTracker) return false;
 
   try {
-    const result = await LiveStrideNativeTracker.stopNativeTestRun();
+    const result = await LiveStrideNativeTracker.stopNativeTestRun({
+      skipFinishSync: Boolean(options.skipFinishSync)
+    });
     console.log("Native comparison tracker stopped:", result);
     return true;
   } catch (err) {
@@ -4158,28 +4265,22 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
 
   if (
     isFollowing &&
-    mapStyleReady &&
-    map?.isStyleLoaded?.() &&
     Number.isFinite(latestPoint.lon) &&
     Number.isFinite(latestPoint.lat)
   ) {
-    const latestCenter = [latestPoint.lon, latestPoint.lat];
-    try {
-      if (focusLatestPoint && map?.flyTo) {
-        map.flyTo({
-          center: latestCenter,
-          zoom: Math.max(map.getZoom?.() || 0, 16),
-          essential: true
-        });
-      } else {
-        map.setCenter(latestCenter);
-      }
-    } catch (err) {
-      console.warn("Native runner map recenter deferred:", err);
-    }
+    focusRunnerNativePointWhenReady(latestPoint, focusLatestPoint);
   }
 
   return true;
+}
+
+function hasMeaningfulRunnerRestoreDisplay() {
+  return (
+    Array.isArray(pathCoords) &&
+    pathCoords.length > 1 &&
+    Number.isFinite(Number(totalDistanceMeters)) &&
+    Number(totalDistanceMeters) > 0
+  );
 }
 
 async function refreshRunnerFromNativeSqlite(options = {}) {
@@ -4415,13 +4516,25 @@ async function loadFullRunnerNativePathInBackground(finalTimeMs = 0) {
   return hydrated;
 }
 
-function continueRunnerNativeHydrationInBackground(finalTimeMs = 0) {
+function continueRunnerNativeHydrationInBackground(finalTimeMs = 0, nativeRunId = activeRunId) {
   if (!isRunnerNativeSnapshotAllowed()) return;
 
   setTimeout(() => {
-    loadFullRunnerNativePathInBackground(finalTimeMs).finally(() => {
-      runnerStoppedNativeHydrationInFlight = false;
-    });
+    loadFullRunnerNativePathInBackground(finalTimeMs)
+      .then(hydrated => {
+        if (
+          hydrated &&
+          nativeRunId &&
+          activeRunId === nativeRunId &&
+          hasMeaningfulRunnerRestoreDisplay()
+        ) {
+          localStorage.setItem(RESTORED_STOPPED_NATIVE_RUN_KEY, nativeRunId);
+          clearNativeTrackerRestoreState();
+        }
+      })
+      .finally(() => {
+        runnerStoppedNativeHydrationInFlight = false;
+      });
   }, NATIVE_HYDRATION_BACKGROUND_DELAY_MS);
 }
 
@@ -4588,6 +4701,7 @@ async function restoreRunnerFromNativeState() {
     }
 
     if (!isNativeRunning && stoppedAtMs > 0) {
+      await stopBackgroundGeolocationWatcher();
       const restoredRunId = localStorage.getItem(RESTORED_STOPPED_NATIVE_RUN_KEY);
       if (restoredRunId === nativeRunId) {
         await clearNativeTrackerRestoreState();
@@ -4614,7 +4728,7 @@ async function restoreRunnerFromNativeState() {
       runnerStoppedNativeHydrationInFlight = true;
       clearRunnerNativeRestoreDisplay();
       hydrated = await hydrateRunnerPreviewFromNativeSqlite(finalTimeMs);
-      if (!hydrated) {
+      if (!hydrated || !hasMeaningfulRunnerRestoreDisplay()) {
         hydrated = await hydrateRunnerFromNativeSqliteInBatches({
           finalTimeMs,
           focusLatestPoint: true,
@@ -4622,7 +4736,7 @@ async function restoreRunnerFromNativeState() {
           updateSplits: false
         });
       }
-      continueRunnerNativeHydrationInBackground(finalTimeMs);
+      continueRunnerNativeHydrationInBackground(finalTimeMs, nativeRunId);
     } else {
       hydrated = pathCoords.length === 0
         ? await hydrateRunnerFromNativeSqliteInBatches({ finalTimeMs, focusLatestPoint: true })
@@ -4635,9 +4749,6 @@ async function restoreRunnerFromNativeState() {
     }
 
     if (!isNativeRunning && stoppedAtMs > 0) {
-      if (hydrated) {
-        localStorage.setItem(RESTORED_STOPPED_NATIVE_RUN_KEY, nativeRunId);
-      }
       settleRunnerAfterNativeStop(finalTimeMs);
       if (isNativeLocalOnly) {
         exportGpxBtn.textContent = "Export GPX";
@@ -5876,7 +5987,7 @@ async function startTracking() {
     }, 10000);
   }
 
-  bgWatchId = await BackgroundGeolocation.addWatcher({
+  rememberBackgroundWatcherId(await BackgroundGeolocation.addWatcher({
     requestPermissions: true,
     backgroundTitle: "LiveStride Active",
     backgroundMessage: "Tracking your run",
@@ -5901,7 +6012,7 @@ if (navigator.onLine) {
     flushFirebaseFinish();
   }
 }
-  });
+  }));
 }
 
 async function stopTracking() {
@@ -5925,13 +6036,8 @@ stopRunnerNativeSnapshotPolling();
     privateSaveIntervalId = null;
   }
 
-  if (bgWatchId != null) {
-    BackgroundGeolocation
-      .removeWatcher({ id: bgWatchId })
-      .catch(err => console.warn("Failed to remove background watcher:", err));
-    bgWatchId = null;
-  }
-await stopNativeComparisonRun();
+  await stopBackgroundGeolocationWatcher();
+  await stopNativeComparisonRun({ skipFinishSync: !isPrivateMode });
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -6999,5 +7105,6 @@ map.on("load", () => {
   setMode("runner");
   requestStartupPermissions();
   renderPendingRunPathIfReady();
+  applyPendingRunnerNativeFocus();
   startInitialRunnerNativeRestore();
 });

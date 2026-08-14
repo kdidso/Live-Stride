@@ -455,6 +455,8 @@ private void uploadNativePoint(Location rawLocation) {
     double instPaceMinPerMile = 0.0;
     double avgPaceMinPerMile = 0.0;
     boolean alertNotificationForMileSplit = false;
+    boolean anchoredResumePoint = false;
+    String anchorReason = null;
 
     if (runStartTimeMs == 0L) {
         runStartTimeMs = pointTimeMs;
@@ -483,7 +485,13 @@ private void uploadNativePoint(Location rawLocation) {
             double speedMps = segmentMeters / elapsedSeconds;
             double speedMph = speedMps * 2.23694;
 
+            boolean releaseStationaryHold = !matchResult.matched
+                    && stationaryHoldActive
+                    && accuracyIsGood
+                    && segmentMeters >= STATIONARY_HOLD_RELEASE_DISTANCE_METERS;
+
             boolean shouldHoldStationaryPoint = !matchResult.matched
+                    && !releaseStationaryHold
                     && (segmentMeters < 1.0 || speedMph < 1.0 || speedMph > 140.0);
 
             if (!matchResult.matched
@@ -492,7 +500,18 @@ private void uploadNativePoint(Location rawLocation) {
                 shouldHoldStationaryPoint = true;
             }
 
-            if (shouldHoldStationaryPoint) {
+            if (releaseStationaryHold) {
+                segmentMeters = 0.0;
+                stationaryHoldActive = false;
+                anchoredResumePoint = true;
+                anchorReason = speedMph > 140.0
+                        ? "after_unrealistic_speed_hold"
+                        : "after_stationary_hold";
+                System.out.println(
+                        "LiveStride native anchored resume from hold: "
+                                + anchorReason + " speed=" + speedMph + " mph"
+                );
+            } else if (shouldHoldStationaryPoint) {
                 heldPoint = true;
                 holdReason = segmentMeters < 1.0
                         ? "tiny_movement"
@@ -548,6 +567,8 @@ private void uploadNativePoint(Location rawLocation) {
     final double finalAvgPaceMinPerMile = avgPaceMinPerMile;
     final boolean finalHeldPoint = heldPoint;
     final String finalHoldReason = holdReason;
+    final boolean finalAnchoredResumePoint = anchoredResumePoint;
+    final String finalAnchorReason = anchorReason;
     updateRunNotification(
             pointTimeMs,
             finalDistanceMeters,
@@ -604,6 +625,9 @@ private void uploadNativePoint(Location rawLocation) {
             if (finalHeldPoint) {
                 appState = appState + "_hold";
                 note = note + "; repeated last accepted coordinate during " + finalHoldReason;
+            } else if (finalAnchoredResumePoint) {
+                appState = appState + "_anchor";
+                note = note + "; anchored resume from held coordinate during " + finalAnchorReason;
             }
             body.put("app_state", appState);
             body.put("note", note);

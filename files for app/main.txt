@@ -4000,7 +4000,7 @@ async function stopNativeComparisonRun(options = {}) {
   }
 }
 
-function settleRunnerAfterNativeStop(finalTimeMs = null) {
+function settleRunnerAfterNativeStop(finalTimeMs = null, options = {}) {
   publicRunReadyToStart = false;
   if (runnerTimerId !== null) {
     clearInterval(runnerTimerId);
@@ -4023,13 +4023,15 @@ function settleRunnerAfterNativeStop(finalTimeMs = null) {
       ? Date.now() - startTime
       : 0;
 
-  updateStatsDisplay(
-    latestRunnerDistance,
-    latestRunnerPace,
-    latestRunnerAvgPace,
-    elapsedMs,
-    latestRunnerElevFt
-  );
+  if (options.updateStats !== false) {
+    updateStatsDisplay(
+      latestRunnerDistance,
+      latestRunnerPace,
+      latestRunnerAvgPace,
+      elapsedMs,
+      latestRunnerElevFt
+    );
+  }
 
   if (!isPrivateMode) {
     showPublicFinishedExportControls();
@@ -4329,6 +4331,7 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
     : -1;
   let loadedAny = false;
   let firstBatch = pathCoords.length === 0 && afterSequenceNum < 0;
+  let lastBatchRendered = false;
   const hydrationStartedAt = performance.now?.() || Date.now();
   console.log("Native SQLite hydration started", {
     runId: activeRunId,
@@ -4367,6 +4370,7 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
       renderPath: shouldRenderThisBatch,
       updateSplits: allowSplits && shouldRenderThisBatch
     });
+    lastBatchRendered = shouldRenderThisBatch;
     loadedAny = true;
     firstBatch = false;
 
@@ -4388,9 +4392,11 @@ async function hydrateRunnerFromNativeSqliteInBatches(options = {}) {
 
   if (loadedAny) {
     sortRunPoints(pathCoords);
-    addOrUpdatePath();
-    if (allowSplits) {
-      updateSplitsPanel(pathCoords);
+    if (!lastBatchRendered) {
+      addOrUpdatePath();
+      if (allowSplits) {
+        updateSplitsPanel(pathCoords);
+      }
     }
   }
 
@@ -4440,7 +4446,7 @@ async function hydrateRunnerPreviewFromNativeSqlite(finalTimeMs = 0) {
   }
 }
 
-async function loadFullRunnerNativePathInBackground(finalTimeMs = 0) {
+async function loadFullRunnerNativePathInBackground(finalTimeMs = 0, nativeRunId = activeRunId) {
   if (!isRunnerNativeSnapshotAllowed()) return false;
 
   const fullStartedAt = performance.now?.() || Date.now();
@@ -4453,6 +4459,8 @@ async function loadFullRunnerNativePathInBackground(finalTimeMs = 0) {
   });
 
   for (let i = 0; i < 120; i++) {
+    if (!nativeRunId || activeRunId !== nativeRunId) return false;
+
     let snapshot;
     try {
       const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
@@ -4471,7 +4479,7 @@ async function loadFullRunnerNativePathInBackground(finalTimeMs = 0) {
     const points = Array.isArray(snapshot.points) ? snapshot.points : [];
     if (points.length === 0) break;
 
-    fullPoints = fullPoints.concat(points);
+    fullPoints.push(...points);
     latestSnapshot = snapshot;
 
     const latestBatchPoint = points
@@ -4491,6 +4499,7 @@ async function loadFullRunnerNativePathInBackground(finalTimeMs = 0) {
   }
 
   if (fullPoints.length === 0) return false;
+  if (!nativeRunId || activeRunId !== nativeRunId) return false;
 
   const fullSnapshot = {
     ...(latestSnapshot || {}),
@@ -4515,10 +4524,15 @@ async function loadFullRunnerNativePathInBackground(finalTimeMs = 0) {
 }
 
 function continueRunnerNativeHydrationInBackground(finalTimeMs = 0, nativeRunId = activeRunId) {
-  if (!isRunnerNativeSnapshotAllowed()) return;
+  if (!isRunnerNativeSnapshotAllowed() || !runnerStoppedNativeHydrationInFlight) return;
 
   setTimeout(() => {
-    loadFullRunnerNativePathInBackground(finalTimeMs)
+    if (!nativeRunId || activeRunId !== nativeRunId) {
+      runnerStoppedNativeHydrationInFlight = false;
+      return;
+    }
+
+    loadFullRunnerNativePathInBackground(finalTimeMs, nativeRunId)
       .then(hydrated => {
         if (
           hydrated &&
@@ -4677,7 +4691,7 @@ async function restoreRunnerFromNativeState() {
   if (!LiveStrideNativeTracker || document.body.classList.contains("viewer-mode")) {
     return false;
   }
-  if (runnerNativeRestoreInFlight) {
+  if (runnerNativeRestoreInFlight || runnerStoppedNativeHydrationInFlight) {
     return false;
   }
 
@@ -4747,7 +4761,7 @@ async function restoreRunnerFromNativeState() {
     }
 
     if (!isNativeRunning && stoppedAtMs > 0) {
-      settleRunnerAfterNativeStop(finalTimeMs);
+      settleRunnerAfterNativeStop(finalTimeMs, { updateStats: false });
       if (isNativeLocalOnly) {
         exportGpxBtn.textContent = "Export GPX";
         exportGpxBtn.style.display = "inline-block";
@@ -4853,8 +4867,12 @@ window.addEventListener("offline", () => {
 });
 
 function restoreOrRecoverRunnerFromNative() {
+  if (runnerNativeRestoreInFlight || runnerStoppedNativeHydrationInFlight) {
+    return;
+  }
+
   restoreRunnerFromNativeState().then(restored => {
-    if (!restored) {
+    if (!restored && !runnerNativeRestoreInFlight && !runnerStoppedNativeHydrationInFlight) {
       syncRunnerUiWithNativeStop();
       recoverRunnerPathOnWake();
     }

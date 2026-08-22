@@ -2539,11 +2539,9 @@ async function handleExportPageMessage(event) {
       }
       const analysis = buildProfileRunAnalysis(analysisPoints, metadata, {
         source: "broadcast",
-        sourceRunId: metadata.source_run_id
+        sourceRunId: metadata.source_run_id,
+        preferMetadataDistance: true
       });
-      if (Number.isFinite(Number(analysis?.summary?.distance_m)) && Number(analysis.summary.distance_m) > 0) {
-        metadata.distance_m = Number(analysis.summary.distance_m);
-      }
       if (Number.isFinite(Number(analysis?.summary?.point_count)) && Number(analysis.summary.point_count) > 0) {
         metadata.point_count = Number(analysis.summary.point_count);
       }
@@ -5232,10 +5230,14 @@ function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
     time: Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : point.time
   }));
   const analyzed = analyzeProfilePoints(analyzedPoints);
-  const distanceM = cumulativeDistanceM > 0
+  const metadataDistanceM = Number(metadata.distance_m);
+  const hasMetadataDistance = Number.isFinite(metadataDistanceM) && metadataDistanceM > 0;
+  const distanceM = options.preferMetadataDistance && hasMetadataDistance
+    ? metadataDistanceM
+    : cumulativeDistanceM > 0
     ? cumulativeDistanceM
-    : Number.isFinite(Number(metadata.distance_m)) && Number(metadata.distance_m) > 0
-    ? Number(metadata.distance_m)
+    : hasMetadataDistance
+    ? metadataDistanceM
     : 0;
   const elapsedMs = Number.isFinite(Number(metadata.elapsed_time_ms)) && Number(metadata.elapsed_time_ms) > 0
     ? Number(metadata.elapsed_time_ms)

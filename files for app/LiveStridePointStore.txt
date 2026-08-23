@@ -649,8 +649,10 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             double latestLat = cursor.getDouble(cursor.getColumnIndexOrThrow("lat"));
             double latestLon = cursor.getDouble(cursor.getColumnIndexOrThrow("lon"));
             double totalDistanceM = getNullableDouble(cursor, "distance_m", 0.0);
+            int expectedPointCount = 1;
 
             while (cursor.moveToNext()) {
+                expectedPointCount++;
                 latestLat = cursor.getDouble(cursor.getColumnIndexOrThrow("lat"));
                 latestLon = cursor.getDouble(cursor.getColumnIndexOrThrow("lon"));
                 lastRecordedAt = cursor.getString(cursor.getColumnIndexOrThrow("recorded_at"));
@@ -662,6 +664,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
             summary.put("latest_lon", latestLon);
             summary.put("latest_timestamp", lastRecordedAt);
             summary.put("total_distance_m", totalDistanceM);
+            summary.put("expected_point_count", expectedPointCount);
 
             Long firstMs = parseIsoMillis(firstRecordedAt);
             Long lastMs = parseIsoMillis(lastRecordedAt);

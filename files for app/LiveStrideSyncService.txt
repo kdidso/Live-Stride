@@ -108,6 +108,7 @@ public int onStartCommand(Intent intent, int flags, int startId) {
                     "latest_lon",
                     "latest_timestamp",
                     "total_distance_m",
+                    "expected_point_count",
                     "final_time_ms"
             };
 

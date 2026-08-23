@@ -674,7 +674,7 @@ function normalizeProfileRunAnalysis(analysis) {
   };
 }
 
-async function loadProfileRoute(runId) {
+async function loadProfileRoute(runId, run = null) {
   if (profileRouteCache.has(runId)) return profileRouteCache.get(runId);
   const request = (async () => {
     const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
@@ -706,10 +706,34 @@ async function loadProfileRoute(runId) {
       })
       .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
     if (points.length < 2) throw new Error("This activity has too few route points.");
+    let storedAnalysis = normalizeProfileRunAnalysis(data.analysis);
+    let routePoints = points;
+    if (run?.source === "broadcast" && isUuid(run?.source_run_id)) {
+      const broadcastPoints = await getBroadcastRunAnalysisPoints(run.source_run_id);
+      if (broadcastPoints.length >= 2) {
+        const metadata = {
+          ...run,
+          source: "broadcast",
+          source_run_id: run.source_run_id
+        };
+        storedAnalysis = normalizeProfileRunAnalysis(buildProfileRunAnalysis(broadcastPoints, metadata, {
+          source: "broadcast",
+          sourceRunId: run.source_run_id,
+          preferMetadataDistance: true
+        }));
+        routePoints = broadcastPoints.map(point => ({
+          lat: point.lat,
+          lon: point.lon,
+          elevation: point.elevation,
+          time: Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : Date.parse(point.time)
+        }));
+      }
+    }
     return {
-      points,
-      analysis: analyzeProfilePoints(points),
-      storedAnalysis: normalizeProfileRunAnalysis(data.analysis)
+      points: routePoints,
+      analysis: analyzeProfilePoints(routePoints),
+      storedAnalysis,
+      run
     };
   })();
   profileRouteCache.set(runId, request);
@@ -1893,7 +1917,7 @@ function createProfileRouteMap(container, points, detailed = false) {
 
 async function hydrateProfileRoute(container, run, detailed = false, shouldRender = null) {
   try {
-    const routeData = await loadProfileRoute(run.id);
+    const routeData = await loadProfileRoute(run.id, run);
     if (shouldRender && !shouldRender()) return routeData;
     destroyProfileRouteMap(container);
     const { routeMap } = createProfileRouteMap(container, routeData.points, detailed);
@@ -1941,7 +1965,7 @@ function updateProfileStatValue(stat, value) {
 
 function applyProfileRouteStats(run, stats, routeData) {
   if (!run || !stats || !routeData?.analysis) return;
-  const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
+  const routeDistanceM = getProfileSummaryValue(routeData, "distance_m") || Number(run.distance_m || 0);
   const routeMiles = metersToMiles(routeDistanceM);
   if (routeMiles > 0) {
     updateProfileStatValue(stats.distanceStat, `${routeMiles.toFixed(2)} mi`);
@@ -1951,7 +1975,7 @@ function applyProfileRouteStats(run, stats, routeData) {
     );
   }
   if (stats.movingStat) {
-    const movingTimeMs = routeData.analysis.movingTimeMs || run.moving_time_ms;
+    const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms") || run.moving_time_ms;
     updateProfileStatValue(stats.movingStat, movingTimeMs ? formatProfileDuration(movingTimeMs) : "--");
   }
   if (stats.gainStat) {
@@ -2092,10 +2116,10 @@ async function openProfileActivityDetail(run) {
   const routeData = await hydrateProfileRoute(route, run, true);
   if (routeData) {
     routeData.run = run;
-    const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
+    const routeDistanceM = getProfileSummaryValue(routeData, "distance_m") || Number(run.distance_m || 0);
     const routeMiles = metersToMiles(routeDistanceM);
     applyProfileRouteStats(run, { distanceStat, paceStat, movingStat, gainStat }, routeData);
-    const movingTimeMs = routeData.analysis.movingTimeMs || run.moving_time_ms;
+    const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms") || run.moving_time_ms;
     if (movingTimeMs && routeMiles > 0) {
       const movingSecondsPerMile = movingTimeMs / 1000 / routeMiles;
       const movingPace = createProfileStat("Moving pace", formatProfileSecondsPerMile(movingSecondsPerMile));
@@ -2118,7 +2142,7 @@ async function loadProfileActivities() {
 
   const { data, error } = await profilesSupabaseClient
     .from("saved_runs")
-    .select("id, title, source, started_at, finished_at, elapsed_time_ms, moving_time_ms, distance_m, elevation_gain_m, elevation_loss_m, min_elevation_m, max_elevation_m, avg_pace_sec_per_km, avg_moving_pace_sec_per_km, avg_cadence_spm, max_cadence_spm, archive_status")
+    .select("id, title, source, source_run_id, started_at, finished_at, elapsed_time_ms, moving_time_ms, distance_m, elevation_gain_m, elevation_loss_m, min_elevation_m, max_elevation_m, avg_pace_sec_per_km, avg_moving_pace_sec_per_km, avg_cadence_spm, max_cadence_spm, archive_status")
     .order("started_at", { ascending: false })
     .limit(50);
 
@@ -2534,6 +2558,13 @@ async function handleExportPageMessage(event) {
       };
       const gpx = String(data.content || "");
       let analysisPoints = await getBroadcastRunAnalysisPoints(metadata.source_run_id);
+      if (analysisPoints.length >= 2) {
+        const pointDistanceM = analysisPoints.reduce((maximum, point) => {
+          const distanceM = Number(point.distanceM);
+          return Number.isFinite(distanceM) ? Math.max(maximum, distanceM) : maximum;
+        }, 0);
+        if (pointDistanceM > 0) metadata.distance_m = pointDistanceM;
+      }
       if (analysisPoints.length < 2) {
         analysisPoints = parseGpxAnalysisPoints(gpx);
       }
@@ -3675,7 +3706,7 @@ async function safeInsertRunPoint(pointPayload) {
 }
 
   const { error } = await supabaseClient
-    .from("run_points")
+    .from("run_points_native_test")
     .insert(pointPayload);
 
 if (error) {
@@ -5180,16 +5211,23 @@ function parseGpxAnalysisPoints(gpx) {
 
 async function getBroadcastRunAnalysisPoints(runId) {
   if (!isUuid(runId)) return [];
-  const { data, error } = await supabaseClient
-    .from("run_points")
-    .select("sequence_num,lat,lon,recorded_at,elevation_m,distance_m,inst_pace_min_per_mile,avg_pace_min_per_mile")
-    .eq("run_id", runId)
-    .order("sequence_num", { ascending: true });
-  if (error) {
-    console.warn("Could not load broadcast run points for profile analysis:", error);
-    return [];
+  const pageSize = 1000;
+  const rows = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await supabaseClient
+      .from("run_points_native_test")
+      .select("sequence_num,lat,lon,recorded_at,elevation_m,distance_m,inst_pace_min_per_mile,avg_pace_min_per_mile")
+      .eq("run_id", runId)
+      .order("sequence_num", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      console.warn("Could not load broadcast run points for profile analysis:", error);
+      return [];
+    }
+    rows.push(...(data || []));
+    if (!data || data.length < pageSize) break;
   }
-  return (data || [])
+  return rows
     .map(normalizeRunPoint)
     .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
 }

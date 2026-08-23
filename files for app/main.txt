@@ -5315,7 +5315,9 @@ function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
       finished_at: metadata.finished_at || null,
       distance_m: distanceM,
       elapsed_time_ms: elapsedMs,
-      moving_time_ms: Number.isFinite(Number(metadata.moving_time_ms)) ? Number(metadata.moving_time_ms) : analyzed.movingTimeMs,
+      moving_time_ms: metadata.moving_time_ms != null && Number.isFinite(Number(metadata.moving_time_ms)) && Number(metadata.moving_time_ms) > 0
+        ? Number(metadata.moving_time_ms)
+        : analyzed.movingTimeMs,
       average_pace_sec_per_mile: averagePaceSecPerMile,
       elevation_gain_m: analyzed.elevationGainM,
       min_elevation_m: analyzed.minElevationM,
@@ -5341,6 +5343,13 @@ async function saveGpxToProfile(gpx, metadata, onStatus = null, analysis = null)
   if (!gpx || !metadata) throw new Error("This run could not be prepared for your profile.");
   const session = await requireProfilesSession();
   onStatus?.("Creating your profile activity...");
+  const analysisMovingTimeMs = Number(analysis?.summary?.moving_time_ms);
+  if (
+    (!Number.isFinite(Number(metadata.moving_time_ms)) || Number(metadata.moving_time_ms) <= 0) &&
+    Number.isFinite(analysisMovingTimeMs) && analysisMovingTimeMs > 0
+  ) {
+    metadata = { ...metadata, moving_time_ms: analysisMovingTimeMs };
+  }
   const insertPayload = {
     ...metadata,
     user_id: session.user.id,

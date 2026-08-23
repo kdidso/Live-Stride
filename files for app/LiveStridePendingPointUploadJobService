@@ -354,7 +354,8 @@ public class LiveStridePendingPointUploadJobService extends JobService {
                     "latest_lon",
                     "latest_timestamp",
                     "total_distance_m",
-                    "final_time_ms"
+                    "final_time_ms",
+                    "expected_point_count"
             };
 
             for (String key : keys) {

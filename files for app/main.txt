@@ -2612,7 +2612,7 @@ const SYNC_QUEUE_KEY = "livestride_pending_sync_v1";
 const NATIVE_HYDRATION_BATCH_SIZE = 250;
 const NATIVE_HYDRATION_RENDER_EVERY_BATCHES = 4;
 const NATIVE_HYDRATION_FIRST_PAINT_BATCHES = 1;
-const NATIVE_HYDRATION_BACKGROUND_DELAY_MS = 75;
+const NATIVE_FINISHED_HYDRATION_BATCH_SIZE = 1000;
 const NATIVE_ROUTE_PREVIEW_MAX_POINTS = 700;
 const STOPPED_NATIVE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
 const RESTORED_STOPPED_NATIVE_RUN_KEY = "livestride_restored_stopped_native_run_id";
@@ -4489,44 +4489,44 @@ async function loadFullRunnerNativePathInBackground(finalTimeMs = 0, nativeRunId
     runId: activeRunId
   });
 
-  for (let i = 0; i < 120; i++) {
+  while (true) {
     if (!nativeRunId || activeRunId !== nativeRunId) return false;
 
     let snapshot;
     try {
       const result = await LiveStrideNativeTracker.getNativeRunSnapshot({
-        runId: activeRunId,
+        runId: nativeRunId,
         afterSequenceNum,
         beforeSequenceNum: -1,
         includeFullPath: false,
-        limit: NATIVE_HYDRATION_BATCH_SIZE
+        limit: NATIVE_FINISHED_HYDRATION_BATCH_SIZE
       });
       snapshot = JSON.parse(result?.snapshotJson || "{}");
     } catch (err) {
       console.warn("Native SQLite full background hydration failed:", err);
-      return fullPoints.length > 0;
+      return false;
     }
 
+    if (activeRunId !== nativeRunId) return false;
     const points = Array.isArray(snapshot.points) ? snapshot.points : [];
     if (points.length === 0) break;
 
     fullPoints.push(...points);
     latestSnapshot = snapshot;
 
-    const latestBatchPoint = points
-      .map(normalizeNativeRunPoint)
-      .filter(point => point.sequenceNum != null)
-      .sort((a, b) => b.sequenceNum - a.sequenceNum)[0];
-
-    if (!latestBatchPoint) break;
+    // SQLite already returns sequence order; avoid normalizing/sorting every batch twice.
+    const latestBatchPoint = normalizeNativeRunPoint(points[points.length - 1]);
+    if (latestBatchPoint.sequenceNum == null || latestBatchPoint.sequenceNum <= afterSequenceNum) {
+      return false;
+    }
     afterSequenceNum = latestBatchPoint.sequenceNum;
     runnerNativeHydrationLoadedThroughSequenceNum = Math.max(
       runnerNativeHydrationLoadedThroughSequenceNum,
       latestBatchPoint.sequenceNum
     );
 
-    if (points.length < NATIVE_HYDRATION_BATCH_SIZE) break;
-    await new Promise(resolve => setTimeout(resolve, NATIVE_HYDRATION_BACKGROUND_DELAY_MS));
+    if (points.length < NATIVE_FINISHED_HYDRATION_BATCH_SIZE) break;
+    await yieldToBrowser();
   }
 
   if (fullPoints.length === 0) return false;
@@ -4578,7 +4578,7 @@ function continueRunnerNativeHydrationInBackground(finalTimeMs = 0, nativeRunId 
       .finally(() => {
         runnerStoppedNativeHydrationInFlight = false;
       });
-  }, NATIVE_HYDRATION_BACKGROUND_DELAY_MS);
+  }, 0);
 }
 
 function getSequenceGaps(points) {

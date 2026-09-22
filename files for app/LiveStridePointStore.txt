@@ -833,18 +833,14 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         );
 
         try {
-            int index = 0;
             JSONObject lastAccepted = null;
-
-            while (pointCursor.moveToNext()) {
-                JSONObject pointJson = cursorToJson(pointCursor);
-                lastAccepted = pointJson;
-
-                if (index == 0 || index % sampleEvery == 0) {
-                    points.put(pointJson);
-                }
-
-                index++;
+            // Only serialize the points actually used by the first-paint preview.
+            // Long runs previously allocated JSON for every row and discarded most of it.
+            for (int index = 0; pointCursor.moveToPosition(index); index += sampleEvery) {
+                points.put(cursorToJson(pointCursor));
+            }
+            if (pointCursor.moveToLast()) {
+                lastAccepted = cursorToJson(pointCursor);
             }
 
             if (lastAccepted != null && points.length() > 0) {

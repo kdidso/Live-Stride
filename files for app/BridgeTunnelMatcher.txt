@@ -43,6 +43,9 @@ final class BridgeTunnelMatcher {
     static final double ENTRY_MAX_LATE_STEP_HEADING_ERROR_DEGREES = 25.0;
     static final double ENTRY_SHARP_REVERSAL_DEGREES = 135.0;
     static final long ENTRY_LOOSE_MIN_OBSERVATION_MS = 1_500L;
+    static final double FALSE_MATCH_ESCAPE_DISTANCE_METERS = 12.0;
+    static final double FALSE_MATCH_ESCAPE_MIN_MOVEMENT_METERS = 4.0;
+    static final long FALSE_MATCH_ESCAPE_CONFIRMATION_MS = 3_000L;
 
     enum State {
         NORMAL,
@@ -214,6 +217,8 @@ final class BridgeTunnelMatcher {
     private String activeStructureId = "";
     private Set<String> activeStructureIds = new HashSet<>();
     private boolean presumedDriverMode = false;
+    private long falseMatchDivergenceStartedAtMs;
+    private Point falseMatchDivergenceStartPoint;
 
     void reset() {
         state = State.NORMAL;
@@ -275,6 +280,14 @@ final class BridgeTunnelMatcher {
         } else if (state == State.JUNCTION_HOLD) {
             result = processJunctionHold(rawPoint, accuracyMeters, timeMs, accuracyIsGood);
         } else {
+            if (shouldEscapeFalseMatch(rawPoint, timeMs, accuracyIsGood)) {
+                state = State.NORMAL;
+                result = new Result(rawPoint, false, state, "");
+                clearActiveRoute();
+                lastRawPoint = rawPoint;
+                lastRawTimeMs = timeMs;
+                return result;
+            }
             advanceProgress(timeMs);
             Point predicted = pointAlong(activeRoute, progressMeters);
 
@@ -786,6 +799,39 @@ final class BridgeTunnelMatcher {
         structureType = "";
         activeStructureId = "";
         activeStructureIds = new HashSet<>();
+        resetFalseMatchDivergence();
+    }
+
+    private boolean shouldEscapeFalseMatch(
+            Point rawPoint,
+            long timeMs,
+            boolean accuracyIsGood
+    ) {
+        if (!accuracyIsGood || activeRoute.size() < 2) {
+            resetFalseMatchDivergence();
+            return false;
+        }
+
+        Projection rawProjection = project(activeRoute, rawPoint);
+        if (rawProjection.distanceMeters < FALSE_MATCH_ESCAPE_DISTANCE_METERS) {
+            resetFalseMatchDivergence();
+            return false;
+        }
+
+        if (falseMatchDivergenceStartedAtMs <= 0L || falseMatchDivergenceStartPoint == null) {
+            falseMatchDivergenceStartedAtMs = timeMs;
+            falseMatchDivergenceStartPoint = rawPoint;
+            return false;
+        }
+
+        return timeMs - falseMatchDivergenceStartedAtMs >= FALSE_MATCH_ESCAPE_CONFIRMATION_MS
+                && distanceMeters(falseMatchDivergenceStartPoint, rawPoint)
+                >= FALSE_MATCH_ESCAPE_MIN_MOVEMENT_METERS;
+    }
+
+    private void resetFalseMatchDivergence() {
+        falseMatchDivergenceStartedAtMs = 0L;
+        falseMatchDivergenceStartPoint = null;
     }
 
     private static boolean rawHandoffIsStrong(float accuracyMeters) {

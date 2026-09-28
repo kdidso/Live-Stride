@@ -46,18 +46,10 @@ final class BridgeTunnelMatcher {
     static final double FALSE_MATCH_ESCAPE_DISTANCE_METERS = 12.0;
     static final double FALSE_MATCH_ESCAPE_MIN_MOVEMENT_METERS = 4.0;
     static final long FALSE_MATCH_ESCAPE_CONFIRMATION_MS = 3_000L;
-    static final double STRUCTURE_AREA_RADIUS_METERS = 55.0;
-    static final double STRUCTURE_AREA_ENTRY_MAX_DISTANCE_METERS = 18.0;
-    static final double STRUCTURE_AREA_ENTRY_ACCURACY_METERS = 5.0;
-    static final double STRUCTURE_AREA_ENTRY_MAX_HEADING_ERROR_DEGREES = 50.0;
-    static final double STRUCTURE_AREA_ENTRY_SCORE_MARGIN = 1.5;
-    static final double STRUCTURE_AREA_EXIT_RADIUS_METERS = 65.0;
-    static final double TOPOLOGY_VERTEX_RADIUS_METERS = 1.0;
 
     enum State {
         NORMAL,
         STRUCTURE,
-        PATH_RECOVERY,
         JUNCTION_HOLD,
         RECOVERY,
         RAW_RECOVERY
@@ -157,13 +149,6 @@ final class BridgeTunnelMatcher {
             this.segment = segment;
             this.startsAtJunction = startsAtJunction;
             this.points = orientedPoints(segment, startsAtJunction);
-            this.heading = bearingDegrees(points.get(0), points.get(1));
-        }
-
-        Branch(Segment segment, boolean startsAtJunction, List<Point> points) {
-            this.segment = segment;
-            this.startsAtJunction = startsAtJunction;
-            this.points = points;
             this.heading = bearingDegrees(points.get(0), points.get(1));
         }
     }
@@ -286,10 +271,7 @@ final class BridgeTunnelMatcher {
         }
 
         if (state == State.NORMAL) {
-            tryEnterStructureAreaPath(rawPoint, accuracyMeters, timeMs);
-            if (state == State.NORMAL) {
-                tryEnterStructure(rawPoint, accuracyMeters, timeMs);
-            }
+            tryEnterStructure(rawPoint, accuracyMeters, timeMs);
         }
 
         Result result;
@@ -309,22 +291,8 @@ final class BridgeTunnelMatcher {
             advanceProgress(timeMs);
             Point predicted = pointAlong(activeRoute, progressMeters);
 
-            if (state == State.PATH_RECOVERY && progressMeters >= activeRouteLengthMeters) {
-                result = reachPathRecoveryExit(
-                        rawPoint,
-                        accuracyMeters,
-                        timeMs,
-                        accuracyIsGood
-                );
-            } else if (state == State.STRUCTURE && progressMeters >= activeRouteLengthMeters) {
+            if (state == State.STRUCTURE && progressMeters >= activeRouteLengthMeters) {
                 result = reachStructureExit(rawPoint, accuracyMeters, timeMs, accuracyIsGood);
-            } else if (state == State.PATH_RECOVERY) {
-                result = processPathRecovery(
-                        rawPoint,
-                        accuracyMeters,
-                        timeMs,
-                        predicted
-                );
             } else if (state == State.RECOVERY) {
                 result = processRecovery(
                         rawPoint,
@@ -381,39 +349,6 @@ final class BridgeTunnelMatcher {
         connectedRecoveryStartedAtMs = 0L;
         noExitRecoveryStartedAtMs = timeMs;
         return processRecovery(rawPoint, accuracyMeters, timeMs, accuracyIsGood, junction);
-    }
-
-    private Result reachPathRecoveryExit(
-            Point rawPoint,
-            float accuracyMeters,
-            long timeMs,
-            boolean accuracyIsGood
-    ) {
-        Point junction = structureRoute.get(structureRoute.size() - 1);
-        exitBranches = findExitBranches(junction, true);
-
-        if (exitBranches.size() == 1) {
-            selectBranch(exitBranches.get(0), 0.0, timeMs);
-            return processPathRecovery(
-                    rawPoint,
-                    accuracyMeters,
-                    timeMs,
-                    pointAlong(activeRoute, progressMeters)
-            );
-        }
-
-        if (exitBranches.size() > 1) {
-            state = State.JUNCTION_HOLD;
-            junctionHoldStartedAtMs = timeMs;
-            lastMatchedTimeMs = timeMs;
-            heldDistanceMeters = 0.0;
-            directionObservations.clear();
-            directionObservations.add(new Observation(rawPoint, timeMs));
-            return new Result(junction, true, state, structureType);
-        }
-
-        state = State.RAW_RECOVERY;
-        return new Result(rawPoint, false, state, "");
     }
 
     private Result processJunctionHold(
@@ -477,116 +412,6 @@ final class BridgeTunnelMatcher {
         }
 
         return new Result(predicted, true, state, structureType);
-    }
-
-    private Result processPathRecovery(
-            Point rawPoint,
-            float accuracyMeters,
-            long timeMs,
-            Point predicted
-    ) {
-        double structureDistance = distanceToNearestStructure(predicted);
-        boolean safelyClear = structureDistance > STRUCTURE_AREA_EXIT_RADIUS_METERS;
-        boolean rawIsUsable = accuracyMeters < 0.0f
-                || accuracyMeters <= RELAXED_RAW_HANDOFF_ACCURACY_METERS;
-        if ((rawHandoffIsStrong(accuracyMeters)
-                && connectedRecoveryHandoffIsAllowed(rawPoint, timeMs))
-                || (safelyClear && rawIsUsable)) {
-            state = State.NORMAL;
-            Result result = new Result(rawPoint, false, state, "");
-            clearActiveRoute();
-            return result;
-        }
-        return new Result(predicted, true, state, structureType);
-    }
-
-    private void tryEnterStructureAreaPath(
-            Point rawPoint,
-            float accuracyMeters,
-            long timeMs
-    ) {
-        if (context == null
-                || lastRawPoint == null
-                || context.segments.isEmpty()
-                || presumedDriverMode
-                || accuracyMeters < 0.0f
-                || accuracyMeters <= STRUCTURE_AREA_ENTRY_ACCURACY_METERS) {
-            return;
-        }
-
-        Observation first = firstUsefulEntryObservation(rawPoint);
-        if (first == null) return;
-        double observedBearing = bearingDegrees(first.point, rawPoint);
-        double allowedDistance = Math.min(
-                STRUCTURE_AREA_ENTRY_MAX_DISTANCE_METERS,
-                Math.max(ENTRY_RADIUS_METERS, accuracyMeters + 3.0)
-        );
-
-        Segment best = null;
-        boolean bestForward = true;
-        double bestScore = Double.MAX_VALUE;
-        double secondBestScore = Double.MAX_VALUE;
-        double bestHeadingError = Double.MAX_VALUE;
-
-        for (Segment segment : context.segments) {
-            if (segment.isStructure()
-                    || segment.points.size() < 2
-                    || !isRunnerPath(segment)) {
-                continue;
-            }
-
-            Projection projection = project(segment.points, rawPoint);
-            if (projection.distanceMeters > allowedDistance
-                    || distanceToNearestStructure(projection.point)
-                    > STRUCTURE_AREA_RADIUS_METERS) {
-                continue;
-            }
-
-            double forwardHeading = localBearing(segment.points, projection.alongMeters);
-            double forwardError = angleDifference(observedBearing, forwardHeading);
-            double reverseError = angleDifference(
-                    observedBearing,
-                    (forwardHeading + 180.0) % 360.0
-            );
-            boolean forward = forwardError <= reverseError;
-            double headingError = Math.min(forwardError, reverseError);
-            if (headingError > STRUCTURE_AREA_ENTRY_MAX_HEADING_ERROR_DEGREES) continue;
-
-            double score = projection.distanceMeters + headingError / 12.0;
-            if (score < bestScore) {
-                secondBestScore = bestScore;
-                bestScore = score;
-                best = segment;
-                bestForward = forward;
-                bestHeadingError = headingError;
-            } else if (score < secondBestScore) {
-                secondBestScore = score;
-            }
-        }
-
-        if (best == null || bestHeadingError > STRUCTURE_AREA_ENTRY_MAX_HEADING_ERROR_DEGREES) {
-            return;
-        }
-        if (secondBestScore < Double.MAX_VALUE
-                && secondBestScore - bestScore < STRUCTURE_AREA_ENTRY_SCORE_MARGIN) {
-            return;
-        }
-
-        activeRoute = pathRecoveryLeg(best, orientedPoints(best, bestForward));
-        structureRoute = activeRoute;
-        activeRouteLengthMeters = polylineLength(activeRoute);
-        progressMeters = Math.min(
-                activeRouteLengthMeters,
-                Math.max(0.0, project(activeRoute, rawPoint).alongMeters)
-        );
-        lastMatchedTimeMs = timeMs;
-        connectedRecoveryStartedAtMs = timeMs;
-        noExitRecoveryStartedAtMs = 0L;
-        structureType = "structure_area_path";
-        activeStructureId = best.id;
-        activeStructureIds = new HashSet<>();
-        activeStructureIds.add(best.id);
-        state = State.PATH_RECOVERY;
     }
 
     private void tryEnterStructure(Point rawPoint, float accuracyMeters, long timeMs) {
@@ -697,80 +522,28 @@ final class BridgeTunnelMatcher {
     }
 
     private List<Branch> findExitBranches(Point junction) {
-        return findExitBranches(junction, false);
-    }
-
-    private List<Branch> findExitBranches(Point junction, boolean includeStructures) {
         if (context == null) return Collections.emptyList();
 
         List<Branch> branches = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Segment segment : context.segments) {
-            boolean currentPathSegment = "structure_area_path".equals(structureType)
-                    && segment.id.equals(activeStructureId);
             if (segment.points.size() < 2
-                    || (activeStructureIds.contains(segment.id) && !currentPathSegment)
-                    || (!includeStructures && segment.isStructure())
-                    || (includeStructures
-                    && !segment.isStructure()
-                    && !isRunnerPath(segment))) {
+                    || activeStructureIds.contains(segment.id)
+                    || segment.isStructure()) {
                 continue;
             }
 
-            if (segment.isStructure()) {
-                double startDistance = distanceMeters(junction, segment.points.get(0));
-                double endDistance = distanceMeters(
-                        junction,
-                        segment.points.get(segment.points.size() - 1)
-                );
-                if (startDistance <= CONNECTION_RADIUS_METERS
-                        && seen.add(segment.id + ":start")) {
-                    branches.add(new Branch(segment, true));
-                }
-                if (endDistance <= CONNECTION_RADIUS_METERS
-                        && seen.add(segment.id + ":end")) {
-                    branches.add(new Branch(segment, false));
-                }
-                continue;
-            }
+            double startDistance = distanceMeters(junction, segment.points.get(0));
+            double endDistance = distanceMeters(
+                    junction,
+                    segment.points.get(segment.points.size() - 1)
+            );
 
-            int closestVertex = -1;
-            double closestDistance = Double.MAX_VALUE;
-            for (int i = 0; i < segment.points.size(); i++) {
-                double distance = distanceMeters(junction, segment.points.get(i));
-                if (distance < closestDistance) {
-                    closestDistance = distance;
-                    closestVertex = i;
-                }
+            if (startDistance <= CONNECTION_RADIUS_METERS && seen.add(segment.id + ":start")) {
+                branches.add(new Branch(segment, true));
             }
-            if (closestVertex < 0 || closestDistance > CONNECTION_RADIUS_METERS) continue;
-            if (currentPathSegment
-                    && (closestVertex == 0 || closestVertex == segment.points.size() - 1)) {
-                continue;
-            }
-
-            if (closestVertex < segment.points.size() - 1
-                    && seen.add(segment.id + ":forward:" + closestVertex)) {
-                List<Point> forward = new ArrayList<>();
-                forward.add(junction);
-                forward.addAll(segment.points.subList(
-                        closestVertex + 1,
-                        segment.points.size()
-                ));
-                if (forward.size() >= 2) {
-                    branches.add(new Branch(segment, true, forward));
-                }
-            }
-            if (closestVertex > 0
-                    && seen.add(segment.id + ":reverse:" + closestVertex)) {
-                List<Point> reverse = new ArrayList<>();
-                reverse.add(junction);
-                for (int i = closestVertex - 1; i >= 0; i--) {
-                    reverse.add(segment.points.get(i));
-                }
-                if (reverse.size() >= 2) {
-                    branches.add(new Branch(segment, false, reverse));
-                }
+            if (endDistance <= CONNECTION_RADIUS_METERS && seen.add(segment.id + ":end")) {
+                branches.add(new Branch(segment, false));
             }
         }
         return branches;
@@ -809,110 +582,16 @@ final class BridgeTunnelMatcher {
     }
 
     private void selectBranch(Branch branch, double initialDistanceMeters, long timeMs) {
-        boolean pathRecovery = "structure_area_path".equals(structureType);
-        activeRoute = pathRecovery
-                ? pathRecoveryLeg(branch.segment, branch.points)
-                : buildBranchContinuation(branch);
-        structureRoute = activeRoute;
+        activeRoute = buildBranchContinuation(branch);
         activeRouteLengthMeters = polylineLength(activeRoute);
         progressMeters = Math.min(activeRouteLengthMeters, initialDistanceMeters);
         lastMatchedTimeMs = timeMs;
-        state = pathRecovery ? State.PATH_RECOVERY : State.RECOVERY;
-        if (pathRecovery) {
-            activeStructureIds.add(branch.segment.id);
-            activeStructureId = branch.segment.id;
-        }
+        state = State.RECOVERY;
         directionObservations.clear();
         exitBranches = Collections.emptyList();
         heldDistanceMeters = 0.0;
         connectedRecoveryStartedAtMs = timeMs;
         noExitRecoveryStartedAtMs = 0L;
-    }
-
-    private Observation firstUsefulEntryObservation(Point rawPoint) {
-        for (Observation observation : entryObservations) {
-            if (distanceMeters(observation.point, rawPoint) >= DIRECTION_MIN_MOVEMENT_METERS) {
-                return observation;
-            }
-        }
-        return null;
-    }
-
-    private double distanceToNearestStructure(Point point) {
-        if (context == null) return Double.MAX_VALUE;
-        double best = Double.MAX_VALUE;
-        for (Segment segment : context.segments) {
-            if (!segment.isStructure() || segment.points.size() < 2) continue;
-            best = Math.min(best, project(segment.points, point).distanceMeters);
-        }
-        return best;
-    }
-
-    private static boolean isRunnerPath(Segment segment) {
-        String subclass = segment.subclass == null ? "" : segment.subclass;
-        return "footway".equals(subclass)
-                || "path".equals(subclass)
-                || "cycleway".equals(subclass)
-                || "pedestrian".equals(subclass)
-                || "steps".equals(subclass)
-                || "track".equals(subclass);
-    }
-
-    private List<Point> pathRecoveryLeg(Segment segment, List<Point> oriented) {
-        if (oriented.size() < 3 || context == null) {
-            return new ArrayList<>(oriented);
-        }
-        for (int i = 1; i < oriented.size() - 1; i++) {
-            Point vertex = oriented.get(i);
-            if (distanceToNearestStructure(vertex) > STRUCTURE_AREA_RADIUS_METERS) continue;
-            if (hasConnectedSegmentAt(vertex, segment.id)) {
-                return new ArrayList<>(oriented.subList(0, i + 1));
-            }
-        }
-        return new ArrayList<>(oriented);
-    }
-
-    private boolean hasConnectedSegmentAt(Point vertex, String currentSegmentId) {
-        for (Segment candidate : context.segments) {
-            if (candidate.id.equals(currentSegmentId)
-                    || candidate.points.size() < 2
-                    || (!candidate.isStructure() && !isRunnerPath(candidate))) {
-                continue;
-            }
-            if (candidate.isStructure()) {
-                if (distanceMeters(vertex, candidate.points.get(0))
-                        <= TOPOLOGY_VERTEX_RADIUS_METERS
-                        || distanceMeters(
-                        vertex,
-                        candidate.points.get(candidate.points.size() - 1)
-                ) <= TOPOLOGY_VERTEX_RADIUS_METERS) {
-                    return true;
-                }
-                continue;
-            }
-            for (Point candidateVertex : candidate.points) {
-                if (distanceMeters(vertex, candidateVertex)
-                        <= TOPOLOGY_VERTEX_RADIUS_METERS) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static double localBearing(List<Point> polyline, double alongMeters) {
-        double length = polylineLength(polyline);
-        if (length <= 0.0) return 0.0;
-        double before = Math.max(0.0, alongMeters - 4.0);
-        double after = Math.min(length, alongMeters + 4.0);
-        if (after - before < 0.5) {
-            before = 0.0;
-            after = length;
-        }
-        return bearingDegrees(
-                pointAlong(polyline, before),
-                pointAlong(polyline, after)
-        );
     }
 
     private List<Point> buildBranchContinuation(Branch initialBranch) {

@@ -2150,6 +2150,9 @@
     let viewerConnectionLost = false;
     let viewerConnectionWarning = false;
     let nativeRouteGapActive = false;
+    let viewerGpsVerificationEl = null;
+    let viewerGpsVerifying = false;
+    const GPS_VERIFICATION_MESSAGE = "GPS signal unstable — verifying runner’s location…";
     let currentViewerRunIsLive = null;
     let viewerFreshHeartbeatCount = 0;
     let lastViewerStatusMessage = null;
@@ -2492,6 +2495,7 @@
         document.body.classList.add("viewer-mode");
       } else {
         document.body.classList.remove("viewer-mode");
+        setViewerGpsVerification(false);
       }
 
       controls.style.display = mode === "runner" ? "flex" : "none";
@@ -3839,6 +3843,39 @@ function clearNativeRunPathLayer() {
       }, 3000);
     }
 
+function setViewerGpsVerification(verifying) {
+  viewerGpsVerifying = Boolean(verifying);
+  if (!viewerGpsVerificationEl && viewerGpsVerifying) {
+    viewerGpsVerificationEl = document.createElement("div");
+    viewerGpsVerificationEl.setAttribute("role", "status");
+    viewerGpsVerificationEl.setAttribute("aria-live", "polite");
+    Object.assign(viewerGpsVerificationEl.style, {
+      position: "absolute", zIndex: "1001", padding: "8px 12px",
+      borderRadius: "6px", fontSize: "13px", color: "white",
+      textAlign: "center", left: "10px", right: "10px",
+      background: "rgba(190,135,0,0.9)", pointerEvents: "none"
+    });
+    viewerGpsVerificationEl.textContent = GPS_VERIFICATION_MESSAGE;
+    document.body.appendChild(viewerGpsVerificationEl);
+  }
+  const wrapper = document.getElementById("buttonWrapper");
+  const top = wrapper ? wrapper.getBoundingClientRect().bottom + 10 : 180;
+  if (viewerGpsVerificationEl) {
+    viewerGpsVerificationEl.style.top = `${top}px`;
+    viewerGpsVerificationEl.style.display = viewerGpsVerifying ? "block" : "none";
+  }
+  if (viewerStatusEl) {
+    const offset = viewerGpsVerifying ? (viewerGpsVerificationEl?.getBoundingClientRect().height || 40) + 8 : 0;
+    viewerStatusEl.style.top = `${top + offset}px`;
+  }
+}
+
+// A separate banner cannot be dismissed by reconnect/motion toast timers.
+function applyViewerGpsStatus(data, runId) {
+  if (data?.gps_verification_run_id !== runId) return;
+  setViewerGpsVerification(currentViewerRunIsLive && data.gps_verification_state === "verifying");
+}
+
     function showViewerStatus(message, type = "info") {
   if (!viewerStatusEl) {
     viewerStatusEl = document.createElement("div");
@@ -3862,7 +3899,8 @@ function clearNativeRunPathLayer() {
     ? buttonWrapper.getBoundingClientRect().bottom + 10
     : 180;
 
-  viewerStatusEl.style.top = `${buttonBottom}px`;
+  const gpsOffset = viewerGpsVerifying ? (viewerGpsVerificationEl?.getBoundingClientRect().height || 40) + 8 : 0;
+  viewerStatusEl.style.top = `${buttonBottom + gpsOffset}px`;
   viewerStatusEl.style.left = "10px";
   viewerStatusEl.style.right = "10px";
 
@@ -4679,7 +4717,7 @@ async function fetchAllNativeRunPoints(runId) {
     from += pageSize;
   }
 
-  return allRows;
+  return allRows.filter(isDisplayableNativePoint);
 }
 
 async function startNativePathComparison(runId) {
@@ -4739,6 +4777,7 @@ async function startNativePathComparison(runId) {
       },
       payload => {
         const pt = payload.new;
+        if (!isDisplayableNativePoint(pt)) return;
         const previousLatestPoint = getLatestSequencePoint(nativePathCoords);
         const incomingPoint = normalizeNativeRunPoint(pt);
         const incomingSequence = incomingPoint.sequenceNum;
@@ -4835,8 +4874,22 @@ function upsertSortedRunPoint(pt) {
   });
 }
 
+function isDisplayableNativePoint(pt) {
+  if (!pt) return false;
+  const disposition = String(pt.gps_status ?? pt.gpsStatus ?? "accepted").toLowerCase();
+  if (disposition !== "accepted" && disposition !== "normal") return false;
+  const state = String(pt.app_state ?? "").toLowerCase();
+  const note = String(pt.note ?? "").toLowerCase();
+  if (/reject|pending|verifying/.test(state) || /reject|ignored/.test(note)) return false;
+  return pt.lat != null && pt.lon != null && Number.isFinite(Number(pt.lat)) && Number.isFinite(Number(pt.lon))
+    && Math.abs(Number(pt.lat)) <= 90 && Math.abs(Number(pt.lon)) <= 180;
+}
+
 function normalizeNativeRunPoint(pt) {
   return {
+    app_state: pt.app_state ?? null,
+    note: pt.note ?? null,
+    gps_status: pt.gps_status ?? pt.gpsStatus ?? "accepted",
     sequenceNum: pt.sequenceNum ?? pt.sequence_num ?? null,
     lat: pt.lat,
     lon: pt.lon,
@@ -4854,6 +4907,7 @@ function normalizeNativeRunPoint(pt) {
 }
 
 function upsertSortedNativeRunPoint(pt) {
+  if (!isDisplayableNativePoint(pt)) return false;
   const normalized = normalizeNativeRunPoint(pt);
 
   const existingIndex = nativePathCoords.findIndex(p =>
@@ -4881,6 +4935,7 @@ function upsertSortedNativeRunPoint(pt) {
     
     
 function updateViewerFromNativePoint(pt) {
+  if (!isDisplayableNativePoint(pt)) return;
   const nativePoint = normalizeNativeRunPoint(pt);
 
   const nativeStartTime = nativePathCoords.length > 0
@@ -4943,6 +4998,7 @@ function updateViewerFromNativePoint(pt) {
     
     async function trackRunnerSupabase(runId, isLive = false, trackedRunnerName = null) {
   currentViewerRunIsLive = Boolean(isLive);
+  setViewerGpsVerification(false);
 
   if (activeListener) {
     activeListener.off();
@@ -4987,7 +5043,9 @@ if (trackedRunnerName) {
   const matchingRef = db.ref(`runners/${safeName}`);
   activeListener = matchingRef;
   matchingRef.on("value", snap => {
-    const matchingState = snap.val()?.matching_state || "normal";
+    const liveState = snap.val() || {};
+    applyViewerGpsStatus(liveState, runId);
+    const matchingState = liveState.matching_state || "normal";
     if (matchingState === "junction_hold") {
       showViewerStatus(
         "GPS signal recovering. Determining direction of travel...",
@@ -4995,6 +5053,11 @@ if (trackedRunnerName) {
       );
     } else {
       hideViewerStatus("GPS signal recovering. Determining direction of travel...");
+      if (matchingState === "raw_recovery") {
+        showViewerStatus("GPS signal recovering. Waiting for a reliable location...", "warn");
+      } else {
+        hideViewerStatus("GPS signal recovering. Waiting for a reliable location...");
+      }
     }
   });
 }
@@ -5056,6 +5119,7 @@ activeRunStatusChannel = supabaseClient
 
       if (run && run.is_live === false) {
         currentViewerRunIsLive = false;
+        setViewerGpsVerification(false);
         updateSplitsPanel(nativePathCoords, { includeFinalPartial: true });
       
 if (run.final_time_ms != null && lastViewerData) {
@@ -5203,6 +5267,7 @@ viewerConnectionWatchId = setInterval(() => {
     // -> Firebase legacy fallback viewer function kept for older Firebase-only runs
     function trackRunner(key) {
       currentViewerRunIsLive = null;
+      setViewerGpsVerification(false);
 
       if (activeSupabaseChannel) {
         supabaseClient.removeChannel(activeSupabaseChannel);
@@ -5226,7 +5291,11 @@ if (activeNativeSupabaseChannel) {
 
       ref.on("value", async snap => {
         const data = snap.val();
-        if (!data || !data.current) return;
+        if (!data) return;
+        const verifying = !data.finished && data.gps_verification_run_id === data.run_id
+          && data.gps_verification_state === "verifying";
+        setViewerGpsVerification(verifying);
+        if (verifying || !data.current) return;
 
         if (!viewerMarker) {
           viewerMarker = new maplibregl.Marker({ color: "red" })
@@ -5236,7 +5305,7 @@ if (activeNativeSupabaseChannel) {
           viewerMarker.setLngLat(data.current);
         }
 
-        pathCoords = (data.path || []).map(pt => ({
+        pathCoords = (data.path || []).filter(isDisplayableNativePoint).map(pt => ({
           lat: pt.lat,
           lon: pt.lon,
           timestamp: pt.timestamp,

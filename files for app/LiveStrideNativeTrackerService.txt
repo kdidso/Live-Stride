@@ -67,6 +67,8 @@ public class LiveStrideNativeTrackerService extends Service {
     public static final String STATE_MAP_CONTEXT_UPDATED_AT_MS = "map_context_updated_at_ms";
     public static final String STATE_MATCHING_STATE = "matching_state";
     public static final String STATE_LOCAL_ONLY = "local_only";
+    public static final String STATE_GPS_VERIFICATION = "gps_verification_state";
+    public static final String STATE_GPS_VERIFICATION_UPDATED_MS = "gps_verification_updated_at_ms";
 
     public static final String ACTION_START = "START_NATIVE_TEST_RUN";
     public static final String ACTION_STOP = "STOP_NATIVE_TEST_RUN";
@@ -88,6 +90,18 @@ public class LiveStrideNativeTrackerService extends Service {
     private String firebaseRunnerPath;
     private boolean localOnly = false;
 
+    private final GpsReversalFilter gpsReversalFilter = new GpsReversalFilter();
+    private final java.util.Map<Long, PendingGpsFix> pendingGpsFixes = new java.util.LinkedHashMap<>();
+    private final java.util.concurrent.ExecutorService pointUploadExecutor =
+            java.util.concurrent.Executors.newFixedThreadPool(4);
+    private final java.util.concurrent.ExecutorService gpsStatusExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+    private long lastObservedGpsTimeMs = 0L;
+    private boolean gpsVerifying = false;
+    private String lastGpsPublishedRunId = null;
+    private volatile boolean gpsStatusNeedsSync = false;
+    private volatile long gpsStatusUpdatedMs = 0L;
+    private long gpsStatusLastAttemptMs = 0L;
     private int sequenceNum = 0;
     private boolean isTracking = false;
     private Location previousLocation = null;
@@ -114,6 +128,7 @@ public class LiveStrideNativeTrackerService extends Service {
             fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
         }
         pointStore = new LiveStridePointStore(this);
+        pointStore.rejectUnresolvedGpsObservations("service_restart");
         mapContextProvider = new LiveStrideMapContextProvider(this);
         createNotificationChannel();
     }
@@ -167,6 +182,8 @@ public class LiveStrideNativeTrackerService extends Service {
             LiveStridePendingPointUploadJobService.schedule(this);
             new Thread(() -> LiveStridePendingPointUploadJobService.flushPendingPoints(this)).start();
 
+            discardGpsVerification("run_restarted");
+            lastObservedGpsTimeMs = 0L;
             sequenceNum = 0;
             previousLocation = null;
             totalDistanceMeters = 0.0;
@@ -182,6 +199,7 @@ public class LiveStrideNativeTrackerService extends Service {
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             saveNativeRunConfig();
             saveNativeTrackerState(true, 0L, 0L);
+            publishGpsVerificationState(false, true);
             
             startForeground(NOTIFICATION_ID, buildRunNotification(
                     System.currentTimeMillis(),
@@ -200,6 +218,8 @@ public class LiveStrideNativeTrackerService extends Service {
             localOnly = intent.getBooleanExtra("localOnly", localOnly);
             boolean skipFinishSync = intent.getBooleanExtra(EXTRA_SKIP_FINISH_SYNC, false);
             stopLocationUpdates();
+            discardGpsVerification("run_stopped");
+            publishGpsVerificationState(false, true);
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             if (!localOnly && !skipFinishSync) {
                 queueNativeFinishEvent();
@@ -380,6 +400,36 @@ public class LiveStrideNativeTrackerService extends Service {
         isTracking = false;
     }
 
+private static final class PendingGpsFix {
+    final long observationId, pointTimeMs;
+    final Location raw, candidate;
+    final BridgeTunnelMatcher.Result match;
+    final float accuracy;
+    PendingGpsFix(long id, Location raw, Location candidate, BridgeTunnelMatcher.Result match,
+            float accuracy, long timeMs) {
+        this.observationId = id; this.raw = new Location(raw); this.candidate = new Location(candidate);
+        this.match = match; this.accuracy = accuracy; this.pointTimeMs = timeMs;
+    }
+}
+
+private static String isoTime(long timeMs) {
+    java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
+    f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+    return f.format(new java.util.Date(timeMs));
+}
+
+private void rejectGpsFix(long id, String reason) {
+    pendingGpsFixes.remove(id);
+    pointStore.resolveGpsObservation(id, "rejected", reason, null, totalDistanceMeters);
+}
+
+private void discardGpsVerification(String reason) {
+    java.util.List<GpsReversalFilter.Point> discarded = gpsReversalFilter.reset();
+    for (GpsReversalFilter.Point point : discarded) rejectGpsFix(point.id, reason);
+    pendingGpsFixes.clear();
+    if (!discarded.isEmpty() && pointStore != null) pointStore.exportDebugCopy();
+}
+
 private void uploadNativePoint(Location rawLocation) {
     final float accuracy = rawLocation.hasAccuracy() ? rawLocation.getAccuracy() : -1f;
     final long pointTimeMs = rawLocation.getTime() > 0
@@ -387,6 +437,22 @@ private void uploadNativePoint(Location rawLocation) {
             : System.currentTimeMillis();
     final boolean accuracyIsGood = accuracy < 0
             || accuracy <= MAX_ACCEPTED_ACCURACY_METERS;
+
+    final long observationId;
+    try {
+        observationId = pointStore.insertGpsObservation(runId, nativeSessionId,
+                rawLocation.getLatitude(), rawLocation.getLongitude(), accuracy >= 0 ? accuracy : null,
+                isoTime(pointTimeMs), totalDistanceMeters);
+    } catch (Exception e) {
+        Log.e("LiveStrideNative", "Raw observation could not be saved; leaving trusted track unchanged", e);
+        return;
+    }
+    if (pointTimeMs <= lastObservedGpsTimeMs) {
+        rejectGpsFix(observationId, "stale_or_out_of_order_fix");
+        return;
+    }
+    lastObservedGpsTimeMs = pointTimeMs;
+    publishGpsVerificationState(gpsVerifying, false);
 
     if (!serverMapContextActive) {
         refreshMapMatchingContext();
@@ -425,11 +491,13 @@ private void uploadNativePoint(Location rawLocation) {
                 "Holding raw GPS during map-matching recovery: "
                         + accuracy + " m state=" + matchResult.state
         );
+        rejectGpsFix(observationId, "map_matching_recovery");
         return;
     }
 
     if (!matchResult.matched && !accuracyIsGood) {
         Log.i("LiveStrideNative", "Ignored inaccurate GPS fix: " + accuracy + " m");
+        rejectGpsFix(observationId, "inaccurate_fix");
         return;
     }
 
@@ -445,6 +513,42 @@ private void uploadNativePoint(Location rawLocation) {
         );
     }
 
+    PendingGpsFix current = new PendingGpsFix(observationId, rawLocation, location, matchResult, accuracy, pointTimeMs);
+    // Structure matching and driver mode retain their existing policy. A long gap must not
+    // compare a new fix with an obsolete heading or commit an unverified old buffer.
+    boolean longGap = previousPointTimeMs > 0 && pointTimeMs - previousPointTimeMs > 45_000L;
+    if (matchResult.matched || presumedDriverMode || longGap) {
+        discardGpsVerification(matchResult.matched ? "map_matching_takeover" : longGap ? "long_gps_gap" : "driver_mode");
+        acceptNativePoint(current, "existing_tracking_policy");
+        publishGpsVerificationState(false, false);
+        return;
+    }
+    pendingGpsFixes.put(observationId, current);
+    GpsReversalFilter.Result result = gpsReversalFilter.observe(
+            new GpsReversalFilter.Point(observationId, location.getLatitude(), location.getLongitude(), pointTimeMs));
+    for (GpsReversalFilter.Point rejected : result.rejected) rejectGpsFix(rejected.id, result.reason);
+    for (GpsReversalFilter.Point accepted : result.accepted) {
+        PendingGpsFix fix = pendingGpsFixes.remove(accepted.id);
+        if (fix != null) acceptNativePoint(fix, result.reason);
+    }
+    publishGpsVerificationState(result.verifying, false);
+}
+
+private void acceptNativePoint(PendingGpsFix fix, String verificationResolution) {
+    final Location savedPreviousLocation = previousLocation;
+    final long savedPreviousTimeMs = previousPointTimeMs, savedRunStartMs = runStartTimeMs;
+    final double savedDistanceMeters = totalDistanceMeters;
+    final boolean savedStationaryHold = stationaryHoldActive;
+    final int savedSequenceNum = sequenceNum, savedCompletedMile = lastCompletedMile;
+    final long savedSplitTimeMs = lastMileSplitTimeMs;
+    final String savedSplitText = latestMileSplitText;
+    boolean acceptedStored = false;
+    Location rawLocation = fix.raw;
+    Location location = new Location(fix.candidate);
+    BridgeTunnelMatcher.Result matchResult = fix.match;
+    final float accuracy = fix.accuracy;
+    final long pointTimeMs = fix.pointTimeMs;
+    final boolean accuracyIsGood = accuracy < 0 || accuracy <= MAX_ACCEPTED_ACCURACY_METERS;
     boolean heldPoint = false;
     String holdReason = null;
     final boolean wasMapMatched = matchResult.matched;
@@ -469,6 +573,7 @@ private void uploadNativePoint(Location rawLocation) {
         double elapsedSeconds = (pointTimeMs - previousPointTimeMs) / 1000.0;
         if (elapsedSeconds <= 0.0) {
             System.out.println("LiveStride native ignored zero/negative time point: " + elapsedSeconds);
+            rejectGpsFix(fix.observationId, "stale_after_verification");
             return;
         }
 
@@ -569,13 +674,6 @@ private void uploadNativePoint(Location rawLocation) {
     final String finalHoldReason = holdReason;
     final boolean finalAnchoredResumePoint = anchoredResumePoint;
     final String finalAnchorReason = anchorReason;
-    updateRunNotification(
-            pointTimeMs,
-            finalDistanceMeters,
-            finalAvgPaceMinPerMile,
-            latestMileSplitText,
-            alertNotificationForMileSplit
-    );
     java.text.SimpleDateFormat recordedAtFormatter =
         new java.text.SimpleDateFormat(
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
@@ -584,10 +682,8 @@ private void uploadNativePoint(Location rawLocation) {
     recordedAtFormatter.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
     final String recordedAt = recordedAtFormatter.format(new java.util.Date(pointTimeMs));
 
-    new Thread(() -> {
-        try {
-            Double elevationMeters =
-                    localOnly ? null : LiveStrideServerClient.fetchElevationMeters(lat, lon);
+    try {
+            // Persist the trusted row immediately, before any network/elevation request.
             JSONObject body = new JSONObject();
 
             if (runId != null && !runId.trim().isEmpty()) {
@@ -605,7 +701,7 @@ private void uploadNativePoint(Location rawLocation) {
             body.put("distance_m", finalDistanceMeters);
             body.put("inst_pace_min_per_mile", finalInstPaceMinPerMile);
             body.put("avg_pace_min_per_mile", finalAvgPaceMinPerMile);
-            body.put("elevation_m", elevationMeters != null ? elevationMeters : JSONObject.NULL);
+            body.put("elevation_m", JSONObject.NULL);
             String appState = localOnly
                     ? (wasMapMatched
                     ? "private_native_map_matched"
@@ -630,48 +726,108 @@ private void uploadNativePoint(Location rawLocation) {
                 note = note + "; anchored resume from held coordinate during " + finalAnchorReason;
             }
             body.put("app_state", appState);
-            body.put("note", note);
+            body.put("note", note + "; gps_filter=" + verificationResolution);
+
 
             // Phase SQLite-1:
             // Save every native point locally first. This makes the phone-side record durable
             // before any Supabase network attempt is made.
-            long localId = pointStore.insertNativePoint(body);
-            if (localOnly) {
-                pointStore.markLocalOnly(localId);
-                Double privateElevationMeters =
-                        LiveStrideServerClient.fetchElevationMeters(lat, lon);
-                if (privateElevationMeters != null) {
-                    pointStore.updateElevation(localId, privateElevationMeters);
+            String diagnosticReason = verificationResolution
+                    + (finalHeldPoint ? ":stationary_hold:" + finalHoldReason : "")
+                    + (finalAnchoredResumePoint ? ":resume_anchor:" + finalAnchorReason : "");
+            final long localId = pointStore.insertVerifiedGpsPoint(body, fix.observationId, diagnosticReason);
+            acceptedStored = true;
+            gpsReversalFilter.commit(new GpsReversalFilter.Point(fix.observationId, lat, lon, pointTimeMs));
+            updateRunNotification(pointTimeMs, finalDistanceMeters, finalAvgPaceMinPerMile,
+                    latestMileSplitText, alertNotificationForMileSplit);
+            final boolean pointIsLocalOnly = localOnly;
+            final String pointSupabaseUrl = supabaseUrl, pointSupabaseKey = supabaseAnonKey;
+            if (pointIsLocalOnly) pointStore.markLocalOnly(localId);
+            pointUploadExecutor.execute(() -> {
+                try {
+                    Double elevationMeters = LiveStrideServerClient.fetchElevationMeters(lat, lon);
+                    if (elevationMeters != null) {
+                        body.put("elevation_m", elevationMeters);
+                        pointStore.updateElevation(localId, elevationMeters);
+                    }
+                    if (pointIsLocalOnly) return;
+                    pointStore.markUploadInProgress(localId);
+                    LiveStridePendingPointUploadJobService.UploadResult uploadResult =
+                            LiveStridePendingPointUploadJobService.uploadNativePointBody(pointSupabaseUrl, pointSupabaseKey, body);
+                    if (uploadResult.success) {
+                        pointStore.markUploaded(localId);
+                        kickPendingFlushIfNeeded();
+                    } else {
+                        pointStore.markUploadFailed(localId, uploadResult.error);
+                        LiveStridePendingPointUploadJobService.schedule(this);
+                    }
+                } catch (Exception e) {
+                    if (!pointIsLocalOnly) pointStore.markUploadFailed(localId, e.getMessage());
+                    Log.w("LiveStrideNative", "Trusted point enrichment/upload deferred", e);
                 }
-                Log.i("LiveStrideNative", "Private local point saved seq=" + thisSequence
-                        + " local_id=" + localId);
-                return;
-            }
-            pointStore.markUploadInProgress(localId);
-
-            LiveStridePendingPointUploadJobService.UploadResult uploadResult =
-                    LiveStridePendingPointUploadJobService.uploadNativePointBody(
-                            supabaseUrl,
-                            supabaseAnonKey,
-                            body
-                    );
-
-            if (uploadResult.success) {
-                pointStore.markUploaded(localId);
-                Log.i("LiveStrideNative", "SQLite point uploaded seq=" + thisSequence + " local_id=" + localId);
-                kickPendingFlushIfNeeded();
-            } else {
-                pointStore.markUploadFailed(localId, uploadResult.error);
-                LiveStridePendingPointUploadJobService.schedule(this);
-                Log.w("LiveStrideNative", "SQLite point left pending seq=" + thisSequence
-                        + " local_id=" + localId
-                        + " pendingForRun=" + pointStore.countPendingForRun(runId));
-            }
-
-        } catch (Exception e) {
-            System.out.println("LiveStride native point SQLite/upload exception: " + e.getMessage());
+            });
+    } catch (Exception e) {
+        if (!acceptedStored) {
+            previousLocation = savedPreviousLocation; previousPointTimeMs = savedPreviousTimeMs;
+            runStartTimeMs = savedRunStartMs; totalDistanceMeters = savedDistanceMeters;
+            stationaryHoldActive = savedStationaryHold; sequenceNum = savedSequenceNum;
+            lastCompletedMile = savedCompletedMile; lastMileSplitTimeMs = savedSplitTimeMs;
+            latestMileSplitText = savedSplitText;
+            saveNativeTrackerState(true, 0L, 0L);
+            rejectGpsFix(fix.observationId, "accepted_point_storage_failed");
         }
-    }).start();
+        Log.e("LiveStrideNative", "Trusted point storage failed", e);
+    }
+}
+
+private void publishGpsVerificationState(boolean verifying, boolean force) {
+    long nowMs = System.currentTimeMillis();
+    boolean changed = force || gpsVerifying != verifying || !java.util.Objects.equals(runId, lastGpsPublishedRunId);
+    if (!changed && (!gpsStatusNeedsSync || nowMs - gpsStatusLastAttemptMs < 5_000L)) return;
+    gpsVerifying = verifying;
+    lastGpsPublishedRunId = runId;
+    long updatedMs = Math.max(nowMs, gpsStatusUpdatedMs + 1);
+    gpsStatusUpdatedMs = updatedMs;
+    String state = verifying ? "verifying" : "normal";
+    getSharedPreferences(STATE_PREFS_NAME, MODE_PRIVATE).edit()
+            .putString(STATE_GPS_VERIFICATION, state)
+            .putLong(STATE_GPS_VERIFICATION_UPDATED_MS, updatedMs).apply();
+    if (localOnly || firebaseRunnerPath == null || firebaseRunnerPath.trim().isEmpty()) return;
+    final String targetPath = firebaseRunnerPath, targetRunId = runId, targetSessionId = nativeSessionId;
+    gpsStatusNeedsSync = false;
+    gpsStatusLastAttemptMs = nowMs;
+    // Separate ordered status channel works while the WebView is backgrounded. It never
+    // contains coordinates, so an old/offline upload cannot move the displayed marker.
+    gpsStatusExecutor.execute(() -> {
+        java.net.HttpURLConnection connection = null;
+        try {
+            if (gpsStatusUpdatedMs != updatedMs) return;
+            SharedPreferences currentPrefs = getSharedPreferences(STATE_PREFS_NAME, MODE_PRIVATE);
+            if (!java.util.Objects.equals(targetRunId, currentPrefs.getString(STATE_RUN_ID, null))
+                    || !java.util.Objects.equals(targetSessionId, currentPrefs.getString(STATE_NATIVE_SESSION_ID, null))) return;
+            JSONObject payload = new JSONObject();
+            payload.put("gps_verification_state", state);
+            payload.put("gps_verification_run_id", targetRunId);
+            payload.put("gps_verification_updated_at_ms", updatedMs);
+            connection = (java.net.HttpURLConnection) new java.net.URL(targetPath + ".json").openConnection();
+            connection.setRequestMethod("PATCH");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout(5_000); connection.setReadTimeout(5_000);
+            connection.setDoOutput(true);
+            try (java.io.OutputStream out = connection.getOutputStream()) {
+                out.write(payload.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            if (connection.getResponseCode() < 200 || connection.getResponseCode() >= 300) {
+                if (gpsStatusUpdatedMs == updatedMs) gpsStatusNeedsSync = true;
+                Log.w("LiveStrideNative", "GPS verification status will retry on the next fix/foreground sync");
+            }
+        } catch (Exception e) {
+            if (gpsStatusUpdatedMs == updatedMs) gpsStatusNeedsSync = true;
+            Log.w("LiveStrideNative", "GPS verification status sync deferred", e);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    });
 }
 
 private void saveMatchingState(BridgeTunnelMatcher.State state) {
@@ -1027,9 +1183,19 @@ private void updateRunNotification(
             mapContextProvider.shutdown();
         }
         if (pointStore != null) {
-            pointStore.close();
-            pointStore = null;
+            discardGpsVerification("service_destroyed");
+            publishGpsVerificationState(false, true);
+            // Allow all queued accepted-point uploads to finish before closing their store.
+            pointUploadExecutor.shutdown();
+            new Thread(() -> {
+                try {
+                    while (!pointUploadExecutor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) { }
+                } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                pointStore.close();
+            }).start();
         }
+        pointUploadExecutor.shutdown();
+        gpsStatusExecutor.shutdown();
         super.onDestroy();
     }
 

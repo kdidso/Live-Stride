@@ -1,0 +1,119 @@
+package com.kdidso.livestride;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+/** Causal reversal verification. Only commit() supplies trusted display positions. */
+public final class GpsReversalFilter {
+    public static final long HEADING_LOOKBACK_MS = 8_000L;
+    public static final double REVERSAL_ANGLE_DEGREES = 140.0;
+    public static final double MIN_DISPLACEMENT_METERS = 2.0;
+    public static final long TURN_CONFIRMATION_MS = 5_000L;
+    private static final int MAX_BUFFER_POINTS = 32;
+    private static final long MAX_BUFFER_AGE_MS = 30_000L;
+    private final List<Point> trusted = new ArrayList<>();
+    private final List<Point> pending = new ArrayList<>();
+    private Point anchor;
+    private double northHeading, eastHeading;
+    private long verificationStartMs, lastInputMs = Long.MIN_VALUE;
+
+    public static final class Point {
+        public final long id, timeMs;
+        public final double lat, lon;
+        public Point(long id, double lat, double lon, long timeMs) {
+            this.id = id; this.lat = lat; this.lon = lon; this.timeMs = timeMs;
+        }
+    }
+
+    public static final class Result {
+        public final List<Point> accepted, rejected;
+        public final boolean verifying;
+        public final String reason;
+        private Result(List<Point> accepted, List<Point> rejected, boolean verifying, String reason) {
+            this.accepted = Collections.unmodifiableList(accepted);
+            this.rejected = Collections.unmodifiableList(rejected);
+            this.verifying = verifying; this.reason = reason;
+        }
+    }
+
+    public boolean isVerifying() { return anchor != null; }
+
+    public Result observe(Point point) {
+        List<Point> rejected = new ArrayList<>();
+        if (!Double.isFinite(point.lat) || !Double.isFinite(point.lon)
+                || Math.abs(point.lat) > 90 || Math.abs(point.lon) > 180
+                || point.timeMs <= lastInputMs) {
+            rejected.add(point);
+            return new Result(new ArrayList<>(), rejected, isVerifying(), "invalid_or_stale_fix");
+        }
+        lastInputMs = point.timeMs;
+        if (anchor == null && !trusted.isEmpty()) {
+            Point last = trusted.get(trusted.size() - 1);
+            int index = trusted.size() - 1;
+            while (index > 0 && trusted.get(index).timeMs > last.timeMs - HEADING_LOOKBACK_MS) index--;
+            double[] heading = vector(trusted.get(index), last);
+            double[] move = vector(last, point);
+            double hLength = length(heading), mLength = length(move);
+            if (hLength >= 3 && mLength >= MIN_DISPLACEMENT_METERS
+                    && dot(heading, move) <= Math.cos(Math.toRadians(REVERSAL_ANGLE_DEGREES)) * hLength * mLength) {
+                anchor = last;
+                northHeading = heading[0] / hLength;
+                eastHeading = heading[1] / hLength;
+                verificationStartMs = point.timeMs;
+            }
+        }
+        if (anchor == null) return new Result(new ArrayList<>(Collections.singletonList(point)), rejected, false, "normal");
+        pending.add(point);
+        // Storage retains every observation. Only evidence/commit candidates are bounded in memory.
+        while (pending.size() > MAX_BUFFER_POINTS
+                || (pending.size() > 1 && point.timeMs - pending.get(0).timeMs > MAX_BUFFER_AGE_MS)) {
+            rejected.add(pending.remove(0));
+        }
+        double projection = project(vector(anchor, point));
+        if (projection >= 0) {
+            for (Point held : pending) if (held.id != point.id) rejected.add(held);
+            pending.clear(); anchor = null;
+            return new Result(new ArrayList<>(Collections.singletonList(point)), rejected, false, "forward_recovery");
+        }
+        if (point.timeMs - verificationStartMs >= TURN_CONFIRMATION_MS && pending.size() >= 3
+                && projection <= -MIN_DISPLACEMENT_METERS) {
+            int size = pending.size();
+            double[] first = vector(pending.get(size - 3), pending.get(size - 2));
+            double[] second = vector(pending.get(size - 2), pending.get(size - 1));
+            boolean continuousEvidence = pending.get(size - 1).timeMs - pending.get(size - 2).timeMs <= 3_000L
+                    && pending.get(size - 2).timeMs - pending.get(size - 3).timeMs <= 3_000L;
+            if (continuousEvidence && backwards(first) && backwards(second)) {
+                List<Point> accepted = new ArrayList<>(pending);
+                pending.clear(); anchor = null;
+                return new Result(accepted, rejected, false, "confirmed_turn");
+            }
+        }
+        return new Result(new ArrayList<>(), rejected, true,
+                rejected.isEmpty() ? "verifying_reversal" : "verification_buffer_expired");
+    }
+
+    /** Feed the final coordinate after existing stationary/map-matching rules, never a pending fix. */
+    public void commit(Point point) {
+        trusted.add(point);
+        while (trusted.size() > 2 && trusted.get(1).timeMs <= point.timeMs - HEADING_LOOKBACK_MS) trusted.remove(0);
+        while (trusted.size() > 64) trusted.remove(0);
+    }
+
+    /** Pending observations remain excluded after stop, map-matching takeover or long GPS gaps. */
+    public List<Point> reset() {
+        List<Point> discarded = new ArrayList<>(pending);
+        pending.clear(); trusted.clear(); anchor = null; lastInputMs = Long.MIN_VALUE;
+        return discarded;
+    }
+
+    private boolean backwards(double[] v) { return length(v) >= .5 && project(v) < -.5 * length(v); }
+    private double project(double[] v) { return v[0] * northHeading + v[1] * eastHeading; }
+    private static double dot(double[] a, double[] b) { return a[0] * b[0] + a[1] * b[1]; }
+    private static double length(double[] v) { return Math.hypot(v[0], v[1]); }
+    private static double[] vector(Point a, Point b) {
+        double radius = 6_371_008.8;
+        return new double[]{radius * Math.toRadians(b.lat - a.lat),
+                radius * Math.cos(Math.toRadians((a.lat + b.lat) / 2)) * Math.toRadians(b.lon - a.lon)};
+    }
+}

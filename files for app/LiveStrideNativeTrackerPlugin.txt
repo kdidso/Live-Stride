@@ -226,6 +226,10 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         result.put("localOnly", prefs.getBoolean(LiveStrideNativeTrackerService.STATE_LOCAL_ONLY, false));
         result.put("stoppedAtMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_STOPPED_AT_MS, 0L));
         result.put("finalTimeMs", prefs.getLong(LiveStrideNativeTrackerService.STATE_FINAL_TIME_MS, 0L));
+        result.put("gpsVerificationState", prefs.getString(
+                LiveStrideNativeTrackerService.STATE_GPS_VERIFICATION, "normal"));
+        result.put("gpsVerificationUpdatedAtMs", prefs.getLong(
+                LiveStrideNativeTrackerService.STATE_GPS_VERIFICATION_UPDATED_MS, 0L));
         result.put(
                 "matchingState",
                 prefs.getString(LiveStrideNativeTrackerService.STATE_MATCHING_STATE, "normal")

@@ -33,12 +33,15 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
 
     private static final String TAG = "LiveStrideSQLite";
     private static final String DATABASE_NAME = "livestride_native_points.db";
-    private static final int DATABASE_VERSION = 3;
+    private static final int DATABASE_VERSION = 4;
 
     public static final String TABLE_NATIVE_POINTS = "native_run_points";
     public static final String TABLE_FINISH_EVENTS = "pending_finish_events";
+    public static final String TABLE_GPS_OBSERVATIONS = "gps_observations";
     private static final String ACCEPTED_ROUTE_POINT_WHERE =
-            "(app_state IS NULL OR LOWER(app_state) NOT LIKE '%reject%')"
+            "(app_state IS NULL OR (LOWER(app_state) NOT LIKE '%reject%'"
+                    + " AND LOWER(app_state) NOT LIKE '%pending%'"
+                    + " AND LOWER(app_state) NOT LIKE '%verifying%'))"
                     + " AND (note IS NULL OR (LOWER(note) NOT LIKE '%reject%'"
                     + " AND LOWER(note) NOT LIKE '%ignored%'))";
 
@@ -98,6 +101,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         );
 
         createFinishEventTable(db);
+        createGpsObservationTable(db);
     }
 
     @Override
@@ -116,6 +120,44 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
         if (oldVersion < 3) {
             createFinishEventTable(db);
         }
+        if (oldVersion < 4) createGpsObservationTable(db);
+    }
+
+    private static void createGpsObservationTable(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS " + TABLE_GPS_OBSERVATIONS + " ("
+                + "observation_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, native_session_id TEXT, "
+                + "lat REAL NOT NULL, lon REAL NOT NULL, accuracy REAL, recorded_at TEXT NOT NULL, "
+                + "gps_status TEXT NOT NULL DEFAULT 'pending', reason TEXT, accepted_sequence_num INTEGER, "
+                + "distance_m REAL, decision_at_ms INTEGER)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_gps_observations_run ON "
+                + TABLE_GPS_OBSERVATIONS + " (run_id, observation_id)");
+    }
+
+    /** Raw diagnostics never enter native_run_points or the pending public upload queue. */
+    public synchronized long insertGpsObservation(String runId, String sessionId, double lat,
+            double lon, Float accuracy, String recordedAt, double distanceMeters) {
+        ContentValues values = new ContentValues();
+        values.put("run_id", runId); values.put("native_session_id", sessionId);
+        values.put("lat", lat); values.put("lon", lon); values.put("accuracy", accuracy);
+        values.put("recorded_at", recordedAt); values.put("distance_m", distanceMeters);
+        return getWritableDatabase().insertOrThrow(TABLE_GPS_OBSERVATIONS, null, values);
+    }
+
+    public synchronized void resolveGpsObservation(long id, String status, String reason,
+            Integer acceptedSequence, double distanceMeters) {
+        ContentValues values = new ContentValues();
+        values.put("gps_status", status); values.put("reason", reason);
+        values.put("accepted_sequence_num", acceptedSequence); values.put("distance_m", distanceMeters);
+        values.put("decision_at_ms", System.currentTimeMillis());
+        getWritableDatabase().update(TABLE_GPS_OBSERVATIONS, values, "observation_id = ?",
+                new String[]{String.valueOf(id)});
+    }
+
+    public synchronized void rejectUnresolvedGpsObservations(String reason) {
+        ContentValues values = new ContentValues();
+        values.put("gps_status", "rejected"); values.put("reason", reason);
+        values.put("decision_at_ms", System.currentTimeMillis());
+        getWritableDatabase().update(TABLE_GPS_OBSERVATIONS, values, "gps_status = 'pending'", null);
     }
 
     private static void createFinishEventTable(SQLiteDatabase db) {
@@ -178,7 +220,7 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                 + " seq=" + body.optInt("sequence_num", -1)
                 + " pendingCount=" + countPending());
 
-        exportDebugCopy();
+        if (!db.inTransaction()) exportDebugCopy();
 
         return localId;
     }
@@ -201,6 +243,23 @@ public class LiveStridePointStore extends SQLiteOpenHelper {
                 + " pendingCount=" + countPending());
 
         exportDebugCopy();
+    }
+
+    public synchronized long insertVerifiedGpsPoint(JSONObject body, long observationId,
+            String reason) throws JSONException {
+        SQLiteDatabase db = getWritableDatabase();
+        long localId;
+        db.beginTransaction();
+        try {
+            localId = insertNativePoint(body);
+            resolveGpsObservation(observationId, "accepted", reason,
+                    body.getInt("sequence_num"), body.getDouble("distance_m"));
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        exportDebugCopy();
+        return localId;
     }
 
     public synchronized void markLocalOnly(long localId) {

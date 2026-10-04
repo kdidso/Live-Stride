@@ -480,6 +480,9 @@ let lastPointReceivedTime = null;
 let viewerConnectionLost = false;
 let viewerConnectionWarning = false;
 let nativeRouteGapActive = false;
+let viewerGpsVerificationEl = null;
+let viewerGpsVerifying = false;
+const GPS_VERIFICATION_MESSAGE = "GPS signal unstable — verifying runner’s location…";
 let currentViewerRunIsLive = null;
 let viewerStatusEl = null;
 let viewerStatusHideTimerId = null;
@@ -494,6 +497,9 @@ let runnerNativeSnapshotTimerId = null;
 let runnerNativeLastSequenceNum = -1;
 let runnerNativeHydrationLoadedThroughSequenceNum = -1;
 let runnerNativeDisplayActive = false;
+let nativeGpsFilterOwnsTracking = false;
+let nativeSummaryPublishInFlight = false;
+let lastPublishedNativeSummaryKey = null;
 let runnerWakeRecoveryInFlight = false;
 let runnerNativeRestoreInFlight = false;
 let runnerNativeRestoreStarted = false;
@@ -2743,6 +2749,7 @@ function setMode(mode) {
     document.body.classList.add("viewer-mode");
   } else {
     document.body.classList.remove("viewer-mode");
+  setViewerGpsVerification(false);
   }
 
   controls.style.display = mode === "runner" ? "flex" : "none";
@@ -3317,6 +3324,39 @@ function updateStatsDisplay(distanceMi, instPace, avgPace, elapsedMs, elevationF
   `;
 }
 
+function setViewerGpsVerification(verifying) {
+  viewerGpsVerifying = Boolean(verifying);
+  if (!viewerGpsVerificationEl && viewerGpsVerifying) {
+    viewerGpsVerificationEl = document.createElement("div");
+    viewerGpsVerificationEl.setAttribute("role", "status");
+    viewerGpsVerificationEl.setAttribute("aria-live", "polite");
+    Object.assign(viewerGpsVerificationEl.style, {
+      position: "absolute", zIndex: "1001", padding: "8px 12px",
+      borderRadius: "6px", fontSize: "13px", color: "white",
+      textAlign: "center", left: "10px", right: "10px",
+      background: "rgba(190,135,0,0.9)", pointerEvents: "none"
+    });
+    viewerGpsVerificationEl.textContent = GPS_VERIFICATION_MESSAGE;
+    document.body.appendChild(viewerGpsVerificationEl);
+  }
+  const wrapper = document.getElementById("buttonWrapper");
+  const top = wrapper ? wrapper.getBoundingClientRect().bottom + 10 : 180;
+  if (viewerGpsVerificationEl) {
+    viewerGpsVerificationEl.style.top = `${top}px`;
+    viewerGpsVerificationEl.style.display = viewerGpsVerifying ? "block" : "none";
+  }
+  if (viewerStatusEl) {
+    const offset = viewerGpsVerifying ? (viewerGpsVerificationEl?.getBoundingClientRect().height || 40) + 8 : 0;
+    viewerStatusEl.style.top = `${top + offset}px`;
+  }
+}
+
+// A separate banner cannot be dismissed by reconnect/motion toast timers.
+function applyViewerGpsStatus(data, runId) {
+  if (data?.gps_verification_run_id !== runId) return;
+  setViewerGpsVerification(currentViewerRunIsLive && data.gps_verification_state === "verifying");
+}
+
 function showViewerStatus(message, type = "info") {
   if (viewerStatusHideTimerId !== null) {
     clearTimeout(viewerStatusHideTimerId);
@@ -3340,7 +3380,8 @@ function showViewerStatus(message, type = "info") {
     ? buttonWrapper.getBoundingClientRect().bottom + 10
     : 180;
 
-  viewerStatusEl.style.top = `${buttonBottom}px`;
+  const gpsOffset = viewerGpsVerifying ? (viewerGpsVerificationEl?.getBoundingClientRect().height || 40) + 8 : 0;
+  viewerStatusEl.style.top = `${buttonBottom + gpsOffset}px`;
   viewerStatusEl.style.left = "10px";
   viewerStatusEl.style.right = "10px";
 
@@ -3960,6 +4001,8 @@ async function startNativeComparisonRun(firebaseRunnerPath = null, options = {})
     });
 
     console.log("Native comparison tracker started:", result);
+    nativeGpsFilterOwnsTracking = true;
+    lastPublishedNativeSummaryKey = null;
     return true;
   } catch (err) {
     console.warn("Native comparison tracker failed to start:", err);
@@ -4032,6 +4075,7 @@ async function stopNativeComparisonRun(options = {}) {
 }
 
 function settleRunnerAfterNativeStop(finalTimeMs = null, options = {}) {
+  nativeGpsFilterOwnsTracking = false;
   publicRunReadyToStart = false;
   if (runnerTimerId !== null) {
     clearInterval(runnerTimerId);
@@ -4195,8 +4239,8 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
   const renderPath = options.renderPath !== false;
   const updateSplits = options.updateSplits !== false;
   const isPreviewSnapshot = snapshot.preview === true;
-  const points = Array.isArray(snapshot.points) ? snapshot.points : [];
-  const latestRaw = snapshot.latestPoint && typeof snapshot.latestPoint === "object"
+  const points = Array.isArray(snapshot.points) ? snapshot.points.filter(isDisplayableNativePoint) : [];
+  const latestRaw = snapshot.latestPoint && isDisplayableNativePoint(snapshot.latestPoint)
     ? snapshot.latestPoint
     : null;
   const normalizeSnapshotPoint = rawPoint => {
@@ -4302,7 +4346,32 @@ function applyRunnerNativeSnapshot(snapshot, includeFullPath = false, options = 
     focusRunnerNativePointWhenReady(latestPoint, focusLatestPoint);
   }
 
+  publishTrustedNativeSummary(latestPoint);
+
   return true;
+}
+
+function publishTrustedNativeSummary(point) {
+  if (!nativeGpsFilterOwnsTracking || isPrivateMode || !activeRunId || !isDisplayableNativePoint(point)) return;
+  const key = `${activeRunId}:${point.sequenceNum}`;
+  if (nativeSummaryPublishInFlight || key === lastPublishedNativeSummaryKey) return;
+  const summaryRunId = activeRunId;
+  nativeSummaryPublishInFlight = true;
+  const distanceM = point.distanceM ?? totalDistanceMeters;
+  const firebaseWrite = broadcastRef ? broadcastRef.update({
+    name: runnerName, run_id: summaryRunId, finished: false,
+    current: [point.lon, point.lat], distance: metersToMiles(distanceM),
+    pace: point.instPace ?? 0, avgPace: point.avgPace ?? 0,
+    elevation: point.elevationFt ?? latestRunnerElevFt,
+    timestamp: Date.now(), last_seen_at: new Date().toISOString(), startTime
+  }) : Promise.resolve();
+  Promise.all([firebaseWrite, safeUpdateRunSummary({
+    total_distance_m: distanceM, latest_lat: point.lat, latest_lon: point.lon,
+    latest_timestamp: point.time || new Date(point.timestamp).toISOString()
+  })]).then(([, written]) => {
+    if (written && activeRunId === summaryRunId) lastPublishedNativeSummaryKey = key;
+  }).catch(err => console.warn("Trusted native summary sync deferred:", err))
+    .finally(() => { nativeSummaryPublishInFlight = false; });
 }
 
 function hasMeaningfulRunnerRestoreDisplay() {
@@ -4735,6 +4804,7 @@ async function restoreRunnerFromNativeState() {
 
     const stoppedAtMs = Number(state.stoppedAtMs || 0);
     const isNativeRunning = state.running === true;
+    nativeGpsFilterOwnsTracking = isNativeRunning;
     const isNativeLocalOnly = state.localOnly === true;
     const stoppedRecently = stoppedAtMs > 0
       && Date.now() - stoppedAtMs <= STOPPED_NATIVE_RESTORE_GRACE_MS;
@@ -5216,7 +5286,7 @@ async function getBroadcastRunAnalysisPoints(runId) {
   for (let offset = 0; ; offset += pageSize) {
     const { data, error } = await supabaseClient
       .from("run_points_native_test")
-      .select("sequence_num,lat,lon,recorded_at,elevation_m,distance_m,inst_pace_min_per_mile,avg_pace_min_per_mile")
+      .select("sequence_num,lat,lon,recorded_at,elevation_m,distance_m,inst_pace_min_per_mile,avg_pace_min_per_mile,app_state,note")
       .eq("run_id", runId)
       .order("sequence_num", { ascending: true })
       .range(offset, offset + pageSize - 1);
@@ -5228,6 +5298,7 @@ async function getBroadcastRunAnalysisPoints(runId) {
     if (!data || data.length < pageSize) break;
   }
   return rows
+    .filter(isDisplayableNativePoint)
     .map(normalizeRunPoint)
     .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
 }
@@ -5748,6 +5819,12 @@ async function updateNativeMapMatchingContext(coord) {
 }
 
 async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.now()) {
+  if (nativeGpsFilterOwnsTracking) {
+    // The browser watcher supplies map context only. Accepted SQLite points own the
+    // runner path, distance and public summaries while native filtering is active.
+    updateNativeMapMatchingContext(coord);
+    return;
+  }
   const now = typeof locationTime === "number"
     ? locationTime
     : new Date(locationTime).getTime();
@@ -5964,6 +6041,7 @@ async function startTracking() {
   lastPointTime = null;
   stationaryHoldActive = false;
   lastComputeTime = 0;
+  nativeGpsFilterOwnsTracking = false;
   latestRunnerDistance = 0;
   latestRunnerPace = 0;
   latestRunnerAvgPace = 0;
@@ -6105,6 +6183,7 @@ stopRunnerNativeSnapshotPolling();
 
   await stopBackgroundGeolocationWatcher();
   await stopNativeComparisonRun({ skipFinishSync: !isPrivateMode });
+  nativeGpsFilterOwnsTracking = false;
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -6488,11 +6567,25 @@ function upsertSortedRunPoint(pt) {
   sortRunPoints(pathCoords);
 }
 
+function isDisplayableNativePoint(pt) {
+  if (!pt) return false;
+  const disposition = String(pt.gps_status ?? pt.gpsStatus ?? "accepted").toLowerCase();
+  if (disposition !== "accepted" && disposition !== "normal") return false;
+  const state = String(pt.app_state ?? "").toLowerCase();
+  const note = String(pt.note ?? "").toLowerCase();
+  if (/reject|pending|verifying/.test(state) || /reject|ignored/.test(note)) return false;
+  return pt.lat != null && pt.lon != null && Number.isFinite(Number(pt.lat)) && Number.isFinite(Number(pt.lon))
+    && Math.abs(Number(pt.lat)) <= 90 && Math.abs(Number(pt.lon)) <= 180;
+}
+
 function normalizeNativeRunPoint(pt) {
   const elevationM = pt.elevation_m ?? pt.elevation ?? null;
   const recordedAt = pt.recorded_at ?? pt.time;
 
   return {
+    app_state: pt.app_state ?? null,
+    note: pt.note ?? null,
+    gps_status: pt.gps_status ?? pt.gpsStatus ?? "accepted",
     sequenceNum: pt.sequence_num ?? pt.sequenceNum ?? null,
     lat: pt.lat,
     lon: pt.lon,
@@ -6507,6 +6600,7 @@ function normalizeNativeRunPoint(pt) {
 }
 
 function upsertSortedNativeRunPoint(pt) {
+  if (!isDisplayableNativePoint(pt)) return false;
   const normalized = normalizeNativeRunPoint(pt);
 
   const existingIndex = nativePathCoords.findIndex(p =>
@@ -6534,6 +6628,7 @@ function upsertSortedNativeRunPoint(pt) {
 }
 
 function updateViewerFromNativePoint(pt) {
+  if (!isDisplayableNativePoint(pt)) return;
   const nativePoint = normalizeNativeRunPoint
     ? normalizeNativeRunPoint(pt)
     : {
@@ -6622,7 +6717,7 @@ async function fetchAllNativeRunPoints(runId) {
     from += pageSize;
   }
 
-  return allPoints;
+  return allPoints.filter(isDisplayableNativePoint);
 }
 async function startNativePathComparison(runId) {
   if (!runId) return;
@@ -6681,6 +6776,7 @@ async function startNativePathComparison(runId) {
       },
       payload => {
         const pt = payload.new;
+        if (!isDisplayableNativePoint(pt)) return;
         const previousLatestPoint = getLatestSequencePoint(nativePathCoords);
         const incomingPoint = normalizeNativeRunPoint(pt);
         const incomingSequence = incomingPoint.sequenceNum;
@@ -6739,6 +6835,7 @@ async function startNativePathComparison(runId) {
 
 async function trackRunnerSupabase(runId, isLive = false, trackedRunnerName = null) {
   currentViewerRunIsLive = Boolean(isLive);
+  setViewerGpsVerification(false);
 
   if (activeListener) {
     activeListener.off();
@@ -6783,7 +6880,9 @@ if (trackedRunnerName) {
   const matchingRef = db.ref(`runners/${safeName}`);
   activeListener = matchingRef;
   matchingRef.on("value", snap => {
-    const matchingState = snap.val()?.matching_state || "normal";
+    const liveState = snap.val() || {};
+    applyViewerGpsStatus(liveState, runId);
+    const matchingState = liveState.matching_state || "normal";
     if (matchingState === "junction_hold") {
       showViewerStatus(
         "GPS signal recovering. Determining direction of travel...",
@@ -6858,6 +6957,7 @@ activeRunStatusChannel = supabaseClient
 
       if (run && run.is_live === false) {
         currentViewerRunIsLive = false;
+        setViewerGpsVerification(false);
         updateSplitsPanel(nativePathCoords, { includeFinalPartial: true });
       
 if (run.final_time_ms != null && lastViewerData) {

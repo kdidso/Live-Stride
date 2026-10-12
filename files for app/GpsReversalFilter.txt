@@ -102,8 +102,15 @@ public final class GpsReversalFilter {
 
     /** Pending observations remain excluded after stop, map-matching takeover or long GPS gaps. */
     public List<Point> reset() {
+        List<Point> discarded = cancelPendingPreservingTrusted();
+        trusted.clear(); lastInputMs = Long.MIN_VALUE;
+        return discarded;
+    }
+
+    /** A trusted matched position can take over without losing the handoff heading. */
+    public List<Point> cancelPendingPreservingTrusted() {
         List<Point> discarded = new ArrayList<>(pending);
-        pending.clear(); trusted.clear(); anchor = null; lastInputMs = Long.MIN_VALUE;
+        pending.clear(); anchor = null;
         return discarded;
     }
 

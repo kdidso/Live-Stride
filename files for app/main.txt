@@ -655,7 +655,7 @@ function normalizeProfileRunAnalysis(analysis) {
     summary,
     samples: samples
       .map((sample, index) => {
-        const distanceM = Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
+        const distanceM = sample.distance_m != null && sample.distance_m !== "" && Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
         return {
           sequence_num: Number.isFinite(Number(sample.sequence_num)) ? Number(sample.sequence_num) : index + 1,
           recorded_at: sample.recorded_at || null,
@@ -902,7 +902,9 @@ function createProfileRouteSvg(points, detailed = false) {
 }
 
 function createProfileElevationChart(routeData) {
-  const samples = createProfileElevationSamples(routeData.points);
+  const samples = createProfilePaceSamples(routeData)
+    .filter(sample => Number.isFinite(sample.elevationFt))
+    .map(sample => ({ ...sample, elevationM: sample.elevationFt / 3.28084 }));
   if (samples.length < 2) {
     const unavailable = document.createElement("div");
     unavailable.className = "route-unavailable";
@@ -922,7 +924,7 @@ function createProfileElevationChart(routeData) {
   const yTickX = padding.left - (isMobileElevationChart ? 18 : 11);
   const xTickY = isMobileElevationChart ? 50 : 42;
   const xAxisLabelY = isMobileElevationChart ? 78 : 68;
-  const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
+  const maxDistance = Math.max(metersToMiles(getProfileSummaryValue(routeData, "distance_m")), ...samples.map(sample => sample.distanceMi), 0.01);
   const smoothedMeters = smoothProfileElevationSamples(samples);
   const chartSamples = samples.map((sample, index) => ({
     distanceMi: sample.distanceMi,
@@ -1036,9 +1038,15 @@ function createProfileElevationChart(routeData) {
 }
 
 function getProfileSummaryValue(routeData, key) {
-  const stored = Number(routeData?.storedAnalysis?.summary?.[key]);
-  if (Number.isFinite(stored)) return stored;
   const run = routeData?.run;
+  const finalDistance = run?.distance_m;
+  if (key === "distance_m" && finalDistance != null && finalDistance !== ""
+      && Number.isFinite(Number(finalDistance)) && Number(finalDistance) >= 0) {
+    return Number(finalDistance);
+  }
+  const storedValue = routeData?.storedAnalysis?.summary?.[key];
+  const stored = storedValue == null || storedValue === "" ? NaN : Number(storedValue);
+  if (Number.isFinite(stored)) return stored;
   if (key === "distance_m") return Number(run?.distance_m || routeData?.analysis?.totalDistanceM || 0);
   if (key === "elapsed_time_ms") return Number(run?.elapsed_time_ms || 0);
   if (key === "moving_time_ms") return Number(routeData?.analysis?.movingTimeMs || run?.moving_time_ms || 0);
@@ -1062,21 +1070,21 @@ function createProfilePaceSamples(routeData) {
         recorded_at: Number.isFinite(point.time) ? new Date(point.time).toISOString() : null
       }));
   let distanceM = 0;
-  let lastUsableDistanceM = 0;
-  return sourceSamples.map((sample, index) => {
+  
+  const samples = sourceSamples.map((sample, index) => {
     const previous = index > 0 ? sourceSamples[index - 1] : null;
     const segmentDistanceM = Number.isFinite(Number(sample.segment_distance_m)) && Number(sample.segment_distance_m) >= 0
       ? Number(sample.segment_distance_m)
       : previous
       ? haversineDistance([previous.lon, previous.lat], [sample.lon, sample.lat])
       : 0;
-    const storedDistanceM = Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
-    if (storedDistanceM != null && (index === 0 || storedDistanceM > lastUsableDistanceM || segmentDistanceM === 0)) {
+    const storedDistanceM = sample.distance_m != null && sample.distance_m !== "" && Number.isFinite(Number(sample.distance_m)) && Number(sample.distance_m) >= 0 ? Number(sample.distance_m) : null;
+    if (storedDistanceM != null) {
       distanceM = Math.max(storedDistanceM, distanceM);
     } else {
       distanceM += segmentDistanceM;
     }
-    lastUsableDistanceM = distanceM;
+    
     const timestamp = sample.recorded_at ? Date.parse(sample.recorded_at) : null;
     const previousTimestamp = previous?.recorded_at ? Date.parse(previous.recorded_at) : null;
     const elapsedSec = Number.isFinite(Number(sample.segment_elapsed_sec)) && Number(sample.segment_elapsed_sec) > 0
@@ -1092,7 +1100,7 @@ function createProfilePaceSamples(routeData) {
       : null;
     return {
       distanceMi: metersToMiles(distanceM),
-      elevationFt: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) * 3.28084 : null,
+      elevationFt: sample.elevation_m != null && Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) * 3.28084 : null,
       paceSecPerMile: Number.isFinite(pace) ? pace : null,
       elapsedSec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null,
       timestamp: Number.isFinite(timestamp) ? timestamp : null,
@@ -1102,6 +1110,15 @@ function createProfilePaceSamples(routeData) {
       isHeld: Boolean(sample.is_held || sample.held || sample.is_hold || sample.was_held || sample.hold)
     };
   }).filter(sample => Number.isFinite(sample.distanceMi));
+  // Older archives and GPX-only fallbacks can have a different computed length.
+  // Align chart distances with the saved final total without changing route coordinates.
+  const finalMiles = metersToMiles(getProfileSummaryValue(routeData, "distance_m"));
+  const sampledMiles = samples[samples.length - 1]?.distanceMi;
+  if (Number.isFinite(finalMiles) && finalMiles >= 0 && sampledMiles > 0) {
+    const scale = finalMiles / sampledMiles;
+    return samples.map(sample => ({ ...sample, distanceMi: sample.distanceMi * scale }));
+  }
+  return samples;
 }
 
 function percentileProfileValue(values, fraction) {
@@ -5317,13 +5334,11 @@ function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
     const segmentDistanceM = previous
       ? haversineDistance([previous.lon, previous.lat], [point.lon, point.lat])
       : 0;
-    const storedDistanceM = Number(point.distanceM);
-    const hasStoredDistance = Number.isFinite(storedDistanceM) && (
-      index === 0 ||
-      storedDistanceM > cumulativeDistanceM ||
-      (segmentDistanceM === 0 && storedDistanceM === cumulativeDistanceM)
-    );
-    cumulativeDistanceM = hasStoredDistance ? storedDistanceM : cumulativeDistanceM + segmentDistanceM;
+    const storedDistanceM = point.distanceM == null || point.distanceM === "" ? NaN : Number(point.distanceM);
+    const hasStoredDistance = Number.isFinite(storedDistanceM) && storedDistanceM >= 0;
+    cumulativeDistanceM = hasStoredDistance
+      ? Math.max(cumulativeDistanceM, storedDistanceM)
+      : cumulativeDistanceM + segmentDistanceM;
 
     const segmentElapsedSec = previous && Number.isFinite(timestamp) && Number.isFinite(previousTimestamp)
       ? Math.max(0, (timestamp - previousTimestamp) / 1000)

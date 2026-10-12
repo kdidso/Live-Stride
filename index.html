@@ -708,6 +708,7 @@
           lat: Number(point.getAttribute("lat")),
           lon: Number(point.getAttribute("lon")),
           elevation: Number.isFinite(elevation) ? elevation : null,
+          verificationMovingMs: readGpxVerificationMovingMilliseconds(point),
           time: Number.isFinite(time) ? time : null
         };
       })
@@ -729,6 +730,10 @@
           preferMetadataDistance: true
         }));
         routePoints = broadcastPoints.map(point => ({
+          note: point.note,
+          app_state: point.app_state,
+          gps_status: point.gps_status,
+          verificationMovingMs: point.verificationMovingMs,
           lat: point.lat,
           lon: point.lon,
           elevation: point.elevation,
@@ -751,7 +756,26 @@
     throw error;
   }
 }
-    function analyzeBrowserProfilePoints(points) {
+    function getVerificationMovingMilliseconds(point, segmentDurationMs) {
+  if (!point || !Number.isFinite(segmentDurationMs) || segmentDurationMs <= 0) return 0;
+  const status = String(point.gps_status ?? point.gpsStatus ?? "accepted").toLowerCase();
+  if (status !== "accepted" && status !== "normal") return 0;
+  if (/reject|pending|verifying/.test(String(point.app_state ?? "").toLowerCase())) return 0;
+  const explicit = Number(point.verificationMovingMs ?? point.verification_moving_ms);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.min(segmentDurationMs, explicit);
+  // These resolutions include the interval held for reversal verification.
+  // Neither raw pending coordinates nor their distance is counted here.
+  return /(?:^|;\s*)gps_filter=(?:confirmed_turn|forward_recovery)(?:;|\s|$)/.test(String(point.note ?? ""))
+    ? segmentDurationMs : 0;
+}
+
+function readGpxVerificationMovingMilliseconds(point) {
+  const text = point.getElementsByTagNameNS("https://livestride.run/gpx/1", "verification_moving_ms")[0]?.textContent;
+  const value = text == null || text.trim() === "" ? 0 : Number(text);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function analyzeBrowserProfilePoints(points) {
       const ELEVATION_GAIN_THRESHOLD_METERS = 5;
       const MOVING_MIN_DISTANCE_METERS = 1;
       const MOVING_MIN_SPEED_MPH = 1;
@@ -789,10 +813,13 @@
         }
       }
       let movingTimeMs = 0, timedSegments = 0;
+  let verificationMovingTimeMs = 0;
       for (let index = 1; index < points.length; index += 1) {
         if (!Number.isFinite(points[index - 1].time) || !Number.isFinite(points[index].time)) continue;
         const difference = points[index].time - points[index - 1].time;
         if (difference > 0) {
+      const verifiedMs = getVerificationMovingMilliseconds(points[index], difference);
+      verificationMovingTimeMs += verifiedMs;
           const segmentMeters = haversineDistance(
             [points[index - 1].lon, points[index - 1].lat],
             [points[index].lon, points[index].lat]
@@ -805,10 +832,13 @@
           ) {
             movingTimeMs += difference;
             timedSegments += 1;
-          }
+           } else if (verifiedMs > 0) {
+        movingTimeMs += verifiedMs;
+        timedSegments += 1;
+      }
         }
       }
-      return { elevationGainM, elevationLossM, minElevationM, maxElevationM, totalDistanceM, movingTimeMs: timedSegments ? movingTimeMs : null };
+      return { elevationGainM, elevationLossM, minElevationM, maxElevationM, totalDistanceM, verificationMovingTimeMs, movingTimeMs: timedSegments ? movingTimeMs : null };
     }
     function createBrowserProfileElevationSamples(points) {
       const samples = [];
@@ -956,6 +986,9 @@
       return section;
     }
     function getBrowserProfileSummaryValue(routeData, key) {
+      if (key === "moving_time_ms" && Number(routeData?.analysis?.verificationMovingTimeMs) > 0) {
+        return Number(routeData.analysis.movingTimeMs || 0);
+      }
   const run = routeData?.run;
   const finalDistance = run?.distance_m;
   if (key === "distance_m" && finalDistance != null && finalDistance !== ""
@@ -2294,6 +2327,7 @@
             timestamp: Number.isFinite(timestamp) ? timestamp : null,
             time: timeText || null,
             elevation: Number.isFinite(elevation) ? elevation : null,
+          verificationMovingMs: readGpxVerificationMovingMilliseconds(point),
             distanceM: null,
             instPace: null,
             avgPace: null
@@ -2369,6 +2403,7 @@
       distance_m: cumulativeDistanceM,
       segment_distance_m: segmentDistanceM,
       segment_elapsed_sec: segmentElapsedSec,
+      verification_moving_ms: getVerificationMovingMilliseconds(point, segmentElapsedSec * 1000),
       speed_mps: derivedSpeedMps,
       pace_sec_per_mile: Number.isFinite(pointPaceSecPerMile) ? pointPaceSecPerMile : null
     };
@@ -2408,7 +2443,8 @@
       finished_at: metadata.finished_at || null,
       distance_m: distanceM,
       elapsed_time_ms: elapsedMs,
-      moving_time_ms: metadata.moving_time_ms != null && Number.isFinite(Number(metadata.moving_time_ms)) && Number(metadata.moving_time_ms) > 0
+      verification_moving_time_ms: analyzed.verificationMovingTimeMs || 0,
+      moving_time_ms: analyzed.verificationMovingTimeMs > 0 ? analyzed.movingTimeMs : metadata.moving_time_ms != null && Number.isFinite(Number(metadata.moving_time_ms)) && Number(metadata.moving_time_ms) > 0
         ? Number(metadata.moving_time_ms)
         : analyzed.movingTimeMs,
       average_pace_sec_per_mile: averagePaceSecPerMile,
@@ -2430,6 +2466,12 @@
         throw new Error("Sign in to your LiveStride Profile before saving this run.");
       }
 
+      const analysisMovingTimeMs = Number(analysis?.summary?.moving_time_ms);
+      if (Number.isFinite(analysisMovingTimeMs) && analysisMovingTimeMs > 0 &&
+          (Number(analysis?.summary?.verification_moving_time_ms) > 0 ||
+           !Number.isFinite(Number(metadata.moving_time_ms)) || Number(metadata.moving_time_ms) <= 0)) {
+        metadata = { ...metadata, moving_time_ms: analysisMovingTimeMs };
+      }
       const { data: savedRun, error: insertError } = await profilesSupabaseClient
         .from("saved_runs")
         .insert({ ...metadata, user_id: sessionData.session.user.id, archive_status: "pending" })
@@ -4901,6 +4943,10 @@ async function startNativePathComparison(runId) {
 }
 function normalizeRunPoint(pt) {
   return {
+    note: pt.note ?? null,
+    app_state: pt.app_state ?? null,
+    gps_status: pt.gps_status ?? pt.gpsStatus ?? "accepted",
+    verificationMovingMs: pt.verificationMovingMs ?? pt.verification_moving_ms ?? 0,
     sequenceNum: pt.sequence_num ?? null,
     lat: pt.lat,
     lon: pt.lon,
@@ -5481,6 +5527,7 @@ if (viewerFollowing) {
       let gpx = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx creator="LiveStride" version="1.1" xmlns="http://www.topografix.com/GPX/1/1"
      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xmlns:livestride="https://livestride.run/gpx/1"
      xsi:schemaLocation="http://www.topografix.com/GPX/1/1
      http://www.topografix.com/GPX/1/1/gpx.xsd">
   <trk>
@@ -5488,13 +5535,20 @@ if (viewerFollowing) {
     <trkseg>
 `;
 
-      pathCoords.forEach(pt => {
+      pathCoords.forEach((pt, index) => {
         const ele = pt.elevation != null ? pt.elevation : 0;
         const time = pt.time || new Date(pt.timestamp).toISOString();
+        const previous = index > 0 ? pathCoords[index - 1] : null;
+        const previousMs = previous ? new Date(previous.time ?? previous.timestamp).getTime() : NaN;
+        const durationMs = new Date(time).getTime() - previousMs;
+        const verifiedMs = getVerificationMovingMilliseconds(pt, durationMs);
+        const verificationLine = verifiedMs > 0
+          ? `        <extensions><livestride:verification_moving_ms>${verifiedMs}</livestride:verification_moving_ms></extensions>\n`
+          : "";
         gpx += `      <trkpt lat="${pt.lat}" lon="${pt.lon}">
         <ele>${ele}</ele>
         <time>${time}</time>
-      </trkpt>
+${verificationLine}      </trkpt>
 `;
       });
 

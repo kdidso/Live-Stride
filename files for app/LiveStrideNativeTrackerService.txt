@@ -430,6 +430,12 @@ private void discardGpsVerification(String reason) {
     if (!discarded.isEmpty() && pointStore != null) pointStore.exportDebugCopy();
 }
 
+private void cancelPendingGpsVerificationForMatching() {
+    java.util.List<GpsReversalFilter.Point> discarded = gpsReversalFilter.cancelPendingPreservingTrusted();
+    for (GpsReversalFilter.Point point : discarded) rejectGpsFix(point.id, "map_matching_takeover");
+    pendingGpsFixes.clear();
+}
+
 private void uploadNativePoint(Location rawLocation) {
     final float accuracy = rawLocation.hasAccuracy() ? rawLocation.getAccuracy() : -1f;
     final long pointTimeMs = rawLocation.getTime() > 0
@@ -491,7 +497,8 @@ private void uploadNativePoint(Location rawLocation) {
                 "Holding raw GPS during map-matching recovery: "
                         + accuracy + " m state=" + matchResult.state
         );
-        rejectGpsFix(observationId, "map_matching_recovery");
+        rejectGpsFix(observationId, "map_matching_recovery:" + matchResult.reason);
+        publishGpsVerificationState(true, false);
         return;
     }
 
@@ -517,8 +524,13 @@ private void uploadNativePoint(Location rawLocation) {
     // Structure matching and driver mode retain their existing policy. A long gap must not
     // compare a new fix with an obsolete heading or commit an unverified old buffer.
     boolean longGap = previousPointTimeMs > 0 && pointTimeMs - previousPointTimeMs > 45_000L;
-    if (matchResult.matched || presumedDriverMode || longGap) {
-        discardGpsVerification(matchResult.matched ? "map_matching_takeover" : longGap ? "long_gps_gap" : "driver_mode");
+    if (matchResult.matched || presumedDriverMode || longGap || matchResult.anchorOnResume) {
+        if (matchResult.matched && !presumedDriverMode && !longGap) {
+            cancelPendingGpsVerificationForMatching();
+        } else {
+            discardGpsVerification(matchResult.anchorOnResume ? "verified_matcher_reanchor"
+                    : longGap ? "long_gps_gap" : "driver_mode");
+        }
         acceptNativePoint(current, "existing_tracking_policy");
         publishGpsVerificationState(false, false);
         return;
@@ -580,7 +592,12 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
         boolean resumeAfterLongGap = elapsedSeconds > RESUME_ANCHOR_GAP_SECONDS
                 && segmentMeters > RESUME_ANCHOR_MIN_DISTANCE_METERS;
 
-        if (resumeAfterLongGap) {
+        if (matchResult.anchorOnResume) {
+            segmentMeters = 0.0;
+            stationaryHoldActive = false;
+            anchoredResumePoint = true;
+            anchorReason = matchResult.reason;
+        } else if (resumeAfterLongGap) {
             segmentMeters = 0.0;
             System.out.println(
                     "LiveStride native anchored resume after long GPS gap: "
@@ -726,7 +743,8 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
                 note = note + "; anchored resume from held coordinate during " + finalAnchorReason;
             }
             body.put("app_state", appState);
-            body.put("note", note + "; gps_filter=" + verificationResolution);
+            body.put("note", note + "; gps_filter=" + verificationResolution
+                    + "; matcher=" + matchResult.reason);
 
 
             // Phase SQLite-1:
@@ -840,7 +858,8 @@ private void saveMatchingState(BridgeTunnelMatcher.State state) {
 }
 
 private boolean matcherIsHoldingForCleanerGps(BridgeTunnelMatcher.State state) {
-    return state == BridgeTunnelMatcher.State.RAW_RECOVERY;
+    return state == BridgeTunnelMatcher.State.RAW_RECOVERY
+            || state == BridgeTunnelMatcher.State.ENTRY_VERIFYING;
 }
 
 private void refreshMapMatchingContext() {

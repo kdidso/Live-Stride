@@ -1489,6 +1489,15 @@ function isProfileMovingInterval(previous, current) {
   return derivedSpeed >= MIN_MOVING_SPEED_MPS && derivedSpeed <= MAX_MOVING_SPEED_MPS;
 }
 
+function formatPartialMileSplit(distanceMi) {
+  // Partial miles must not be labeled as a completed mile after rounding.
+  for (let digits = 2; digits <= 8; digits += 1) {
+    const label = distanceMi.toFixed(digits);
+    if (Number(label) < 1 && Number(label) > 0) return label;
+  }
+  return String(distanceMi);
+}
+
 function calculateProfileSplits(routeData) {
   const samples = createProfilePaceSamples(routeData)
     .filter(sample => Number.isFinite(sample.distanceMi))
@@ -1547,9 +1556,9 @@ function calculateProfileSplits(routeData) {
     const elevationChangeFt = Number.isFinite(startSample?.elevationFt) && Number.isFinite(endSample?.elevationFt)
       ? endSample.elevationFt - startSample.elevationFt
       : null;
-    const label = splitDistanceMi >= 0.995
+    const label = splitDistanceMi >= 1
       ? String(index + 1)
-      : formatProfileChartDistance(splitDistanceMi, totalDistanceMi);
+      : formatPartialMileSplit(splitDistanceMi);
     splits.push({
       label,
       segmentStartMi: startMi,

@@ -28,7 +28,6 @@ final class BridgeTunnelMatcher {
     static final double BACKWARD_PROGRESS_TOLERANCE_METERS = 8.0;
     static final long JUNCTION_HOLD_MS = 5_000L;
     static final long CONNECTED_RECOVERY_MIN_MS = 5_000L;
-    static final long CONNECTED_RECOVERY_OUTLIER_PROTECTION_MS = 12_000L;
     static final long NO_EXIT_RELAXED_HANDOFF_MS = 10_000L;
     static final long DIRECTION_MIN_OBSERVATION_MS = 2_000L;
     static final double DIRECTION_MIN_MOVEMENT_METERS = 3.0;
@@ -46,13 +45,18 @@ final class BridgeTunnelMatcher {
     static final double FALSE_MATCH_ESCAPE_DISTANCE_METERS = 12.0;
     static final double FALSE_MATCH_ESCAPE_MIN_MOVEMENT_METERS = 4.0;
     static final long FALSE_MATCH_ESCAPE_CONFIRMATION_MS = 3_000L;
+    static final long TENTATIVE_ENTRY_MIN_MS = 1_500L;
+    static final long TENTATIVE_ENTRY_TIMEOUT_MS = 4_000L;
+    static final long VERIFIED_RECOVERY_PREDICTION_LIMIT_MS = 12_000L;
+    static final long ALTERNATIVE_COURSE_CONFIRMATION_MS = 3_000L;
 
     enum State {
         NORMAL,
         STRUCTURE,
         JUNCTION_HOLD,
         RECOVERY,
-        RAW_RECOVERY
+        RAW_RECOVERY,
+        ENTRY_VERIFYING
     }
 
     static final class Point {
@@ -98,12 +102,21 @@ final class BridgeTunnelMatcher {
         final boolean matched;
         final State state;
         final String structureType;
+        final boolean anchorOnResume;
+        final String reason;
 
         Result(Point point, boolean matched, State state, String structureType) {
+            this(point, matched, state, structureType, false, "existing_policy");
+        }
+
+        Result(Point point, boolean matched, State state, String structureType,
+                boolean anchorOnResume, String reason) {
             this.point = point;
             this.matched = matched;
             this.state = state;
             this.structureType = structureType;
+            this.anchorOnResume = anchorOnResume;
+            this.reason = reason;
         }
     }
 
@@ -219,6 +232,18 @@ final class BridgeTunnelMatcher {
     private boolean presumedDriverMode = false;
     private long falseMatchDivergenceStartedAtMs;
     private Point falseMatchDivergenceStartPoint;
+    private long structureEntryStartedAtMs;
+    private Point structureEntryRawAnchor;
+    private long structureEntryRawAnchorTimeMs;
+    private Point tentativeEntryStartPoint;
+    private final List<Observation> recoveryObservations = new ArrayList<>();
+    private boolean recoveringFalseMatch;
+    private Point recoveryTrustedAnchor;
+    private long recoveryTrustedAnchorTimeMs;
+    private List<Point> recoveryRoute = Collections.emptyList();
+    private double recoveryProgressMeters;
+    private boolean recoveryAtUnresolvedJunction;
+    private boolean recoveryHasUnmappedExit;
 
     void reset() {
         state = State.NORMAL;
@@ -259,12 +284,7 @@ final class BridgeTunnelMatcher {
         updateEntryObservations(rawPoint, timeMs);
 
         if (state == State.RAW_RECOVERY) {
-            Result result = new Result(rawPoint, false, state, "");
-            if (rawHandoffIsStrong(accuracyMeters)) {
-                state = State.NORMAL;
-                result = new Result(rawPoint, false, state, "");
-                clearActiveRoute();
-            }
+            Result result = processVerifiedRawRecovery(rawPoint, accuracyMeters, timeMs, accuracyIsGood);
             lastRawPoint = rawPoint;
             lastRawTimeMs = timeMs;
             return result;
@@ -275,15 +295,20 @@ final class BridgeTunnelMatcher {
         }
 
         Result result;
-        if (state == State.NORMAL) {
+        if (state == State.ENTRY_VERIFYING) {
+            result = processTentativeEntry(rawPoint, accuracyMeters, timeMs, accuracyIsGood);
+        } else if (state == State.NORMAL) {
             result = new Result(rawPoint, false, state, "");
         } else if (state == State.JUNCTION_HOLD) {
             result = processJunctionHold(rawPoint, accuracyMeters, timeMs, accuracyIsGood);
         } else {
             if (shouldEscapeFalseMatch(rawPoint, timeMs, accuracyIsGood)) {
-                state = State.NORMAL;
-                result = new Result(rawPoint, false, state, "");
-                clearActiveRoute();
+                if (rawTransitionIsContinuous(rawPoint, timeMs, false)) {
+                    result = releaseRaw(rawPoint, false, "false_match_escape_verified");
+                } else {
+                    beginVerifiedRawRecovery(timeMs, true);
+                    result = new Result(rawPoint, false, state, "", false, "false_match_escape_pending");
+                }
                 lastRawPoint = rawPoint;
                 lastRawTimeMs = timeMs;
                 return result;
@@ -363,11 +388,9 @@ final class BridgeTunnelMatcher {
         lastMatchedTimeMs = timeMs;
         directionObservations.add(new Observation(rawPoint, timeMs));
 
-        if (rawHandoffIsStrong(accuracyMeters)) {
-            state = State.NORMAL;
-            Result result = new Result(rawPoint, false, state, "");
-            clearActiveRoute();
-            return result;
+        if (accuracyIsGood && rawHandoffIsStrong(accuracyMeters)
+                && rawTransitionIsContinuous(rawPoint, timeMs, true)) {
+            return releaseRaw(rawPoint, false, "junction_handoff_verified");
         }
 
         Branch selected = selectBranchFromObservedDirection();
@@ -385,8 +408,8 @@ final class BridgeTunnelMatcher {
             return new Result(junction, true, state, structureType);
         }
 
-        state = State.RAW_RECOVERY;
-        return new Result(rawPoint, false, state, "");
+        beginVerifiedRawRecovery(timeMs, false);
+        return new Result(rawPoint, false, state, "", false, "junction_handoff_pending");
     }
 
     private Result processRecovery(
@@ -396,21 +419,23 @@ final class BridgeTunnelMatcher {
             boolean accuracyIsGood,
             Point predicted
     ) {
-        if (rawHandoffIsStrong(accuracyMeters)
-                && connectedRecoveryHandoffIsAllowed(rawPoint, timeMs)) {
-            state = State.NORMAL;
-            Result result = new Result(rawPoint, false, state, "");
-            clearActiveRoute();
-            return result;
+        if (accuracyIsGood && rawHandoffIsStrong(accuracyMeters)
+                && connectedRecoveryHandoffIsAllowed(rawPoint, timeMs)
+                && rawTransitionIsContinuous(rawPoint, timeMs, true)) {
+            return releaseRaw(rawPoint, false, "exit_handoff_verified");
         }
 
-        if (noExitRelaxedHandoffIsAllowed(accuracyMeters, timeMs)) {
-            state = State.NORMAL;
-            Result result = new Result(rawPoint, false, state, "");
-            clearActiveRoute();
-            return result;
+        if (accuracyIsGood && noExitRelaxedHandoffIsAllowed(accuracyMeters, timeMs)
+                && rawTransitionIsContinuous(rawPoint, timeMs, true)) {
+            return releaseRaw(rawPoint, false, "exit_relaxed_handoff_verified");
         }
 
+        long startedAt = connectedRecoveryStartedAtMs > 0L
+                ? connectedRecoveryStartedAtMs : noExitRecoveryStartedAtMs;
+        if (startedAt > 0L && timeMs - startedAt >= VERIFIED_RECOVERY_PREDICTION_LIMIT_MS) {
+            beginVerifiedRawRecovery(timeMs, false);
+            return new Result(rawPoint, false, state, "", false, "exit_handoff_pending");
+        }
         return new Result(predicted, true, state, structureType);
     }
 
@@ -518,7 +543,18 @@ final class BridgeTunnelMatcher {
         structureType = best.brunnel;
         activeStructureId = best.id;
         activeStructureIds = structurePath.segmentIds;
-        state = State.STRUCTURE;
+        structureEntryStartedAtMs = timeMs;
+        structureEntryRawAnchor = lastRawPoint;
+        structureEntryRawAnchorTimeMs = lastRawTimeMs;
+        tentativeEntryStartPoint = rawPoint;
+        // The existing approach window is already a tentative entry phase when
+        // it provides sustained independent evidence. Otherwise wait briefly
+        // before publishing any predicted tunnel movement.
+        boolean supportedApproach = entryEvidence.observationSpanMs >= TENTATIVE_ENTRY_MIN_MS
+                || (entryEvidence.strongApproachTrend && entryEvidence.headingError <= 35.0)
+                || (entryEvidence.recentAlignedStructureStep && entryEvidence.headingError <= 25.0);
+        state = !presumedDriverMode && "tunnel".equals(structureType) && !supportedApproach
+                ? State.ENTRY_VERIFYING : State.STRUCTURE;
     }
 
     private List<Branch> findExitBranches(Point junction) {
@@ -799,6 +835,18 @@ final class BridgeTunnelMatcher {
         structureType = "";
         activeStructureId = "";
         activeStructureIds = new HashSet<>();
+        structureEntryStartedAtMs = 0L;
+        structureEntryRawAnchor = null;
+        structureEntryRawAnchorTimeMs = 0L;
+        tentativeEntryStartPoint = null;
+        recoveryObservations.clear();
+        recoveringFalseMatch = false;
+        recoveryTrustedAnchor = null;
+        recoveryTrustedAnchorTimeMs = 0L;
+        recoveryRoute = Collections.emptyList();
+        recoveryProgressMeters = 0.0;
+        recoveryAtUnresolvedJunction = false;
+        recoveryHasUnmappedExit = false;
         resetFalseMatchDivergence();
     }
 
@@ -808,6 +856,13 @@ final class BridgeTunnelMatcher {
             boolean accuracyIsGood
     ) {
         if (!accuracyIsGood || activeRoute.size() < 2) {
+            resetFalseMatchDivergence();
+            return false;
+        }
+        if (state == State.RECOVERY && structureEntryStartedAtMs > 0L
+                && timeMs - structureEntryStartedAtMs > 5_000L) {
+            // At a supported exit, displaced fixes are handoff evidence, not
+            // retroactive proof that the completed tunnel entry was false.
             resetFalseMatchDivergence();
             return false;
         }
@@ -824,9 +879,199 @@ final class BridgeTunnelMatcher {
             return false;
         }
 
-        return timeMs - falseMatchDivergenceStartedAtMs >= FALSE_MATCH_ESCAPE_CONFIRMATION_MS
+        boolean sustained = timeMs - falseMatchDivergenceStartedAtMs >= FALSE_MATCH_ESCAPE_CONFIRMATION_MS
                 && distanceMeters(falseMatchDivergenceStartPoint, rawPoint)
                 >= FALSE_MATCH_ESCAPE_MIN_MOVEMENT_METERS;
+        if (!sustained) return false;
+
+        if (state == State.STRUCTURE && "tunnel".equals(structureType)
+                && (structureEntryStartedAtMs <= 0L || timeMs - structureEntryStartedAtMs > 5_000L)) {
+            Point before = pointAlong(activeRoute, Math.max(0.0, progressMeters - 3.0));
+            Point after = pointAlong(activeRoute, Math.min(activeRouteLengthMeters, progressMeters + 3.0));
+            double error = angleDifference(bearingDegrees(before, after),
+                    bearingDegrees(falseMatchDivergenceStartPoint, rawPoint));
+            // A displaced GPS track that still follows the tunnel direction is
+            // not evidence that the supported entry was wrong. In particular,
+            // a lagging track must not pull the runner backwards inside a tunnel.
+            if (error <= DIRECTION_MAX_ERROR_DEGREES) return false;
+            if (rawProjection.alongMeters < progressMeters - BACKWARD_PROGRESS_TOLERANCE_METERS
+                    && error < ENTRY_SHARP_REVERSAL_DEGREES) return false;
+        }
+        return true;
+    }
+
+    private Result processTentativeEntry(Point rawPoint, float accuracyMeters,
+            long timeMs, boolean accuracyIsGood) {
+        Projection projection = project(activeRoute, rawPoint);
+        long age = timeMs - structureEntryStartedAtMs;
+        boolean corroborated = accuracyIsGood && accuracyMeters >= 0.0f
+                && projection.distanceMeters <= STRICT_ENTRY_RADIUS_METERS
+                && distanceMeters(tentativeEntryStartPoint, rawPoint) >= ENTRY_MIN_MOVEMENT_METERS
+                && projection.alongMeters >= progressMeters
+                && angleDifference(bearingDegrees(tentativeEntryStartPoint, rawPoint),
+                        bearingDegrees(pointAlong(activeRoute, progressMeters),
+                                pointAlong(activeRoute, Math.min(activeRouteLengthMeters, progressMeters + 5.0))))
+                        <= ENTRY_MAX_LOOSE_HEADING_ERROR_DEGREES;
+        if (age >= TENTATIVE_ENTRY_MIN_MS && corroborated) {
+            progressMeters = projection.alongMeters;
+            lastMatchedTimeMs = timeMs;
+            state = State.STRUCTURE;
+            Point accepted = pointAlong(activeRoute, progressMeters);
+            lastMatchedOutputPoint = accepted;
+            lastMatchedOutputTimeMs = timeMs;
+            return new Result(accepted, true, state, structureType, false, "entry_confirmed");
+        }
+        if ((accuracyIsGood && projection.distanceMeters > ENTRY_RADIUS_METERS)
+                || age >= TENTATIVE_ENTRY_TIMEOUT_MS) {
+            // No predicted point has been published during tentative entry.
+            // Releasing it may therefore use the trusted pre-entry raw anchor.
+            if (accuracyIsGood && pointTransitionIsContinuous(structureEntryRawAnchor,
+                    structureEntryRawAnchorTimeMs, rawPoint, timeMs)) {
+                return releaseRaw(rawPoint, false, "tentative_entry_cancelled");
+            }
+            beginVerifiedRawRecovery(timeMs, true);
+            return new Result(rawPoint, false, state, "", false, "tentative_entry_unresolved");
+        }
+        return new Result(rawPoint, false, state, "", false, "entry_verifying");
+    }
+
+    private boolean pointTransitionIsContinuous(Point anchor, long anchorTimeMs,
+            Point rawPoint, long timeMs) {
+        if (anchor == null || anchorTimeMs <= 0L) return false;
+        double seconds = (timeMs - anchorTimeMs) / 1000.0;
+        if (seconds <= 0.0) return false;
+        double maximumSpeed = presumedDriverMode
+                ? DRIVING_SPEED_SAMPLE_MAX_MPS : MAX_EARLY_HANDOFF_SPEED_MPS;
+        return distanceMeters(anchor, rawPoint) <= maximumSpeed * seconds;
+    }
+
+    private boolean rawTransitionIsContinuous(Point rawPoint, long timeMs, boolean requireRoute) {
+        if (!pointTransitionIsContinuous(lastMatchedOutputPoint, lastMatchedOutputTimeMs, rawPoint, timeMs)) {
+            return false;
+        }
+        if (!requireRoute) return true;
+        Projection projection = project(activeRoute, rawPoint);
+        return projection.alongMeters >= progressMeters - BACKWARD_PROGRESS_TOLERANCE_METERS
+                && projection.distanceMeters <= ENTRY_RADIUS_METERS;
+    }
+
+    private Result releaseRaw(Point rawPoint, boolean anchorOnResume, String reason) {
+        state = State.NORMAL;
+        clearActiveRoute();
+        return new Result(rawPoint, false, state, "", anchorOnResume, reason);
+    }
+
+    private void beginVerifiedRawRecovery(long timeMs, boolean falseMatch) {
+        recoveringFalseMatch = falseMatch;
+        recoveryTrustedAnchor = falseMatch && structureEntryRawAnchor != null
+                ? structureEntryRawAnchor : lastMatchedOutputPoint;
+        recoveryTrustedAnchorTimeMs = falseMatch && structureEntryRawAnchorTimeMs > 0L
+                ? structureEntryRawAnchorTimeMs : lastMatchedOutputTimeMs;
+        recoveryRoute = new ArrayList<>(activeRoute);
+        recoveryProgressMeters = progressMeters;
+        recoveryAtUnresolvedJunction = state == State.JUNCTION_HOLD;
+        recoveryHasUnmappedExit = state == State.RECOVERY && noExitRecoveryStartedAtMs > 0L;
+        recoveryObservations.clear();
+        state = State.RAW_RECOVERY;
+    }
+
+    private Result processVerifiedRawRecovery(Point rawPoint, float accuracyMeters,
+            long timeMs, boolean accuracyIsGood) {
+        if (!accuracyIsGood || accuracyMeters < 0.0f
+                || accuracyMeters > RELAXED_RAW_HANDOFF_ACCURACY_METERS) {
+            recoveryObservations.clear();
+            return new Result(rawPoint, false, state, "", false, "raw_handoff_untrusted_accuracy");
+        }
+        recoveryObservations.add(new Observation(rawPoint, timeMs));
+        while (recoveryObservations.size() > 1
+                && timeMs - recoveryObservations.get(0).timeMs > 6_000L) {
+            recoveryObservations.remove(0);
+        }
+        boolean continuous = pointTransitionIsContinuous(recoveryTrustedAnchor,
+                recoveryTrustedAnchorTimeMs, rawPoint, timeMs);
+        boolean followsRoute = recoveryFollowsKnownRoute(rawPoint, accuracyMeters);
+        boolean coherent = coherentRecoveryCourse();
+        if (!recoveringFalseMatch && rawHandoffIsStrong(accuracyMeters) && continuous && followsRoute) {
+            return releaseRaw(rawPoint, false, "raw_handoff_verified");
+        }
+        if (continuous && coherent && (recoveringFalseMatch || followsRoute)) {
+            // A genuinely wrong match can be cancelled, but the speculative
+            // matched-to-raw connector must not be counted as real distance.
+            return releaseRaw(rawPoint, recoveringFalseMatch,
+                    recoveringFalseMatch ? "false_match_alternative_verified" : "raw_handoff_course_verified");
+        }
+        if (continuous && coherent && recoveryHasUnmappedExit
+                && followsUnmappedExit(rawPoint)) {
+            // Outside the mapped network, restore a verified course as a new
+            // anchor rather than inventing a straight distance across the gap.
+            return releaseRaw(rawPoint, true, "unmapped_exit_course_verified");
+        }
+        if (continuous && coherent && !recoveringFalseMatch && verifiesRecoveryTurn(rawPoint, accuracyMeters)) {
+            return releaseRaw(rawPoint, true, "exit_return_course_verified");
+        }
+        return new Result(rawPoint, false, state, "", false, "raw_handoff_verifying");
+    }
+
+    private boolean recoveryFollowsKnownRoute(Point rawPoint, float accuracyMeters) {
+        if (recoveryRoute.size() < 2) return false;
+        double corridor = Math.max(ENTRY_RADIUS_METERS, accuracyMeters);
+        Projection projection = project(recoveryRoute, rawPoint);
+        if (projection.distanceMeters <= corridor
+                && projection.alongMeters >= recoveryProgressMeters - BACKWARD_PROGRESS_TOLERANCE_METERS) {
+            return true;
+        }
+        if (recoveryAtUnresolvedJunction && !structureRoute.isEmpty()) {
+            Point junction = structureRoute.get(structureRoute.size() - 1);
+            for (Branch branch : findExitBranches(junction)) {
+                if (project(branch.points, rawPoint).distanceMeters <= corridor) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean followsUnmappedExit(Point rawPoint) {
+        if (recoveryRoute.size() < 2) return false;
+        Point endpoint = recoveryRoute.get(recoveryRoute.size() - 1);
+        Point before = pointAlong(recoveryRoute,
+                Math.max(0.0, polylineLength(recoveryRoute) - 5.0));
+        Observation first = recoveryObservations.get(0);
+        Observation last = recoveryObservations.get(recoveryObservations.size() - 1);
+        double exitHeading = bearingDegrees(before, endpoint);
+        return angleDifference(exitHeading, bearingDegrees(endpoint, rawPoint)) <= DIRECTION_MAX_ERROR_DEGREES
+                && angleDifference(exitHeading, bearingDegrees(first.point, last.point))
+                <= DIRECTION_MAX_ERROR_DEGREES;
+    }
+
+    private boolean verifiesRecoveryTurn(Point rawPoint, float accuracyMeters) {
+        if (recoveryRoute.size() < 2) return false;
+        Projection projection = project(recoveryRoute, rawPoint);
+        if (projection.distanceMeters > Math.max(ENTRY_RADIUS_METERS, accuracyMeters)) return false;
+        Point before = pointAlong(recoveryRoute, Math.max(0.0, projection.alongMeters - 5.0));
+        Point after = pointAlong(recoveryRoute,
+                Math.min(polylineLength(recoveryRoute), projection.alongMeters + 5.0));
+        Observation first = recoveryObservations.get(0);
+        Observation last = recoveryObservations.get(recoveryObservations.size() - 1);
+        return angleDifference(bearingDegrees(before, after), bearingDegrees(first.point, last.point))
+                >= ENTRY_SHARP_REVERSAL_DEGREES;
+    }
+
+    private boolean coherentRecoveryCourse() {
+        if (recoveryObservations.size() < 3) return false;
+        Observation first = recoveryObservations.get(0);
+        Observation last = recoveryObservations.get(recoveryObservations.size() - 1);
+        if (last.timeMs - first.timeMs < ALTERNATIVE_COURSE_CONFIRMATION_MS
+                || distanceMeters(first.point, last.point) < FALSE_MATCH_ESCAPE_MIN_MOVEMENT_METERS) return false;
+        for (int i = 1; i < recoveryObservations.size(); i++) {
+            Observation a = recoveryObservations.get(i - 1), b = recoveryObservations.get(i);
+            if (b.timeMs - a.timeMs > 2_500L
+                    || !pointTransitionIsContinuous(a.point, a.timeMs, b.point, b.timeMs)) return false;
+            if (i > 1) {
+                Observation previous = recoveryObservations.get(i - 2);
+                if (angleDifference(bearingDegrees(previous.point, a.point),
+                        bearingDegrees(a.point, b.point)) > DIRECTION_MAX_ERROR_DEGREES) return false;
+            }
+        }
+        return true;
     }
 
     private void resetFalseMatchDivergence() {
@@ -855,8 +1100,7 @@ final class BridgeTunnelMatcher {
 
         long recoveryAgeMs = timeMs - connectedRecoveryStartedAtMs;
         if (recoveryAgeMs < CONNECTED_RECOVERY_MIN_MS) return false;
-        if (recoveryAgeMs >= CONNECTED_RECOVERY_OUTLIER_PROTECTION_MS) return true;
-
+        // Elapsed time alone must never authorize a teleport or backwards handoff.
         return !earlyHandoffLooksLikeOutlier(rawPoint, timeMs);
     }
 

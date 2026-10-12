@@ -652,7 +652,7 @@
         summary,
         samples: samples
           .map((sample, index) => {
-            const distanceM = Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
+            const distanceM = sample.distance_m != null && sample.distance_m !== "" && Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
             return {
               sequence_num: Number.isFinite(Number(sample.sequence_num)) ? Number(sample.sequence_num) : index + 1,
               recorded_at: sample.recorded_at || null,
@@ -681,37 +681,76 @@
       const result = document.createElement("strong"); result.textContent = value;
       node.append(caption, result); return node;
     }
-    async function profileRoute(runId) {
-      if (browserProfileRouteCache.has(runId)) return browserProfileRouteCache.get(runId);
-      const request = (async () => {
-        const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", { body: { action: "get-gpx", savedRunId: runId } });
-        if (error) {
-          let message = error.message || "Route unavailable";
-          try {
-            const details = await error.context?.clone?.().json();
-            if (details?.error) message = details.error;
-          } catch (_) {}
-          throw new Error(message);
-        }
-        if (!data?.gpx) throw new Error(data?.error || "Route unavailable");
-        const xml = new DOMParser().parseFromString(data.gpx, "application/xml");
-        const points = Array.from(xml.querySelectorAll("trkpt")).map(point => {
-          const elevationText = point.querySelector("ele")?.textContent;
-          const timeText = point.querySelector("time")?.textContent;
-          const elevation = elevationText == null ? null : Number(elevationText);
-          const time = timeText ? Date.parse(timeText) : null;
-          return { lat: Number(point.getAttribute("lat")), lon: Number(point.getAttribute("lon")), elevation: Number.isFinite(elevation) ? elevation : null, time: Number.isFinite(time) ? time : null };
-        }).filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
-        if (points.length < 2) throw new Error("Route unavailable");
-        return {
-          points,
-          analysis: analyzeBrowserProfilePoints(points),
-          storedAnalysis: normalizeBrowserProfileRunAnalysis(data.analysis)
-        };
-      })();
-      browserProfileRouteCache.set(runId, request);
-      try { return await request; } catch (error) { browserProfileRouteCache.delete(runId); throw error; }
+    async function profileRoute(runId, run = null) {
+  if (browserProfileRouteCache.has(runId)) return browserProfileRouteCache.get(runId);
+  const request = (async () => {
+    const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
+      body: { action: "get-gpx", savedRunId: runId }
+    });
+    if (error) {
+      let message = error.message || "Route unavailable";
+      try {
+        const details = await error.context?.clone?.().json();
+        if (details?.error) message = details.error;
+      } catch (_) {}
+      throw new Error(message);
     }
+    if (!data?.gpx) throw new Error(data?.error || "Route unavailable");
+    const xml = new DOMParser().parseFromString(data.gpx, "application/xml");
+    if (xml.querySelector("parsererror")) throw new Error("The saved route could not be read.");
+    const points = Array.from(xml.querySelectorAll("trkpt"))
+      .map(point => {
+        const elevationText = point.querySelector("ele")?.textContent;
+        const timeText = point.querySelector("time")?.textContent;
+        const elevation = elevationText == null ? null : Number(elevationText);
+        const time = timeText ? Date.parse(timeText) : null;
+        return {
+          lat: Number(point.getAttribute("lat")),
+          lon: Number(point.getAttribute("lon")),
+          elevation: Number.isFinite(elevation) ? elevation : null,
+          time: Number.isFinite(time) ? time : null
+        };
+      })
+      .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+    if (points.length < 2) throw new Error("This activity has too few route points.");
+    let storedAnalysis = normalizeBrowserProfileRunAnalysis(data.analysis);
+    let routePoints = points;
+    if (run?.source === "broadcast" && isUuid(run?.source_run_id)) {
+      const broadcastPoints = await getBroadcastRunAnalysisPoints(run.source_run_id);
+      if (broadcastPoints.length >= 2) {
+        const metadata = {
+          ...run,
+          source: "broadcast",
+          source_run_id: run.source_run_id
+        };
+        storedAnalysis = normalizeBrowserProfileRunAnalysis(buildProfileRunAnalysis(broadcastPoints, metadata, {
+          source: "broadcast",
+          sourceRunId: run.source_run_id,
+          preferMetadataDistance: true
+        }));
+        routePoints = broadcastPoints.map(point => ({
+          lat: point.lat,
+          lon: point.lon,
+          elevation: point.elevation,
+          time: Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : Date.parse(point.time)
+        }));
+      }
+    }
+    return {
+      points: routePoints,
+      analysis: analyzeBrowserProfilePoints(routePoints),
+      storedAnalysis,
+      run
+    };
+  })();
+  browserProfileRouteCache.set(runId, request);
+  try {
+    return await request;
+  } catch (error) {
+    browserProfileRouteCache.delete(runId);
+    throw error;
+  }
+}
     function analyzeBrowserProfilePoints(points) {
       const ELEVATION_GAIN_THRESHOLD_METERS = 5;
       const MOVING_MIN_DISTANCE_METERS = 1;
@@ -801,7 +840,9 @@
       });
     }
     function createBrowserProfileElevationChart(routeData) {
-      const samples = createBrowserProfileElevationSamples(routeData.points);
+      const samples = createBrowserProfilePaceSamples(routeData)
+    .filter(sample => Number.isFinite(sample.elevationFt))
+    .map(sample => ({ ...sample, elevationM: sample.elevationFt / 3.28084 }));
       if (samples.length < 2) {
         const unavailable = document.createElement("div");
         unavailable.className = "route-unavailable";
@@ -820,7 +861,7 @@
       const yTickX = padding.left - (isMobileElevationChart ? 18 : 11);
       const xTickY = isMobileElevationChart ? 50 : 42;
       const xAxisLabelY = isMobileElevationChart ? 78 : 68;
-      const maxDistance = Math.max(...samples.map(sample => sample.distanceMi), 0.01);
+      const maxDistance = Math.max(metersToMiles(getBrowserProfileSummaryValue(routeData, "distance_m")), ...samples.map(sample => sample.distanceMi), 0.01);
       const smoothedMeters = smoothBrowserProfileElevationSamples(samples);
       const chartSamples = samples.map((sample, index) => ({
         distanceMi: sample.distanceMi,
@@ -915,19 +956,25 @@
       return section;
     }
     function getBrowserProfileSummaryValue(routeData, key) {
-      const stored = Number(routeData?.storedAnalysis?.summary?.[key]);
-      if (Number.isFinite(stored)) return stored;
-      const run = routeData?.run;
-      if (key === "distance_m") return Number(run?.distance_m || routeData?.analysis?.totalDistanceM || 0);
-      if (key === "elapsed_time_ms") return Number(run?.elapsed_time_ms || 0);
-      if (key === "moving_time_ms") return Number(routeData?.analysis?.movingTimeMs || run?.moving_time_ms || 0);
-      if (key === "average_pace_sec_per_mile") {
-        const miles = metersToMiles(getBrowserProfileSummaryValue(routeData, "distance_m"));
-        const elapsedMs = getBrowserProfileSummaryValue(routeData, "elapsed_time_ms");
-        return miles > 0 && elapsedMs > 0 ? elapsedMs / 1000 / miles : null;
-      }
-      return null;
-    }
+  const run = routeData?.run;
+  const finalDistance = run?.distance_m;
+  if (key === "distance_m" && finalDistance != null && finalDistance !== ""
+      && Number.isFinite(Number(finalDistance)) && Number(finalDistance) >= 0) {
+    return Number(finalDistance);
+  }
+  const storedValue = routeData?.storedAnalysis?.summary?.[key];
+  const stored = storedValue == null || storedValue === "" ? NaN : Number(storedValue);
+  if (Number.isFinite(stored)) return stored;
+  if (key === "distance_m") return Number(run?.distance_m || routeData?.analysis?.totalDistanceM || 0);
+  if (key === "elapsed_time_ms") return Number(run?.elapsed_time_ms || 0);
+  if (key === "moving_time_ms") return Number(routeData?.analysis?.movingTimeMs || run?.moving_time_ms || 0);
+  if (key === "average_pace_sec_per_mile") {
+    const miles = metersToMiles(getBrowserProfileSummaryValue(routeData, "distance_m"));
+    const elapsedMs = getBrowserProfileSummaryValue(routeData, "elapsed_time_ms");
+    return miles > 0 && elapsedMs > 0 ? elapsedMs / 1000 / miles : null;
+  }
+  return null;
+}
     function createBrowserProfilePaceSamples(routeData) {
       const storedSamples = routeData?.storedAnalysis?.samples || [];
       const sourceSamples = storedSamples.length >= 2
@@ -940,21 +987,21 @@
             recorded_at: Number.isFinite(point.time) ? new Date(point.time).toISOString() : null
           }));
       let distanceM = 0;
-      let lastUsableDistanceM = 0;
-      return sourceSamples.map((sample, index) => {
+      
+      const samples = sourceSamples.map((sample, index) => {
         const previous = index > 0 ? sourceSamples[index - 1] : null;
         const segmentDistanceM = Number.isFinite(Number(sample.segment_distance_m)) && Number(sample.segment_distance_m) >= 0
           ? Number(sample.segment_distance_m)
           : previous
           ? haversineDistance([previous.lon, previous.lat], [sample.lon, sample.lat])
           : 0;
-        const storedDistanceM = Number.isFinite(Number(sample.distance_m)) ? Number(sample.distance_m) : null;
-        if (storedDistanceM != null && (index === 0 || storedDistanceM > lastUsableDistanceM || segmentDistanceM === 0)) {
+        const storedDistanceM = sample.distance_m != null && sample.distance_m !== "" && Number.isFinite(Number(sample.distance_m)) && Number(sample.distance_m) >= 0 ? Number(sample.distance_m) : null;
+        if (storedDistanceM != null) {
           distanceM = Math.max(storedDistanceM, distanceM);
         } else {
           distanceM += segmentDistanceM;
         }
-        lastUsableDistanceM = distanceM;
+        
         const timestamp = sample.recorded_at ? Date.parse(sample.recorded_at) : null;
         const previousTimestamp = previous?.recorded_at ? Date.parse(previous.recorded_at) : null;
         const elapsedSec = Number.isFinite(Number(sample.segment_elapsed_sec)) && Number(sample.segment_elapsed_sec) > 0
@@ -970,7 +1017,7 @@
           : null;
         return {
           distanceMi: metersToMiles(distanceM),
-          elevationFt: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) * 3.28084 : null,
+          elevationFt: sample.elevation_m != null && Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) * 3.28084 : null,
           paceSecPerMile: Number.isFinite(pace) ? pace : null,
           recordedAt: sample.recorded_at || null,
           elapsedSec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null,
@@ -981,6 +1028,15 @@
           isHeld: Boolean(sample.is_held || sample.held || sample.is_hold || sample.was_held || sample.hold)
         };
       }).filter(sample => Number.isFinite(sample.distanceMi));
+  // Older archives and GPX-only fallbacks can have a different computed length.
+  // Align chart distances with the saved final total without changing route coordinates.
+  const finalMiles = metersToMiles(getBrowserProfileSummaryValue(routeData, "distance_m"));
+  const sampledMiles = samples[samples.length - 1]?.distanceMi;
+  if (Number.isFinite(finalMiles) && finalMiles >= 0 && sampledMiles > 0) {
+    const scale = finalMiles / sampledMiles;
+    return samples.map(sample => ({ ...sample, distanceMi: sample.distanceMi * scale }));
+  }
+  return samples;
     }
     function browserProfilePercentile(values, fraction) {
       const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
@@ -1629,7 +1685,7 @@
     }
     async function hydrateBrowserProfileRoute(container, run, detailed = false, shouldRender = null) {
       try {
-        const routeData = await profileRoute(run.id);
+        const routeData = await profileRoute(run.id, run);
         if (shouldRender && !shouldRender()) return routeData;
         destroyBrowserProfileRouteMap(container);
         const routeMap = createBrowserProfileRouteMap(container, routeData.points, detailed);
@@ -1650,7 +1706,7 @@
     }
     function applyBrowserProfileRouteStats(run, stats, routeData) {
       if (!run || !stats || !routeData?.analysis) return;
-      const routeDistanceM = routeData.analysis.totalDistanceM || Number(run.distance_m || 0);
+      const routeDistanceM = getBrowserProfileSummaryValue(routeData, "distance_m") ?? 0;
       const routeMiles = metersToMiles(routeDistanceM);
       if (routeMiles > 0) {
         updateBrowserProfileStatValue(stats.distanceStat, `${routeMiles.toFixed(2)} mi`);
@@ -1698,7 +1754,7 @@
         movingStat.querySelector("strong").textContent = movingTimeMs ? profileDuration(movingTimeMs) : "--";
         const elevationGainM = routeData.analysis.elevationGainM;
         gainStat.querySelector("strong").textContent = Number.isFinite(elevationGainM) ? `${Math.round(elevationGainM * 3.28084)} ft` : "--";
-        const routeMiles = metersToMiles(routeData.analysis.totalDistanceM || Number(run.distance_m || 0));
+        const routeMiles = metersToMiles(getBrowserProfileSummaryValue(routeData, "distance_m") ?? 0);
         if (movingTimeMs && routeMiles > 0) {
           stats.append(profileStat("Moving pace", browserFormatSecondsPerMile(movingTimeMs / 1000 / routeMiles)));
         }
@@ -1740,7 +1796,7 @@
     }
     async function loadBrowserProfileActivities() {
       profileActivities.innerHTML = '<div class="profile-empty">Loading activities...</div>';
-      const { data, error } = await profilesSupabaseClient.from("saved_runs").select("id,title,source,started_at,finished_at,elapsed_time_ms,moving_time_ms,distance_m,elevation_gain_m,avg_pace_sec_per_km,avg_cadence_spm,archive_status").order("started_at", { ascending: false }).limit(50);
+      const { data, error } = await profilesSupabaseClient.from("saved_runs").select("id,title,source,source_run_id,started_at,finished_at,elapsed_time_ms,moving_time_ms,distance_m,elevation_gain_m,avg_pace_sec_per_km,avg_cadence_spm,archive_status").order("started_at", { ascending: false }).limit(50);
       profileActivities.innerHTML = "";
       if (error) { profileActivities.innerHTML = '<div class="profile-empty">Activities could not be loaded right now.</div>'; return; }
       if (!data?.length) { profileActivities.innerHTML = '<div class="profile-empty">No saved runs yet.</div>'; return; }
@@ -2247,110 +2303,123 @@
     }
 
     async function getBroadcastRunAnalysisPoints(runId) {
-      if (!isUuid(runId)) return [];
-      const { data, error } = await supabaseClient
-        .from("run_points")
-        .select("sequence_num,lat,lon,recorded_at,elevation_m,distance_m,inst_pace_min_per_mile,avg_pace_min_per_mile")
-        .eq("run_id", runId)
-        .order("sequence_num", { ascending: true });
-      if (error) {
-        console.warn("Could not load broadcast run points for profile analysis:", error);
-        return [];
-      }
-      return (data || [])
-        .map(normalizeRunPoint)
-        .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+  if (!isUuid(runId)) return [];
+  const pageSize = 1000;
+  const rows = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await supabaseClient
+      .from("run_points_native_test")
+      .select("sequence_num,lat,lon,recorded_at,elevation_m,distance_m,inst_pace_min_per_mile,avg_pace_min_per_mile,app_state,note")
+      .eq("run_id", runId)
+      .order("sequence_num", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      console.warn("Could not load broadcast run points for profile analysis:", error);
+      return [];
     }
+    rows.push(...(data || []));
+    if (!data || data.length < pageSize) break;
+  }
+  return rows
+    .filter(isDisplayableNativePoint)
+    .map(normalizeRunPoint)
+    .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon));
+}
 
-    function buildProfileRunAnalysis(pointsInput, metadata = {}) {
-      const points = Array.isArray(pointsInput)
-        ? pointsInput.filter(point => Number.isFinite(point?.lat) && Number.isFinite(point?.lon))
-        : [];
-      points.sort((a, b) => {
-        if (a.sequenceNum != null && b.sequenceNum != null) return a.sequenceNum - b.sequenceNum;
-        return (a.timestamp || 0) - (b.timestamp || 0);
-      });
+    function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
+  const points = Array.isArray(pointsInput)
+    ? pointsInput.filter(point => Number.isFinite(point?.lat) && Number.isFinite(point?.lon))
+    : [];
+  points.sort((a, b) => a.sequenceNum != null && b.sequenceNum != null
+    ? a.sequenceNum - b.sequenceNum : (a.timestamp || 0) - (b.timestamp || 0));
 
-      let cumulativeDistanceM = 0;
-      const samples = points.map((point, index) => {
-        const previous = index > 0 ? points[index - 1] : null;
-        const timestamp = Number(point.timestamp);
-        const previousTimestamp = Number(previous?.timestamp);
-        const segmentDistanceM = previous ? haversineDistance([previous.lon, previous.lat], [point.lon, point.lat]) : 0;
-        const storedDistanceM = Number(point.distanceM);
-        const hasStoredDistance = Number.isFinite(storedDistanceM) && (
-          index === 0 ||
-          storedDistanceM > cumulativeDistanceM ||
-          (segmentDistanceM === 0 && storedDistanceM === cumulativeDistanceM)
-        );
-        cumulativeDistanceM = hasStoredDistance ? storedDistanceM : cumulativeDistanceM + segmentDistanceM;
-        const segmentElapsedSec = previous && Number.isFinite(timestamp) && Number.isFinite(previousTimestamp)
-          ? Math.max(0, (timestamp - previousTimestamp) / 1000)
-          : 0;
-        const speedMps = segmentElapsedSec > 0 ? segmentDistanceM / segmentElapsedSec : null;
-        const paceSecPerMile = Number.isFinite(Number(point.instPace)) && Number(point.instPace) > 0
-          ? Number(point.instPace) * 60
-          : speedMps > 0
-          ? 1609.344 / speedMps
-          : null;
-        const elevation = Number(point.elevation);
-        return {
-          sequence_num: point.sequenceNum ?? index + 1,
-          recorded_at: point.time || (Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null),
-          elapsed_sec: Number.isFinite(timestamp) && Number.isFinite(Number(points[0]?.timestamp))
-            ? Math.max(0, (timestamp - Number(points[0].timestamp)) / 1000)
-            : null,
-          lat: Number(point.lat),
-          lon: Number(point.lon),
-          elevation_m: Number.isFinite(elevation) ? elevation : null,
-          distance_m: cumulativeDistanceM,
-          segment_distance_m: segmentDistanceM,
-          segment_elapsed_sec: segmentElapsedSec,
-          speed_mps: speedMps,
-          pace_sec_per_mile: Number.isFinite(paceSecPerMile) ? paceSecPerMile : null
-        };
-      });
+  let cumulativeDistanceM = 0;
+  const samples = points.map((point, index) => {
+    const previous = index > 0 ? points[index - 1] : null;
+    const timestamp = Number(point.timestamp);
+    const previousTimestamp = Number(previous?.timestamp);
+    const segmentDistanceM = previous
+      ? haversineDistance([previous.lon, previous.lat], [point.lon, point.lat])
+      : 0;
+    const storedDistanceM = point.distanceM == null || point.distanceM === "" ? NaN : Number(point.distanceM);
+    const hasStoredDistance = Number.isFinite(storedDistanceM) && storedDistanceM >= 0;
+    cumulativeDistanceM = hasStoredDistance
+      ? Math.max(cumulativeDistanceM, storedDistanceM)
+      : cumulativeDistanceM + segmentDistanceM;
 
-      const analyzedPoints = points.map(point => ({
-        ...point,
-        time: Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : point.time
-      }));
-      const analyzed = analyzeBrowserProfilePoints(analyzedPoints);
-      const distanceM = cumulativeDistanceM > 0
-        ? cumulativeDistanceM
-        : Number.isFinite(Number(metadata.distance_m)) && Number(metadata.distance_m) > 0
-        ? Number(metadata.distance_m)
-        : 0;
-      const elapsedMs = Number.isFinite(Number(metadata.elapsed_time_ms)) && Number(metadata.elapsed_time_ms) > 0
-        ? Number(metadata.elapsed_time_ms)
-        : points.length >= 2 && Number.isFinite(Number(points[0].timestamp)) && Number.isFinite(Number(points[points.length - 1].timestamp))
-        ? Math.max(0, Number(points[points.length - 1].timestamp) - Number(points[0].timestamp))
-        : null;
-      const averagePaceSecPerMile = distanceM > 0 && elapsedMs != null
-        ? (elapsedMs / 1000) / metersToMiles(distanceM)
-        : null;
+    const segmentElapsedSec = previous && Number.isFinite(timestamp) && Number.isFinite(previousTimestamp)
+      ? Math.max(0, (timestamp - previousTimestamp) / 1000)
+      : 0;
+    const derivedSpeedMps = segmentElapsedSec > 0 ? segmentDistanceM / segmentElapsedSec : null;
+    const pointPaceSecPerMile = Number.isFinite(Number(point.instPace)) && Number(point.instPace) > 0
+      ? Number(point.instPace) * 60
+      : derivedSpeedMps > 0
+      ? 1609.344 / derivedSpeedMps
+      : null;
 
-      return {
-        schema_version: 1,
-        generated_at: new Date().toISOString(),
-        source: metadata.source || null,
-        source_run_id: metadata.source_run_id || null,
-        summary: {
-          title: metadata.title || null,
-          started_at: metadata.started_at || null,
-          finished_at: metadata.finished_at || null,
-          distance_m: distanceM,
-          elapsed_time_ms: elapsedMs,
-          moving_time_ms: Number.isFinite(Number(metadata.moving_time_ms)) ? Number(metadata.moving_time_ms) : analyzed.movingTimeMs,
-          average_pace_sec_per_mile: averagePaceSecPerMile,
-          elevation_gain_m: analyzed.elevationGainM,
-          min_elevation_m: analyzed.minElevationM,
-          max_elevation_m: analyzed.maxElevationM,
-          point_count: samples.length
-        },
-        samples
-      };
-    }
+    return {
+      sequence_num: point.sequenceNum ?? index + 1,
+      recorded_at: point.time || (Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null),
+      elapsed_sec: Number.isFinite(timestamp) && Number.isFinite(Number(points[0]?.timestamp))
+        ? Math.max(0, (timestamp - Number(points[0].timestamp)) / 1000)
+        : null,
+      lat: Number(point.lat),
+      lon: Number(point.lon),
+      elevation_m: Number.isFinite(Number(point.elevation)) ? Number(point.elevation) : null,
+      distance_m: cumulativeDistanceM,
+      segment_distance_m: segmentDistanceM,
+      segment_elapsed_sec: segmentElapsedSec,
+      speed_mps: derivedSpeedMps,
+      pace_sec_per_mile: Number.isFinite(pointPaceSecPerMile) ? pointPaceSecPerMile : null
+    };
+  });
+
+  const analyzedPoints = points.map(point => ({
+    ...point,
+    time: Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : point.time
+  }));
+  const analyzed = analyzeBrowserProfilePoints(analyzedPoints);
+  const metadataDistanceM = Number(metadata.distance_m);
+  const hasMetadataDistance = Number.isFinite(metadataDistanceM) && metadataDistanceM > 0;
+  const distanceM = options.preferMetadataDistance && hasMetadataDistance
+    ? metadataDistanceM
+    : cumulativeDistanceM > 0
+    ? cumulativeDistanceM
+    : hasMetadataDistance
+    ? metadataDistanceM
+    : 0;
+  const elapsedMs = Number.isFinite(Number(metadata.elapsed_time_ms)) && Number(metadata.elapsed_time_ms) > 0
+    ? Number(metadata.elapsed_time_ms)
+    : points.length >= 2 && Number.isFinite(Number(points[0].timestamp)) && Number.isFinite(Number(points[points.length - 1].timestamp))
+    ? Math.max(0, Number(points[points.length - 1].timestamp) - Number(points[0].timestamp))
+    : null;
+  const averagePaceSecPerMile = distanceM > 0 && elapsedMs != null
+    ? (elapsedMs / 1000) / metersToMiles(distanceM)
+    : null;
+
+  return {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    source: metadata.source || options.source || null,
+    source_run_id: metadata.source_run_id || options.sourceRunId || null,
+    summary: {
+      title: metadata.title || null,
+      started_at: metadata.started_at || null,
+      finished_at: metadata.finished_at || null,
+      distance_m: distanceM,
+      elapsed_time_ms: elapsedMs,
+      moving_time_ms: metadata.moving_time_ms != null && Number.isFinite(Number(metadata.moving_time_ms)) && Number(metadata.moving_time_ms) > 0
+        ? Number(metadata.moving_time_ms)
+        : analyzed.movingTimeMs,
+      average_pace_sec_per_mile: averagePaceSecPerMile,
+      elevation_gain_m: analyzed.elevationGainM,
+      min_elevation_m: analyzed.minElevationM,
+      max_elevation_m: analyzed.maxElevationM,
+      point_count: samples.length
+    },
+    samples
+  };
+}
 
     async function saveGpxToProfile(gpx, metadata, analysis = null) {
       const { data: sessionData, error: sessionError } = await profilesSupabaseClient.auth.getSession();
@@ -2447,10 +2516,7 @@
           if (analysisPoints.length < 2) {
             analysisPoints = parseGpxAnalysisPoints(gpx);
           }
-          const analysis = buildProfileRunAnalysis(analysisPoints, metadata);
-          if (Number.isFinite(Number(analysis?.summary?.distance_m)) && Number(analysis.summary.distance_m) > 0) {
-            metadata.distance_m = Number(analysis.summary.distance_m);
-          }
+          const analysis = buildProfileRunAnalysis(analysisPoints, metadata, { preferMetadataDistance: true });
           if (Number.isFinite(Number(analysis?.summary?.point_count)) && Number(analysis.summary.point_count) > 0) {
             metadata.point_count = Number(analysis.summary.point_count);
           }

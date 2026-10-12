@@ -1368,7 +1368,16 @@ function analyzeBrowserProfilePoints(points) {
       const derivedSpeed = distanceM / elapsedSec;
       return derivedSpeed >= MIN_MOVING_SPEED_MPS && derivedSpeed <= MAX_MOVING_SPEED_MPS;
     }
-    function calculateBrowserProfileSplits(routeData) {
+    function formatPartialMileSplit(distanceMi) {
+  // Partial miles must not be labeled as a completed mile after rounding.
+  for (let digits = 2; digits <= 8; digits += 1) {
+    const label = distanceMi.toFixed(digits);
+    if (Number(label) < 1 && Number(label) > 0) return label;
+  }
+  return String(distanceMi);
+}
+
+function calculateBrowserProfileSplits(routeData) {
       const samples = createBrowserProfilePaceSamples(routeData)
         .filter(sample => Number.isFinite(sample.distanceMi))
         .sort((a, b) => a.distanceMi - b.distanceMi);
@@ -1426,9 +1435,9 @@ function analyzeBrowserProfilePoints(points) {
         const elevationChangeFt = Number.isFinite(startSample?.elevationFt) && Number.isFinite(endSample?.elevationFt)
           ? endSample.elevationFt - startSample.elevationFt
           : null;
-        const label = splitDistanceMi >= 0.995
+        const label = splitDistanceMi >= 1
           ? String(index + 1)
-          : formatBrowserProfileChartDistance(splitDistanceMi, totalDistanceMi);
+          : formatPartialMileSplit(splitDistanceMi);
         splits.push({
           label,
           splitDistanceMi,

@@ -1,0 +1,61 @@
+package com.kdidso.livestride;
+
+import android.os.Bundle;
+import android.graphics.Color;
+import android.widget.Toast;
+import androidx.appcompat.app.AppCompatActivity;
+import com.google.android.gms.maps.*;
+import com.google.android.gms.maps.model.*;
+import org.json.JSONArray;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+
+/** Display-only satellite viewer: never changes tracking or saved measurements. */
+public class FinishedRunMapActivity extends AppCompatActivity {
+    private File routeFile;
+    @Override public void onCreate(Bundle state) {
+        super.onCreate(state);
+        setTitle("Finished run · Satellite");
+        if (getSupportActionBar() != null) getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+        try {
+            String name = getIntent().getStringExtra("routeFile");
+            if (name == null || !name.matches("finished-map-[A-Za-z0-9-]+\\.json")) throw new IllegalArgumentException();
+            routeFile = new File(getCacheDir(), name);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            try (java.io.FileInputStream in = new java.io.FileInputStream(routeFile)) {
+                byte[] buffer = new byte[8192]; int count;
+                while ((count = in.read(buffer)) != -1) bytes.write(buffer, 0, count);
+            }
+            JSONArray data = new JSONArray(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
+            ArrayList<LatLng> path = new ArrayList<>();
+            for (int i = 0; i < data.length(); i++) path.add(new LatLng(data.getJSONObject(i).getDouble("lat"), data.getJSONObject(i).getDouble("lon")));
+            if (path.size() < 2) throw new IllegalArgumentException();
+            SupportMapFragment fragment = (SupportMapFragment) getSupportFragmentManager().findFragmentByTag("satellite");
+            if (fragment == null) {
+                fragment = SupportMapFragment.newInstance();
+                getSupportFragmentManager().beginTransaction().replace(android.R.id.content, fragment, "satellite").commitNow();
+            }
+            fragment.getMapAsync(map -> {
+                map.setMapType(GoogleMap.MAP_TYPE_SATELLITE);
+                map.getUiSettings().setMapToolbarEnabled(false);
+                map.getUiSettings().setZoomControlsEnabled(true);
+                map.addPolyline(new PolylineOptions().addAll(path).color(Color.WHITE).width(14));
+                map.addPolyline(new PolylineOptions().addAll(path).color(Color.CYAN).width(7));
+                map.addMarker(new MarkerOptions().position(path.get(0)).title("Start").icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)));
+                map.addMarker(new MarkerOptions().position(path.get(path.size()-1)).title("Finish"));
+                LatLngBounds.Builder bounds = new LatLngBounds.Builder();
+                for (LatLng p : path) bounds.include(p);
+                map.setOnMapLoadedCallback(() -> map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds.build(), 80)));
+            });
+        } catch (Exception e) {
+            Toast.makeText(this, "Unable to open satellite map. Return to the street map.", Toast.LENGTH_LONG).show();
+            finish();
+        }
+    }
+    @Override public boolean onSupportNavigateUp() { finish(); return true; }
+    @Override protected void onDestroy() {
+        if (isFinishing() && routeFile != null) routeFile.delete();
+        super.onDestroy();
+    }
+}

@@ -59,6 +59,7 @@ dependencies {
 
     // Needed for native GPS tracking with FusedLocationProviderClient
     implementation 'com.google.android.gms:play-services-location:21.3.0'
+    implementation 'com.google.android.gms:play-services-maps:20.0.0'
 
     implementation project(':capacitor-android')
     implementation project(':capacitor-cordova-android-plugins')

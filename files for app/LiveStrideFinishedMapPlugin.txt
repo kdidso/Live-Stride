@@ -1,0 +1,40 @@
+package com.kdidso.livestride;
+
+import android.content.Intent;
+import com.getcapacitor.*;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+
+@CapacitorPlugin(name = "LiveStrideFinishedMap")
+public class LiveStrideFinishedMapPlugin extends Plugin {
+    @PluginMethod
+    public void open(PluginCall call) {
+        File file = null;
+        try {
+            JSONArray points = call.getArray("points");
+            if (points == null || points.length() < 2) throw new IllegalArgumentException("A saved route needs at least two points.");
+            for (int i = 0; i < points.length(); i++) {
+                JSONObject p = points.getJSONObject(i);
+                double lat = p.getDouble("lat"), lon = p.getDouble("lon");
+                if (!Double.isFinite(lat) || !Double.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180)
+                    throw new IllegalArgumentException("Invalid route coordinates.");
+            }
+            // Send only a filename through Android's size-limited Intent, even for long runs.
+            file = File.createTempFile("finished-map-", ".json", getContext().getCacheDir());
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                out.write(points.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            Intent intent = new Intent(getContext(), FinishedRunMapActivity.class);
+            intent.putExtra("routeFile", file.getName());
+            getActivity().startActivity(intent);
+            call.resolve();
+        } catch (Exception e) {
+            if (file != null) file.delete();
+            call.reject("Could not open Google Satellite: " + e.getMessage(), e);
+        }
+    }
+}

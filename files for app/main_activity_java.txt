@@ -16,6 +16,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(BackgroundGeolocation.class);
         registerPlugin(LiveStrideNativeTrackerPlugin.class);
         registerPlugin(LiveStrideExportPlugin.class);
+        registerPlugin(LiveStrideFinishedMapPlugin.class);
 
         super.onCreate(savedInstanceState);
         new Thread(() -> LiveStridePendingPointUploadJobService.cleanupOldCompletedRuns(this)).start();

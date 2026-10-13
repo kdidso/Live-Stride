@@ -1696,7 +1696,147 @@ function calculateBrowserProfileSplits(routeData) {
       routeMap.addLayer({ id: "profile-route-endpoint-halo", type: "circle", source: "profile-route-endpoints-source", paint: { "circle-radius": 8, "circle-color": "#ffffff", "circle-opacity": 0.92 } });
       routeMap.addLayer({ id: "profile-route-endpoint", type: "circle", source: "profile-route-endpoints-source", paint: { "circle-radius": 5, "circle-color": ["match", ["get", "kind"], "start", "#17844b", "finish", "#c83d32", "#24415f"], "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5 } });
     }
-    function createBrowserProfileRouteMap(container, points, detailed = false) {
+    // Restricted public browser key; Google Maps is loaded only on explicit selection.
+const FINISHED_GOOGLE_MAPS_KEY = "AIzaSyAHL6o_Vl3UR4XxitTKaj_HX10bqDgGcxY";
+let finishedGoogleMapsPromise = null;
+const finishedGoogleFailureListeners = new Set();
+
+function loadFinishedGoogleMaps() {
+  if (window.google?.maps?.Map) return Promise.resolve(window.google.maps);
+  if (finishedGoogleMapsPromise) return finishedGoogleMapsPromise;
+  finishedGoogleMapsPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    let settled = false;
+    const complete = (error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        script.remove();
+        finishedGoogleMapsPromise = null;
+        reject(error);
+      } else resolve(window.google.maps);
+    };
+    window.liveStrideFinishedGoogleReady = () => {
+      if (window.google?.maps?.Map) complete();
+      else complete(new Error("Google map is unavailable."));
+    };
+    const previousAuthFailure = window.gm_authFailure;
+    window.gm_authFailure = () => {
+      complete(new Error("Google map authorization failed."));
+      for (const listener of [...finishedGoogleFailureListeners]) listener();
+      if (typeof previousAuthFailure === "function") previousAuthFailure();
+    };
+    const timeout = setTimeout(() => complete(new Error("Google map timed out.")), 20000);
+    script.async = true;
+    script.src = "https://maps.googleapis.com/maps/api/js?" + new URLSearchParams({
+      key: FINISHED_GOOGLE_MAPS_KEY, loading: "async", callback: "liveStrideFinishedGoogleReady", v: "quarterly"
+    });
+    script.nonce = document.querySelector("script[nonce]")?.nonce || "";
+    script.onerror = () => complete(new Error("Google map could not load."));
+    document.head.appendChild(script);
+  });
+  return finishedGoogleMapsPromise;
+}
+
+function createFinishedGoogleRouteMap(host, points, detailed, maps) {
+  const path = points.map(point => ({lat: Number(point.lat), lng: Number(point.lon)}));
+  const bounds = new maps.LatLngBounds();
+  path.forEach(point => bounds.extend(point));
+  const map = new maps.Map(host, {
+    center: path[0], zoom: 13, mapTypeId: "satellite", tilt: 0,
+    mapTypeControl: false, streetViewControl: false, fullscreenControl: detailed,
+    zoomControl: detailed, gestureHandling: detailed ? "cooperative" : "none",
+    clickableIcons: false, keyboardShortcuts: detailed
+  });
+  const overlays = [
+    new maps.Polyline({map, path, strokeColor: "#ffffff", strokeOpacity: 0.92, strokeWeight: 8, clickable: false}),
+    new maps.Polyline({map, path, strokeColor: "#00d6d6", strokeOpacity: 1, strokeWeight: 4.5, clickable: false})
+  ];
+  for (const [position,color] of [[path[0],"#17844b"],[path[path.length-1],"#c83d32"]]) {
+    overlays.push(new maps.Circle({map, center:position, radius:5, fillColor:color,
+      fillOpacity:1, strokeColor:"#ffffff", strokeWeight:2, clickable:false}));
+  }
+  let removed = false;
+  maps.event.addListenerOnce(map,"idle",() => {
+    if (!removed && map.getZoom() > (detailed ? 16 : 15)) map.setZoom(detailed ? 16 : 15);
+  });
+  map.fitBounds(bounds,detailed ? 44 : 28);
+  return {remove() {
+    removed = true;
+    overlays.forEach(overlay => overlay.setMap(null));
+    maps.event.clearInstanceListeners(map);
+    host.replaceChildren();
+  }};
+}
+
+function createFinishedRouteMapWithOptions(container, points, detailed, createStreetMap) {
+  const wrapper = document.createElement("div");
+  wrapper.style.cssText = `position:relative;width:100%;height:${detailed ? 320 : 190}px;min-height:inherit;`;
+  const host = document.createElement("div");
+  host.style.cssText = "width:100%;height:100%;min-height:inherit;";
+  const picker = document.createElement("select");
+  picker.setAttribute("aria-label","Finished run map view");
+  picker.addEventListener("click", event => event.stopPropagation());
+  picker.addEventListener("keydown", event => event.stopPropagation());
+  picker.style.cssText = "position:absolute;top:8px;left:8px;z-index:2;padding:7px;background:white;color:#223;border:1px solid #bbb;border-radius:4px;max-width:85%;";
+  const streetOption = document.createElement("option");
+  streetOption.value = "streets"; streetOption.textContent = "Street map";
+  const googleOption = document.createElement("option");
+  googleOption.value = "google"; googleOption.textContent = "Google Satellite";
+  // This key is restricted to the hosted web app, not local files or the native WebView.
+  googleOption.disabled = window.location.hostname !== "app.livestride.run";
+  if (googleOption.disabled) googleOption.textContent = "Google Satellite (web app)";
+  picker.append(streetOption,googleOption);
+  const status = document.createElement("div");
+  status.setAttribute("role","status");
+  status.style.cssText = "position:absolute;top:48px;left:8px;right:8px;z-index:2;background:white;color:#334;padding:6px;border-radius:4px;display:none;";
+  wrapper.append(host,picker,status);
+  container.replaceChildren(wrapper);
+  let active = createStreetMap(host,points,detailed).routeMap;
+  let removed = false, generation = 0;
+  const showStreet = () => {
+    active?.remove();
+    active = createStreetMap(host,points,detailed).routeMap;
+    picker.value = "streets";
+  };
+  const authFailure = () => {
+    if (removed || picker.value !== "google") return;
+    generation += 1;
+    showStreet();
+    status.textContent = "Google Satellite is unavailable. Showing the street map.";
+    status.style.display = "block";
+  };
+  finishedGoogleFailureListeners.add(authFailure);
+  picker.addEventListener("change",async () => {
+    const current = ++generation;
+    status.style.display = "none";
+    if (picker.value === "streets") { showStreet(); return; }
+    if (googleOption.disabled) { picker.value = "streets"; return; }
+    status.textContent = "Loading Google Satellite…";status.style.display = "block";
+    try {
+      const maps = await loadFinishedGoogleMaps();
+      if (removed || current !== generation) return;
+      active?.remove();active = null;
+      active = createFinishedGoogleRouteMap(host,points,detailed,maps);
+      status.style.display = "none";
+    } catch (_) {
+      if (removed || current !== generation) return;
+      showStreet();
+      status.textContent = "Google Satellite is unavailable. Showing the street map.";
+      status.style.display = "block";
+    }
+  });
+  return {mapEl:host,routeMap:{remove() {
+    if (removed) return;
+    removed = true;generation += 1;
+    finishedGoogleFailureListeners.delete(authFailure);
+    active?.remove();active = null;
+    wrapper.remove();
+  }}};
+}
+
+function createBrowserProfileStreetRouteMap(container, points, detailed = false) {
       const mapEl = document.createElement("div");
       mapEl.className = "profile-route-map";
       container.replaceChildren(mapEl);
@@ -1712,20 +1852,30 @@ function calculateBrowserProfileSplits(routeData) {
         pitchWithRotate: false,
         attributionControl: false
       });
-      routeMap.once("load", () => {
+      let disposed = false;
+  routeMap.on("remove", () => { disposed = true; });
+  routeMap.once("load", () => {
+    if (disposed) return;
         requestAnimationFrame(() => {
+        if (disposed) return;
           routeMap.resize();
           routeMap.fitBounds(bounds, { padding: detailed ? 44 : 28, duration: 0, maxZoom: detailed ? 16 : 15 });
           addBrowserProfileRouteLayers(routeMap, points);
         });
       });
       setTimeout(() => {
+    if (disposed) return;
         routeMap.resize();
         routeMap.fitBounds(bounds, { padding: detailed ? 44 : 28, duration: 0, maxZoom: detailed ? 16 : 15 });
       }, 150);
-      return routeMap;
+      return { mapEl, routeMap };
     }
-    async function hydrateBrowserProfileRoute(container, run, detailed = false, shouldRender = null) {
+    function createBrowserProfileRouteMap(container, points, detailed = false) {
+  const result = createFinishedRouteMapWithOptions(container, points, detailed, createBrowserProfileStreetRouteMap);
+  return result.routeMap;
+}
+
+async function hydrateBrowserProfileRoute(container, run, detailed = false, shouldRender = null) {
       try {
         const routeData = await profileRoute(run.id, run);
         if (shouldRender && !shouldRender()) return routeData;

@@ -15,7 +15,6 @@ final class BridgeTunnelMatcher {
     static final double CONNECTION_RADIUS_METERS = 4.0;
     static final double STRONG_RAW_HANDOFF_ACCURACY_METERS = 5.0;
     static final double RELAXED_RAW_HANDOFF_ACCURACY_METERS = 10.0;
-    static final double BRIDGE_ENTRY_MIN_ACCURACY_METERS = 3.0;
     static final double RUNNING_SPEED_SAMPLE_MIN_MPS = 0.5;
     static final double RUNNING_SPEED_SAMPLE_MAX_MPS = 8.0;
     static final double RUNNING_FALLBACK_SPEED_MPS = 2.5;
@@ -218,6 +217,23 @@ final class BridgeTunnelMatcher {
         }
     }
 
+    /** Corroborating network evidence for this fix, never a direct snap command. */
+    static final class StructureHint {
+        final String segmentId;
+        final boolean forward;
+        final long timeMs;
+        StructureHint(String segmentId, boolean forward, long timeMs) {
+            this.segmentId = segmentId;
+            this.forward = forward;
+            this.timeMs = timeMs;
+        }
+    }
+
+    private StructureHint entryHint;
+    private long rawRecoveryStartedAtMs;
+
+    void setEntryHint(StructureHint hint) { entryHint = hint; }
+
     private State state = State.NORMAL;
     private Context context;
     private Point lastRawPoint;
@@ -258,6 +274,8 @@ final class BridgeTunnelMatcher {
 
     void reset() {
         state = State.NORMAL;
+        entryHint = null;
+        rawRecoveryStartedAtMs = 0L;
         context = null;
         lastRawPoint = null;
         lastRawTimeMs = 0L;
@@ -489,35 +507,71 @@ final class BridgeTunnelMatcher {
             if (bestDistance > ENTRY_RADIUS_METERS
                     && structureProjection.distanceMeters <= STRICT_ENTRY_RADIUS_METERS) {
                 double movementBearing = bearingDegrees(lastRawPoint, rawPoint);
-                double startHeading = bearingDegrees(startToEnd.get(0), startToEnd.get(1));
-                double endHeading = bearingDegrees(
-                        startToEnd.get(startToEnd.size() - 1),
-                        startToEnd.get(startToEnd.size() - 2)
-                );
-
+                double startHeading = bearingDegrees(
+                        pointAlong(startToEnd, Math.max(0, structureProjection.alongMeters - 3)),
+                        pointAlong(startToEnd, Math.min(polylineLength(startToEnd), structureProjection.alongMeters + 3)));
+                double endHeading = (startHeading + 180) % 360;
                 best = segment;
                 enterAtStart = angleDifference(movementBearing, startHeading)
                         <= angleDifference(movementBearing, endHeading);
+                // Prefer sustained along-route progress over the last jittering step.
+                for (Observation earlier : entryObservations) {
+                    if (timeMs - earlier.timeMs >= DIRECTION_MIN_OBSERVATION_MS) {
+                        double delta = structureProjection.alongMeters - project(startToEnd, earlier.point).alongMeters;
+                        if (Math.abs(delta) >= ENTRY_MIN_MOVEMENT_METERS) {
+                            enterAtStart = delta > 0;
+                            break;
+                        }
+                    }
+                }
                 bestDistance = structureProjection.distanceMeters;
                 bestUsesStructureLine = true;
             }
         }
 
+        // A confident connected-network hypothesis may resolve a nearby fork,
+        // but cannot authorize a distant snap or bypass the geometry checks.
+        boolean networkSupported = false;
+        if (entryHint != null && entryHint.timeMs == timeMs && !presumedDriverMode
+                && accuracyMeters >= 0 && accuracyMeters <= RELAXED_RAW_HANDOFF_ACCURACY_METERS) {
+            for (Segment segment : context.segments) {
+                if (!segment.isStructure() || !segment.id.equals(entryHint.segmentId)) continue;
+                Projection candidate = project(segment.points, rawPoint);
+                if (candidate.distanceMeters <= ENTRY_RADIUS_METERS) {
+                    best = segment;
+                    enterAtStart = entryHint.forward;
+                    bestDistance = candidate.distanceMeters;
+                    bestUsesStructureLine = true;
+                    networkSupported = true;
+                }
+                break;
+            }
+        }
         if (best == null || bestDistance > ENTRY_RADIUS_METERS) return;
         if (presumedDriverMode && isBridge(best)) return;
-        if (isBridge(best) && accuracyMeters >= 0.0f
-                && accuracyMeters <= BRIDGE_ENTRY_MIN_ACCURACY_METERS) {
-            return;
-        }
 
         Point entrance = enterAtStart
                 ? best.points.get(0)
                 : best.points.get(best.points.size() - 1);
         List<Point> orientedStructure = orientedPoints(best, enterAtStart);
-        double structureBearing = bearingDegrees(
-                orientedStructure.get(0),
-                orientedStructure.get(1)
-        );
+        Projection inside = project(orientedStructure, rawPoint);
+        boolean contested = false;
+        for (Segment alternative : context.segments) {
+            if (alternative.isStructure() && alternative.points.size() >= 2 && !alternative.id.equals(best.id)
+                    && project(alternative.points, rawPoint).distanceMeters <= 20.0) {
+                contested = true;
+                break;
+            }
+        }
+        // Nearby structures make the portal ambiguous. Require actual progress
+        // inside a bridge before publishing predictions, not just proximity.
+        if (isBridge(best) && contested
+                && (inside.alongMeters < Math.min(8.0, polylineLength(orientedStructure) * .4)
+                || inside.distanceMeters > STRICT_ENTRY_RADIUS_METERS)) return;
+        double structureBearing = bestUsesStructureLine
+                ? bearingDegrees(pointAlong(orientedStructure, Math.max(0, inside.alongMeters - 3)),
+                    pointAlong(orientedStructure, Math.min(polylineLength(orientedStructure), inside.alongMeters + 3)))
+                : bearingDegrees(orientedStructure.get(0),orientedStructure.get(1));
         EntryEvidence entryEvidence = entryEvidence(
                 rawPoint,
                 entrance,
@@ -525,16 +579,16 @@ final class BridgeTunnelMatcher {
                 orientedStructure
         );
         if (entryEvidence == null) return;
-        if (!entryEvidence.approachTrend
+        if (!networkSupported && !entryEvidence.approachTrend
                 && !entryEvidence.recentAlignedStructureStep) {
             return;
         }
-        if (entryEvidence.headingError > 75.0
+        if (!networkSupported && entryEvidence.headingError > 75.0
                 && !entryEvidence.recentAlignedStructureStep) {
             return;
         }
-        if (bestUsesStructureLine && !entryEvidence.recentAlignedStructureStep) return;
-        if (entryNeedsStrongerEvidence(
+        if (bestUsesStructureLine && !networkSupported && !entryEvidence.recentAlignedStructureStep) return;
+        if (!networkSupported && entryNeedsStrongerEvidence(
                 accuracyMeters,
                 bestDistance,
                 entryEvidence
@@ -561,7 +615,7 @@ final class BridgeTunnelMatcher {
         // The existing approach window is already a tentative entry phase when
         // it provides sustained independent evidence. Otherwise wait briefly
         // before publishing any predicted tunnel movement.
-        boolean supportedApproach = entryEvidence.observationSpanMs >= TENTATIVE_ENTRY_MIN_MS
+        boolean supportedApproach = networkSupported || entryEvidence.observationSpanMs >= TENTATIVE_ENTRY_MIN_MS
                 || (entryEvidence.strongApproachTrend && entryEvidence.headingError <= 35.0)
                 || (entryEvidence.recentAlignedStructureStep && entryEvidence.headingError <= 25.0);
         state = !presumedDriverMode && "tunnel".equals(structureType) && !supportedApproach
@@ -852,6 +906,7 @@ final class BridgeTunnelMatcher {
         tentativeEntryStartPoint = null;
         recoveryObservations.clear();
         recoveringFalseMatch = false;
+        rawRecoveryStartedAtMs = 0L;
         recoveryTrustedAnchor = null;
         recoveryTrustedAnchorTimeMs = 0L;
         recoveryRoute = Collections.emptyList();
@@ -973,6 +1028,7 @@ final class BridgeTunnelMatcher {
     }
 
     private void beginVerifiedRawRecovery(long timeMs, boolean falseMatch) {
+        rawRecoveryStartedAtMs = timeMs;
         recoveringFalseMatch = falseMatch;
         recoveryTrustedAnchor = falseMatch && structureEntryRawAnchor != null
                 ? structureEntryRawAnchor : lastMatchedOutputPoint;
@@ -1020,7 +1076,30 @@ final class BridgeTunnelMatcher {
         if (continuous && coherent && !recoveringFalseMatch && verifiesRecoveryTurn(rawPoint, accuracyMeters)) {
             return releaseRaw(rawPoint, true, "exit_return_course_verified");
         }
+        if (continuous && coherent && rawRecoveryStartedAtMs > 0L
+                && timeMs - rawRecoveryStartedAtMs >= VERIFIED_RECOVERY_PREDICTION_LIMIT_MS
+                && verifiesIndependentRecoveryCourse(accuracyMeters)) {
+            // Sustained independent movement disproves the selected exit route.
+            // Resume at a new anchor: never charge the speculative connector.
+            return releaseRaw(rawPoint, true, "alternative_exit_course_verified");
+        }
         return new Result(rawPoint, false, state, "", false, "raw_handoff_verifying");
+    }
+
+    private boolean verifiesIndependentRecoveryCourse(float accuracyMeters) {
+        if (recoveryObservations.size() < 5 || accuracyMeters > STRONG_RAW_HANDOFF_ACCURACY_METERS) return false;
+        Observation first = recoveryObservations.get(0);
+        Observation last = recoveryObservations.get(recoveryObservations.size() - 1);
+        if (last.timeMs - first.timeMs < 4_000L
+                || distanceMeters(first.point, last.point) < 8.0) return false;
+        double corridor = Math.max(12.0, accuracyMeters * 2);
+        // Every point must be outside the rejected route. A single spike or
+        // momentary turn on it must not unlock recovery.
+        if (recoveryRoute.size() < 2) return false;
+        for (Observation observation : recoveryObservations) {
+            if (project(recoveryRoute, observation.point).distanceMeters <= corridor) return false;
+        }
+        return true;
     }
 
     private boolean recoveryFollowsKnownRoute(Point rawPoint, float accuracyMeters) {

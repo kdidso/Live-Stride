@@ -1,0 +1,19 @@
+package com.kdidso.livestride;
+
+/** Moving time is independent of the coordinate/distance suppression policy. */
+final class MovingTimePolicy {
+    static long intervalMilliseconds(long elapsedMs, boolean distanceHeld,
+            boolean structureMatched, String verification, float rawSpeedMps,
+            double rawDisplacementMeters) {
+        if (elapsedMs <= 0) return 0;
+        if (structureMatched || "confirmed_turn".equals(verification)
+                || "forward_recovery".equals(verification)) return elapsedMs;
+        if (!distanceHeld) return elapsedMs;
+        // Device speed belongs to the raw fix, not to the smoothed/repeated coordinate.
+        // Treat near-zero device speed as stopped only when a distance hold exists.
+        if (!Float.isNaN(rawSpeedMps) && !Float.isInfinite(rawSpeedMps) && rawSpeedMps >= 0) {
+            return rawSpeedMps > 0.3f ? elapsedMs : 0;
+        }
+        return rawDisplacementMeters / (elapsedMs / 1000.0) > 0.44704 ? elapsedMs : 0;
+    }
+}

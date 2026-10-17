@@ -1,0 +1,271 @@
+package com.kdidso.livestride;
+
+import java.util.*;
+
+/** Bounded fixed-lag trail matcher. The structure matcher remains authoritative. */
+final class TrailNetworkMatcher {
+    static final long LAG_MS = 8_000;
+    static final double SEARCH_METERS = 60, MIN_MARGIN = 1.5;
+    static final class Fix {
+        final long id,time; final double lat,lon,accuracy;
+        Fix(long id,double lat,double lon,double accuracy,long time) {
+            this.id=id;this.lat=lat;this.lon=lon;this.accuracy=accuracy;this.time=time;
+        }
+    }
+    static final class Decision {
+        final Fix fix; final double lat,lon; final boolean matched;
+        final String family,reason;
+        Decision(Fix fix,double lat,double lon,boolean matched,String family,String reason) {
+            this.fix=fix;this.lat=lat;this.lon=lon;this.matched=matched;this.family=family;this.reason=reason;
+        }
+    }
+    private static final class XY {
+        final double x,y;
+        XY(double x,double y) { this.x=x;this.y=y; }
+        double distance(XY p) { return Math.hypot(x-p.x,y-p.y); }
+    }
+    private static final class Projection {
+        final XY xy;final double along,distance;
+        Projection(XY xy,double along,double distance) { this.xy=xy;this.along=along;this.distance=distance; }
+    }
+    private static final class Line {
+        final List<XY> p;final double[] cumulative;final double length;
+        Line(List<XY> points) {
+            p=points;cumulative=new double[p.size()];
+            for(int i=1;i<p.size();i++) cumulative[i]=cumulative[i-1]+p.get(i).distance(p.get(i-1));
+            length=cumulative[p.size()-1];
+        }
+        Projection project(XY point) {
+            double best=Double.POSITIVE_INFINITY,s=0;XY q=p.get(0);
+            for(int i=1;i<p.size();i++) {
+                XY a=p.get(i-1),b=p.get(i);double dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy;
+                double t=l2>0?Math.max(0,Math.min(1,((point.x-a.x)*dx+(point.y-a.y)*dy)/l2)):0;
+                XY v=new XY(a.x+t*dx,a.y+t*dy);double d=v.distance(point);
+                if(d<best) {best=d;q=v;s=cumulative[i-1]+t*Math.sqrt(l2);}
+            }
+            return new Projection(q,s,best);
+        }
+        XY at(double s) {
+            s=Math.max(0,Math.min(length,s));
+            int i=Arrays.binarySearch(cumulative,s);if(i>=0)return p.get(i);
+            i=Math.min(p.size()-1,Math.max(1,-i-1));
+            double len=cumulative[i]-cumulative[i-1],t=len>0?(s-cumulative[i-1])/len:0;
+            XY a=p.get(i-1),b=p.get(i);return new XY(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t);
+        }
+    }
+    private static final class Source {
+        final BridgeTunnelMatcher.Segment segment;final Line line;final List<Line> variants=new ArrayList<>();
+        Source(BridgeTunnelMatcher.Segment s,Line line) {segment=s;this.line=line;}
+    }
+    private static final class Edge {
+        final Source source;final Line line;final int a,b;
+        Edge(Source source,Line line,int a,int b) {this.source=source;this.line=line;this.a=a;this.b=b;}
+    }
+    private static final class Link {
+        final int node;final double length;
+        Link(int node,double length) {this.node=node;this.length=length;}
+    }
+    private static final class Candidate {
+        final int edge;final Projection p;final double emission;
+        Candidate(int edge,Projection p,double emission) {this.edge=edge;this.p=p;this.emission=emission;}
+    }
+    private static final class Layer {
+        final Fix fix;final XY xy;final List<Candidate> candidates;final double[] scores;final int[] back;
+        Layer(Fix f,XY xy,List<Candidate> c,double[] s,int[] b) {fix=f;this.xy=xy;candidates=c;scores=s;back=b;}
+    }
+    private static final class NodeInfo {
+        final Set<String> families=new HashSet<>();final Set<Double> levels=new HashSet<>();boolean allEnds=true;
+    }
+
+    private final List<Edge> edges=new ArrayList<>();
+    private final Map<Integer,List<Link>> adjacency=new HashMap<>();
+    private final Map<Long,Set<Integer>> grid=new HashMap<>();
+    private final Set<Integer> longEdges=new HashSet<>();
+    private final Map<Integer,Map<Integer,Double>> distanceCache=new LinkedHashMap<Integer,Map<Integer,Double>>(128,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<Integer,Map<Integer,Double>> entry) {return size()>32;}
+    };
+    private final Deque<Layer> layers=new ArrayDeque<>();
+    private final Deque<Fix> history=new ArrayDeque<>();
+    private Layer previous;
+    private boolean usable;
+    private double lat0,lon0,cosLat,lateral;
+    private String lateralFamily="";private long lateralTime;
+
+    private XY xy(double lat,double lon) {
+        return new XY(Math.toRadians(lon-lon0)*6371008.8*cosLat,Math.toRadians(lat-lat0)*6371008.8);
+    }
+    private Line line(List<BridgeTunnelMatcher.Point> points) {
+        List<XY> result=new ArrayList<>();for(BridgeTunnelMatcher.Point p:points)result.add(xy(p.lat,p.lon));
+        return new Line(result);
+    }
+    private static boolean trail(BridgeTunnelMatcher.Segment s) {
+        return !s.isStructure() && ("cycleway".equals(s.subclass)||"footway".equals(s.subclass)||"path".equals(s.subclass));
+    }
+    private static String base(XY p) {return Math.round(p.x*10)+":"+Math.round(p.y*10);}
+    private static String nodeKey(XY p,Source s,Map<String,NodeInfo> info) {
+        NodeInfo n=info.get(base(p));return base(p)+(n.levels.size()>1&&!n.allEnds?":"+s.segment.layer:"");
+    }
+    private static long cell(int x,int y) {return ((long)x<<32)^(y&0xffffffffL);}
+
+    void setContext(BridgeTunnelMatcher.Context context) {
+        if(!layers.isEmpty())throw new IllegalStateException("Flush pending trail points before replacing context");
+        reset();edges.clear();adjacency.clear();grid.clear();longEdges.clear();distanceCache.clear();usable=false;
+        if(context==null||context.segments.isEmpty())return;
+        BridgeTunnelMatcher.Point origin=context.segments.get(0).points.get(0);
+        lat0=origin.lat;lon0=origin.lon;cosLat=Math.cos(Math.toRadians(lat0));
+        List<Source> sources=new ArrayList<>();Map<String,NodeInfo> info=new HashMap<>();
+        for(BridgeTunnelMatcher.Segment segment:context.segments) {
+            if(segment.points.size()<2||(!trail(segment)&&!segment.isStructure()))continue;
+            Source s=new Source(segment,line(segment.points));if(s.line.length<.01)continue;
+            for(BridgeTunnelMatcher.Segment v:segment.variants)if(v.points.size()>=2)s.variants.add(line(v.points));
+            sources.add(s);if(trail(segment))usable=true;
+            for(int i=0;i<s.line.p.size();i++) {
+                XY p=s.line.p.get(i);NodeInfo n=info.computeIfAbsent(base(p),k->new NodeInfo());
+                n.families.add(segment.family);n.levels.add(segment.layer);n.allEnds&=i==0||i==s.line.p.size()-1;
+            }
+        }
+        Map<String,Integer> nodes=new HashMap<>();
+        for(Source s:sources) {
+            int start=0;
+            for(int end=1;end<s.line.p.size();end++) {
+                if(end!=s.line.p.size()-1&&info.get(base(s.line.p.get(end))).families.size()<2)continue;
+                Line part=new Line(new ArrayList<>(s.line.p.subList(start,end+1)));
+                if(part.length>=.01) {
+                    String ak=nodeKey(part.p.get(0),s,info),bk=nodeKey(part.p.get(part.p.size()-1),s,info);
+                    if(!nodes.containsKey(ak))nodes.put(ak,nodes.size());if(!nodes.containsKey(bk))nodes.put(bk,nodes.size());
+                    if(edges.size()>=4096){edges.clear();adjacency.clear();grid.clear();longEdges.clear();usable=false;return;}
+                    int a=nodes.get(ak),b=nodes.get(bk),id=edges.size();edges.add(new Edge(s,part,a,b));
+                    adjacency.computeIfAbsent(a,k->new ArrayList<>()).add(new Link(b,part.length));
+                    adjacency.computeIfAbsent(b,k->new ArrayList<>()).add(new Link(a,part.length));
+                    index(id,part);
+                }
+                start=end;
+            }
+        }
+    }
+    private void index(int id,Line line) {
+        for(int i=1;i<line.p.size();i++) {
+            XY a=line.p.get(i-1),b=line.p.get(i);
+            int x0=(int)Math.floor(Math.min(a.x,b.x)/100),x1=(int)Math.floor(Math.max(a.x,b.x)/100);
+            int y0=(int)Math.floor(Math.min(a.y,b.y)/100),y1=(int)Math.floor(Math.max(a.y,b.y)/100);
+            if((long)(x1-x0+1)*(y1-y0+1)>5000) {longEdges.add(id);continue;}
+            for(int x=x0;x<=x1;x++)for(int y=y0;y<=y1;y++) {
+                long key=cell(x,y);
+                if(grid.size()>=4096&&!grid.containsKey(key)){longEdges.add(id);continue;}
+                grid.computeIfAbsent(key,k->new HashSet<>()).add(id);
+            }
+        }
+    }
+    private Map<Integer,Double> distances(int start) {
+        Map<Integer,Double> known=distanceCache.get(start);if(known!=null)return known;
+        Map<Integer,Double> dist=new HashMap<>();dist.put(start,0.);
+        PriorityQueue<double[]> q=new PriorityQueue<>(Comparator.comparingDouble(a->a[0]));q.add(new double[]{0,start});
+        while(!q.isEmpty()) {
+            double[] v=q.remove();double d=v[0];int node=(int)v[1];
+            if(d!=dist.get(node)||d>500)continue;
+            for(Link link:adjacency.getOrDefault(node,Collections.emptyList())) {
+                double next=d+link.length;
+                if(next<dist.getOrDefault(link.node,Double.POSITIVE_INFINITY)) {dist.put(link.node,next);q.add(new double[]{next,link.node});}
+            }
+        }
+        distanceCache.put(start,dist);return dist;
+    }
+    private double travel(Candidate a,Candidate b) {
+        Edge ea=edges.get(a.edge),eb=edges.get(b.edge);
+        double best=a.edge==b.edge?Math.abs(a.p.along-b.p.along):Double.POSITIVE_INFINITY;
+        int[] na={ea.a,ea.b},nb={eb.a,eb.b};
+        double[] da={a.p.along,ea.line.length-a.p.along},db={b.p.along,eb.line.length-b.p.along};
+        for(int i=0;i<2;i++)for(int j=0;j<2;j++) {
+            double mid=na[i]==nb[j]?0:distances(na[i]).getOrDefault(nb[j],Double.POSITIVE_INFINITY);
+            best=Math.min(best,da[i]+mid+db[j]);
+        }
+        return best;
+    }
+    private List<Candidate> candidates(Fix fix,XY p) {
+        int cx=(int)Math.floor(p.x/100),cy=(int)Math.floor(p.y/100);Set<Integer> nearby=new HashSet<>(longEdges);
+        for(int x=cx-1;x<=cx+1;x++)for(int y=cy-1;y<=cy+1;y++)nearby.addAll(grid.getOrDefault(cell(x,y),Collections.emptySet()));
+        List<Candidate> result=new ArrayList<>();
+        double sigma=Math.max(4,Math.min(12,fix.accuracy>=0?fix.accuracy:6));
+        XY heading=null;
+        for(Fix old:history)if(fix.time-old.time>=6000)heading=xy(old.lat,old.lon);
+        double hx=heading==null?0:p.x-heading.x,hy=heading==null?0:p.y-heading.y,hn=Math.hypot(hx,hy);
+        for(int id:nearby) {
+            Edge edge=edges.get(id);Projection projected=edge.line.project(p);if(projected.distance>SEARCH_METERS)continue;
+            double d=projected.distance;
+            for(Line variant:edge.source.variants) {
+                Projection v=variant.project(p);
+                if(v.xy.distance(projected.xy)<4 && edge.line.project(v.xy).distance<=1.1)d=Math.min(d,v.distance);
+            }
+            double emission=.5*d*d/(sigma*sigma);
+            if(hn>5) {
+                XY a=edge.line.at(projected.along-3),b=edge.line.at(projected.along+3);
+                double dx=b.x-a.x,dy=b.y-a.y,norm=Math.hypot(dx,dy);
+                if(norm>.01)emission+=1.5*(1-Math.abs((hx*dx+hy*dy)/(hn*norm)));
+            }
+            result.add(new Candidate(id,projected,emission));
+        }
+        result.sort(Comparator.comparingDouble((Candidate c)->c.p.distance).thenComparingInt(c->c.edge));
+        if(result.size()>12)result=new ArrayList<>(result.subList(0,12));
+        result.add(new Candidate(-1,new Projection(p,0,0),3.5));return result;
+    }
+    private double transition(Candidate a,Candidate b,Layer old,Fix fix,XY p) {
+        if(a.edge<0||b.edge<0)return a.edge==b.edge?0:4;
+        double dt=Math.max(.1,(fix.time-old.fix.time)/1000.),length=travel(a,b);
+        if(length>8*dt+5)return 100000;
+        return Math.abs(length-p.distance(old.xy))/(3+.5*dt)
+                +(edges.get(a.edge).source.segment.family.equals(edges.get(b.edge).source.segment.family)?0:.6);
+    }
+    List<Decision> observe(Fix fix) {
+        List<Decision> out=new ArrayList<>();
+        if(previous!=null && fix.time<=previous.fix.time)return out;
+        if(!usable) {out.add(new Decision(fix,fix.lat,fix.lon,false,"","no_trail_context"));return out;}
+        if(previous!=null&&fix.time-previous.fix.time>10000) {out.addAll(flush());reset();}
+        XY p=xy(fix.lat,fix.lon);List<Candidate> c=candidates(fix,p);double[] scores=new double[c.size()];int[] back=new int[c.size()];
+        for(int i=0;i<c.size();i++) {
+            double best=Double.POSITIVE_INFINITY;int parent=0;
+            if(previous!=null)for(int j=0;j<previous.candidates.size();j++) {
+                double cost=previous.scores[j]+transition(previous.candidates.get(j),c.get(i),previous,fix,p);
+                if(cost<best) {best=cost;parent=j;}
+            }
+            scores[i]=(previous==null?0:best)+c.get(i).emission;back[i]=parent;
+        }
+        double min=Arrays.stream(scores).min().orElse(0);for(int i=0;i<scores.length;i++)scores[i]-=min;
+        Layer layer=new Layer(fix,p,c,scores,back);layers.addLast(layer);previous=layer;history.addLast(fix);
+        while(history.size()>2&&fix.time-history.peekFirst().time>7000)history.removeFirst();
+        while(!layers.isEmpty()&&(fix.time-layers.peekFirst().fix.time>=LAG_MS||layers.size()>32))out.add(emit());
+        return out;
+    }
+    private String family(Candidate c) {return c.edge<0?"free":edges.get(c.edge).source.segment.family;}
+    private Decision emit() {
+        List<Layer> window=new ArrayList<>(layers);Layer last=window.get(window.size()-1),first=window.get(0);
+        int best=0;for(int j=1;j<last.scores.length;j++)if(last.scores[j]<last.scores[best])best=j;
+        int[] ancestry=new int[last.candidates.size()];
+        for(int j=0;j<ancestry.length;j++) {int k=j;for(int n=window.size()-1;n>0;n--)k=window.get(n).back[k];ancestry[j]=k;}
+        Candidate chosen=first.candidates.get(ancestry[best]);String family=family(chosen);
+        double margin=Double.POSITIVE_INFINITY;
+        for(int j=0;j<ancestry.length;j++)if(!family(first.candidates.get(ancestry[j])).equals(family))margin=Math.min(margin,last.scores[j]-last.scores[best]);
+        boolean matched=chosen.edge>=0&&margin>=MIN_MARGIN&&!edges.get(chosen.edge).source.segment.isStructure();
+        XY output=first.xy;String reason=chosen.edge<0?"free_gps":matched?"connected_trail":"ambiguous_or_structure_owned";
+        if(matched) {
+            Edge edge=edges.get(chosen.edge);XY a=edge.line.at(chosen.p.along-2),b=edge.line.at(chosen.p.along+2);
+            double dx=b.x-a.x,dy=b.y-a.y,norm=Math.hypot(dx,dy);
+            if(norm>.01) {
+                double nx=-dy/norm,ny=dx/norm;
+                double desired=Math.max(-1,Math.min(1,(first.xy.x-chosen.p.xy.x)*nx+(first.xy.y-chosen.p.xy.y)*ny));
+                if(!family.equals(lateralFamily))lateral=desired;
+                double dt=lateralTime>0?Math.max(.1,(first.fix.time-lateralTime)/1000.):1;
+                lateral+=Math.max(-.35*dt,Math.min(.35*dt,(desired-lateral)*.25));
+                output=new XY(chosen.p.xy.x+lateral*nx,chosen.p.xy.y+lateral*ny);
+            } else output=chosen.p.xy;
+            lateralFamily=family;lateralTime=first.fix.time;
+        } else {lateralFamily="";lateralTime=0;}
+        layers.removeFirst();
+        double lat=lat0+Math.toDegrees(output.y/6371008.8),lon=lon0+Math.toDegrees(output.x/(6371008.8*cosLat));
+        return new Decision(first.fix,matched?lat:first.fix.lat,matched?lon:first.fix.lon,matched,family,reason);
+    }
+    List<Decision> flush() {
+        List<Decision> out=new ArrayList<>();while(!layers.isEmpty())out.add(emit());return out;
+    }
+    void reset() {if(!layers.isEmpty())throw new IllegalStateException("Resolve pending trail fixes before reset");previous=null;history.clear();lateral=0;lateralTime=0;lateralFamily="";}
+    int pendingCount() {return layers.size();}
+}

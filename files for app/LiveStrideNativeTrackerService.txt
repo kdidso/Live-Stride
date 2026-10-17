@@ -90,6 +90,8 @@ public class LiveStrideNativeTrackerService extends Service {
     private String firebaseRunnerPath;
     private boolean localOnly = false;
 
+    private final TrailNetworkMatcher trailMatcher = new TrailNetworkMatcher();
+    private final java.util.Map<Long, PendingGpsFix> pendingTrailFixes = new java.util.LinkedHashMap<>();
     private final GpsReversalFilter gpsReversalFilter = new GpsReversalFilter();
     private final java.util.Map<Long, PendingGpsFix> pendingGpsFixes = new java.util.LinkedHashMap<>();
     private final java.util.concurrent.ExecutorService pointUploadExecutor =
@@ -153,6 +155,10 @@ public class LiveStrideNativeTrackerService extends Service {
         );
 
         if (ACTION_START.equals(intent.getAction())) {
+            // Resolve an old session before replacing its run identity/configuration.
+            flushTrailMatching();
+            discardGpsVerification("run_restarted");
+            trailMatcher.setContext(null);
             supabaseUrl = intent.getStringExtra("supabaseUrl");
             supabaseAnonKey = intent.getStringExtra("supabaseAnonKey");
             runId = intent.getStringExtra("runId");
@@ -182,7 +188,6 @@ public class LiveStrideNativeTrackerService extends Service {
             LiveStridePendingPointUploadJobService.schedule(this);
             new Thread(() -> LiveStridePendingPointUploadJobService.flushPendingPoints(this)).start();
 
-            discardGpsVerification("run_restarted");
             lastObservedGpsTimeMs = 0L;
             sequenceNum = 0;
             previousLocation = null;
@@ -217,16 +222,19 @@ public class LiveStrideNativeTrackerService extends Service {
             restoreNativeRunConfig(intent);
             localOnly = intent.getBooleanExtra("localOnly", localOnly);
             boolean skipFinishSync = intent.getBooleanExtra(EXTRA_SKIP_FINISH_SYNC, false);
+            long stoppedAtMs = intent.getLongExtra("stopRequestedAtMs", System.currentTimeMillis());
             stopLocationUpdates();
+            flushTrailMatching();
             discardGpsVerification("run_stopped");
             publishGpsVerificationState(false, true);
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             if (!localOnly && !skipFinishSync) {
-                queueNativeFinishEvent();
+                queueNativeFinishEvent(stoppedAtMs);
             }
-            long stoppedAtMs = System.currentTimeMillis();
             long finalTimeMs = runStartTimeMs > 0L ? stoppedAtMs - runStartTimeMs : 0L;
             saveNativeTrackerState(false, stoppedAtMs, finalTimeMs);
+            android.os.ResultReceiver completion = intent.getParcelableExtra("stopCompletion");
+            if (completion != null) completion.send(0, new Bundle());
             LiveStridePendingPointUploadJobService.schedule(this);
             new Thread(() -> {
                 if (!skipFinishSync) {
@@ -278,7 +286,7 @@ public class LiveStrideNativeTrackerService extends Service {
         locationCallback = new LocationCallback() {
             @Override
             public void onLocationResult(LocationResult locationResult) {
-                if (locationResult == null) return;
+                if (locationResult == null || !locationStartRequested) return;
 
                 for (Location location : locationResult.getLocations()) {
                     if (location == null) continue;
@@ -328,7 +336,7 @@ public class LiveStrideNativeTrackerService extends Service {
         platformLocationListener = new LocationListener() {
             @Override
             public void onLocationChanged(Location location) {
-                if (location != null) uploadNativePoint(location);
+                if (location != null && locationStartRequested) uploadNativePoint(location);
             }
 
             @Override
@@ -405,10 +413,17 @@ private static final class PendingGpsFix {
     final Location raw, candidate;
     final BridgeTunnelMatcher.Result match;
     final float accuracy;
+    final boolean trailMatched;
+    final String trailDetail;
     PendingGpsFix(long id, Location raw, Location candidate, BridgeTunnelMatcher.Result match,
             float accuracy, long timeMs) {
+        this(id, raw, candidate, match, accuracy, timeMs, false, "");
+    }
+    PendingGpsFix(long id, Location raw, Location candidate, BridgeTunnelMatcher.Result match,
+            float accuracy, long timeMs, boolean trailMatched, String trailDetail) {
         this.observationId = id; this.raw = new Location(raw); this.candidate = new Location(candidate);
         this.match = match; this.accuracy = accuracy; this.pointTimeMs = timeMs;
+        this.trailMatched = trailMatched; this.trailDetail = trailDetail;
     }
 }
 
@@ -470,6 +485,8 @@ private void uploadNativePoint(Location rawLocation) {
     BridgeTunnelMatcher.Context serverContext =
             mapContextProvider.consumePendingContext();
     if (serverContext != null) {
+        flushTrailMatching();
+        trailMatcher.setContext(serverContext);
         bridgeTunnelMatcher.setContext(serverContext);
         serverMapContextActive = true;
         Log.i(
@@ -492,6 +509,7 @@ private void uploadNativePoint(Location rawLocation) {
     saveMatchingState(matchResult.state);
 
     if (!matchResult.matched && matcherIsHoldingForCleanerGps(matchResult.state)) {
+        flushTrailMatching();
         Log.i(
                 "LiveStrideNative",
                 "Holding raw GPS during map-matching recovery: "
@@ -521,8 +539,39 @@ private void uploadNativePoint(Location rawLocation) {
     }
 
     PendingGpsFix current = new PendingGpsFix(observationId, rawLocation, location, matchResult, accuracy, pointTimeMs);
-    // Structure matching and driver mode retain their existing policy. A long gap must not
-    // compare a new fix with an obsolete heading or commit an unverified old buffer.
+    if (matchResult.matched || presumedDriverMode || matchResult.anchorOnResume) {
+        flushTrailMatching();
+        processGpsCandidate(current, presumedDriverMode);
+        return;
+    }
+    pendingTrailFixes.put(observationId, current);
+    for (TrailNetworkMatcher.Decision decision : trailMatcher.observe(new TrailNetworkMatcher.Fix(
+            observationId, rawLocation.getLatitude(), rawLocation.getLongitude(), accuracy, pointTimeMs))) {
+        processTrailDecision(decision);
+    }
+}
+
+private void processTrailDecision(TrailNetworkMatcher.Decision decision) {
+    PendingGpsFix pending = pendingTrailFixes.remove(decision.fix.id);
+    if (pending == null) return;
+    Location candidate = new Location(pending.candidate);
+    if (decision.matched) {
+        candidate.setLatitude(decision.lat); candidate.setLongitude(decision.lon);
+    }
+    processGpsCandidate(new PendingGpsFix(pending.observationId, pending.raw, candidate,
+            pending.match, pending.accuracy, pending.pointTimeMs, decision.matched,
+            decision.reason + "; trail_family=" + decision.family), false);
+}
+
+private void flushTrailMatching() {
+    for (TrailNetworkMatcher.Decision decision : trailMatcher.flush()) processTrailDecision(decision);
+    trailMatcher.reset();
+}
+
+private void processGpsCandidate(PendingGpsFix current, boolean presumedDriverMode) {
+    BridgeTunnelMatcher.Result matchResult = current.match;
+    Location location = current.candidate;
+    long pointTimeMs = current.pointTimeMs;
     boolean longGap = previousPointTimeMs > 0 && pointTimeMs - previousPointTimeMs > 45_000L;
     if (matchResult.matched || presumedDriverMode || longGap || matchResult.anchorOnResume) {
         if (matchResult.matched && !presumedDriverMode && !longGap) {
@@ -535,9 +584,9 @@ private void uploadNativePoint(Location rawLocation) {
         publishGpsVerificationState(false, false);
         return;
     }
-    pendingGpsFixes.put(observationId, current);
+    pendingGpsFixes.put(current.observationId, current);
     GpsReversalFilter.Result result = gpsReversalFilter.observe(
-            new GpsReversalFilter.Point(observationId, location.getLatitude(), location.getLongitude(), pointTimeMs));
+            new GpsReversalFilter.Point(current.observationId, location.getLatitude(), location.getLongitude(), pointTimeMs));
     for (GpsReversalFilter.Point rejected : result.rejected) rejectGpsFix(rejected.id, result.reason);
     for (GpsReversalFilter.Point accepted : result.accepted) {
         PendingGpsFix fix = pendingGpsFixes.remove(accepted.id);
@@ -563,9 +612,9 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
     final boolean accuracyIsGood = accuracy < 0 || accuracy <= MAX_ACCEPTED_ACCURACY_METERS;
     boolean heldPoint = false;
     String holdReason = null;
-    final boolean wasMapMatched = matchResult.matched;
-    final String matchingState = matchResult.state.name().toLowerCase(java.util.Locale.US);
-    final String matchedStructureType = matchResult.structureType;
+    final boolean wasMapMatched = matchResult.matched || fix.trailMatched;
+    final String matchingState = fix.trailMatched ? "trail_tracking" : matchResult.state.name().toLowerCase(java.util.Locale.US);
+    final String matchedStructureType = fix.trailMatched ? "trail" : matchResult.structureType;
 
     double segmentMeters = 0.0;
     double instPaceMinPerMile = 0.0;
@@ -744,7 +793,7 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
             }
             body.put("app_state", appState);
             body.put("note", note + "; gps_filter=" + verificationResolution
-                    + "; matcher=" + matchResult.reason);
+                    + "; matcher=" + matchResult.reason + (fix.trailDetail.isEmpty() ? "" : "; trail=" + fix.trailDetail));
 
 
             // Phase SQLite-1:
@@ -918,14 +967,14 @@ private void refreshMapMatchingContext() {
     }
 }
 
-private void queueNativeFinishEvent() {
+private void queueNativeFinishEvent(long stoppedAtMs) {
     if (runId == null || runId.trim().isEmpty()) {
         Log.w("LiveStrideNative", "Stop requested without runId; finish event not queued");
         return;
     }
 
     try {
-        String finishPayloadJson = buildNativeFinishPayload();
+        String finishPayloadJson = buildNativeFinishPayload(stoppedAtMs);
         pointStore.savePendingFinishEvent(
                 runId,
                 supabaseUrl,
@@ -939,25 +988,23 @@ private void queueNativeFinishEvent() {
     }
 }
 
-private String buildNativeFinishPayload() throws org.json.JSONException {
+private String buildNativeFinishPayload(long stoppedAtMs) throws org.json.JSONException {
     JSONObject finishPayload = pointStore.getRunSummaryFromNativePoints(runId);
     if (finishPayload == null) {
         finishPayload = new JSONObject();
     }
 
-    String finishedAt = isoNow();
+    String finishedAt = isoTime(stoppedAtMs);
     finishPayload.put("is_live", false);
     finishPayload.put("finished_at", finishedAt);
     finishPayload.put("finalization_status", "completed");
     finishPayload.put("finalization_started_at", finishedAt);
     finishPayload.put("finalization_completed_at", finishedAt);
 
-    if (!finishPayload.has("final_time_ms") || finishPayload.isNull("final_time_ms")) {
-        long elapsedMs = runStartTimeMs > 0L
-                ? Math.max(0L, System.currentTimeMillis() - runStartTimeMs)
-                : 0L;
-        finishPayload.put("final_time_ms", elapsedMs);
-    }
+    long elapsedMs = runStartTimeMs > 0L
+            ? Math.max(0L, stoppedAtMs - runStartTimeMs)
+            : 0L;
+    finishPayload.put("final_time_ms", elapsedMs);
 
     if (!finishPayload.has("total_distance_m") || finishPayload.isNull("total_distance_m")) {
         finishPayload.put("total_distance_m", totalDistanceMeters);
@@ -1202,6 +1249,7 @@ private void updateRunNotification(
             mapContextProvider.shutdown();
         }
         if (pointStore != null) {
+            flushTrailMatching();
             discardGpsVerification("service_destroyed");
             publishGpsVerificationState(false, true);
             // Allow all queued accepted-point uploads to finish before closing their store.

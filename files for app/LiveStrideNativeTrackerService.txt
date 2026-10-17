@@ -78,7 +78,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private LocationCallback locationCallback;
     private LocationManager platformLocationManager;
     private LocationListener platformLocationListener;
-    private boolean locationStartRequested = false;
+    private final LocationUpdateLifecycle locationUpdates = new LocationUpdateLifecycle();
     private boolean usingLightPhoneLocationManager = false;
 
     private String supabaseUrl;
@@ -105,7 +105,6 @@ public class LiveStrideNativeTrackerService extends Service {
     private volatile long gpsStatusUpdatedMs = 0L;
     private long gpsStatusLastAttemptMs = 0L;
     private int sequenceNum = 0;
-    private boolean isTracking = false;
     private Location previousLocation = null;
     private double totalDistanceMeters = 0.0;
     private long runStartTimeMs = 0L;
@@ -255,7 +254,7 @@ public class LiveStrideNativeTrackerService extends Service {
     }
 
     private void startLocationUpdates() {
-        if (isTracking || locationStartRequested) return;
+        if (locationUpdates.isActive()) return;
 
         if (!localOnly && (supabaseUrl == null || supabaseAnonKey == null)) {
             stopSelf();
@@ -283,10 +282,11 @@ public class LiveStrideNativeTrackerService extends Service {
                 .setMinUpdateDistanceMeters(1.0f)
                 .build();
 
+        final long locationSession = locationUpdates.start();
         locationCallback = new LocationCallback() {
             @Override
             public void onLocationResult(LocationResult locationResult) {
-                if (locationResult == null || !locationStartRequested) return;
+                if (locationResult == null || !locationUpdates.accepts(locationSession)) return;
 
                 for (Location location : locationResult.getLocations()) {
                     if (location == null) continue;
@@ -295,19 +295,15 @@ public class LiveStrideNativeTrackerService extends Service {
             }
         };
 
-        locationStartRequested = true;
         fusedLocationClient.requestLocationUpdates(
                 locationRequest,
                 locationCallback,
                 Looper.getMainLooper()
         ).addOnSuccessListener(ignored -> {
-            if (!locationStartRequested) return;
-            isTracking = true;
-            locationStartRequested = false;
+            if (!locationUpdates.markStarted(locationSession)) return;
             Log.i("LiveStrideNative", "Google fused location updates started");
         }).addOnFailureListener(error -> {
-            isTracking = false;
-            locationStartRequested = false;
+            if (!locationUpdates.markFailed(locationSession)) return;
             Log.e("LiveStrideNative", "Google fused location request failed", error);
         });
     }
@@ -333,10 +329,11 @@ public class LiveStrideNativeTrackerService extends Service {
             return;
         }
 
+        final long locationSession = locationUpdates.start();
         platformLocationListener = new LocationListener() {
             @Override
             public void onLocationChanged(Location location) {
-                if (location != null && locationStartRequested) uploadNativePoint(location);
+                if (location != null && locationUpdates.accepts(locationSession)) uploadNativePoint(location);
             }
 
             @Override
@@ -357,7 +354,6 @@ public class LiveStrideNativeTrackerService extends Service {
         };
 
         try {
-            locationStartRequested = true;
             platformLocationManager.requestLocationUpdates(
                     provider,
                     1000L,
@@ -366,16 +362,14 @@ public class LiveStrideNativeTrackerService extends Service {
                     Looper.getMainLooper()
             );
             usingLightPhoneLocationManager = true;
-            isTracking = true;
-            locationStartRequested = false;
+            locationUpdates.markStarted(locationSession);
             Log.i(
                     "LiveStrideNative",
                     "Light Phone Android location updates started with provider=" + provider
             );
         } catch (SecurityException | IllegalArgumentException error) {
             usingLightPhoneLocationManager = false;
-            isTracking = false;
-            locationStartRequested = false;
+            locationUpdates.markFailed(locationSession);
             platformLocationListener = null;
             Log.e("LiveStrideNative", "Light Phone location request failed", error);
         }
@@ -388,7 +382,7 @@ public class LiveStrideNativeTrackerService extends Service {
     }
 
     private void stopLocationUpdates() {
-        locationStartRequested = false;
+        locationUpdates.stop();
         if (usingLightPhoneLocationManager
                 && platformLocationListener != null
                 && platformLocationManager != null) {
@@ -405,7 +399,6 @@ public class LiveStrideNativeTrackerService extends Service {
         platformLocationListener = null;
         usingLightPhoneLocationManager = false;
         locationCallback = null;
-        isTracking = false;
     }
 
 private static final class PendingGpsFix {

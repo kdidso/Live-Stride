@@ -204,12 +204,28 @@ public class LiveStrideNativeTrackerPlugin extends Plugin {
         Boolean skipFinishSync = call.getBoolean("skipFinishSync", false);
         intent.putExtra(LiveStrideNativeTrackerService.EXTRA_SKIP_FINISH_SYNC, skipFinishSync);
 
-        getContext().startService(intent);
-
-        JSObject result = new JSObject();
-        result.put("ok", true);
-        result.put("message", "Native GPS test service stop requested.");
-        call.resolve(result);
+        intent.putExtra("stopRequestedAtMs", System.currentTimeMillis());
+        android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+        java.util.concurrent.atomic.AtomicBoolean completed = new java.util.concurrent.atomic.AtomicBoolean();
+        Runnable timeout = () -> {
+            if (completed.compareAndSet(false, true)) call.reject("Native stop did not finish; please retry Stop.");
+        };
+        intent.putExtra("stopCompletion", new android.os.ResultReceiver(handler) {
+            @Override protected void onReceiveResult(int code, android.os.Bundle data) {
+                if (!completed.compareAndSet(false, true)) return;
+                handler.removeCallbacks(timeout);
+                JSObject result = new JSObject();
+                result.put("ok", true);
+                result.put("message", "Native GPS stopped and buffered trail points resolved.");
+                call.resolve(result);
+            }
+        });
+        handler.postDelayed(timeout, 15000);
+        try { getContext().startService(intent); }
+        catch (Exception error) {
+            handler.removeCallbacks(timeout);
+            if (completed.compareAndSet(false, true)) call.reject("Could not stop native GPS", error);
+        }
     }
 
     @PluginMethod

@@ -1785,7 +1785,8 @@ function createFinishedRouteMapWithOptions(container, points, detailed, createSt
   const googleOption = document.createElement("option");
   googleOption.value = "google"; googleOption.textContent = "Google Satellite";
   // This key is restricted to the hosted web app, not local files or the native WebView.
-  googleOption.disabled = window.location.hostname !== "app.livestride.run";
+  const nativeMap = window.Capacitor?.Plugins?.LiveStrideFinishedMap;
+  googleOption.disabled = !nativeMap && window.location.hostname !== "app.livestride.run";
   if (googleOption.disabled) googleOption.textContent = "Google Satellite (web app)";
   picker.append(streetOption,googleOption);
   const status = document.createElement("div");
@@ -1815,6 +1816,11 @@ function createFinishedRouteMapWithOptions(container, points, detailed, createSt
     if (googleOption.disabled) { picker.value = "streets"; return; }
     status.textContent = "Loading Google Satellite…";status.style.display = "block";
     try {
+      if (nativeMap) {
+        await nativeMap.open({points:points.map(p => ({lat:Number(p.lat),lon:Number(p.lon)}))});
+        if (!removed && current === generation) { picker.value = "streets"; status.style.display = "none"; }
+        return;
+      }
       const maps = await loadFinishedGoogleMaps();
       if (removed || current !== generation) return;
       active?.remove();active = null;
@@ -2402,6 +2408,8 @@ async function hydrateBrowserProfileRoute(container, run, detailed = false, shou
     let viewerGpsVerifying = false;
     const GPS_VERIFICATION_MESSAGE = "GPS signal unstable — verifying runner’s location…";
     let currentViewerRunIsLive = null;
+    let viewerSupabaseRunId = null;
+    let viewerFinishedRunSummary = null;
     let viewerFreshHeartbeatCount = 0;
     let lastViewerStatusMessage = null;
     let viewerStatusEl = null;
@@ -2747,6 +2755,8 @@ async function hydrateBrowserProfileRoute(container, run, detailed = false, shou
     const layerSelect = document.getElementById("layerSelect");
 
     function clearViewerSearch() {
+      viewerSupabaseRunId = null;
+      viewerFinishedRunSummary = null;
       searchRequestId++;
       searchInput.value = "";
       suggestionsList.innerHTML = "";
@@ -4910,7 +4920,7 @@ fetchElevation(effectiveCoord[1], effectiveCoord[0]).then(elev => {
 
       const { data, error } = await supabaseClient
         .from("runs")
-        .select("id, runner_name, started_at, is_live, runner_heartbeat_at")
+        .select("id, runner_name, started_at, is_live, runner_heartbeat_at, total_distance_m, final_time_ms, finished_at")
         .ilike("runner_name", `%${q}%`)
         .order("started_at", { ascending: false })
         .limit(10);
@@ -4948,7 +4958,7 @@ li.onclick = () => {
   selectedRunner = run.id;
   updateViewerWakeLock();
 
-  trackRunnerSupabase(run.id, run.is_live, run.runner_name);
+  trackRunnerSupabase(run.id, run.is_live, run.runner_name, run);
 
   suggestionsList.innerHTML = "";
   suggestionsList.style.display = "none";
@@ -5011,6 +5021,7 @@ async function startNativePathComparison(runId) {
     return;
   }
 
+  if (viewerSupabaseRunId !== runId) return;
   nativePathCoords = data
     .map(normalizeNativeRunPoint)
     .sort((a, b) => {
@@ -5043,6 +5054,7 @@ async function startNativePathComparison(runId) {
         filter: `run_id=eq.${runId}`
       },
       payload => {
+        if (viewerSupabaseRunId !== runId) return;
         const pt = payload.new;
         if (!isDisplayableNativePoint(pt)) return;
         const previousLatestPoint = getLatestSequencePoint(nativePathCoords);
@@ -5073,16 +5085,16 @@ async function startNativePathComparison(runId) {
           previousLatestSequence != null &&
           incomingSequence - previousLatestSequence === 1;
 
-        if (incomingSequenceGap) {
+        if (currentViewerRunIsLive && incomingSequenceGap) {
           showViewerStatus("Reconnecting - rebuilding route", "good");
           hideViewerStatusSoon("Reconnecting - rebuilding route", 6000);
-        } else if (hadGap && !hasGap) {
+        } else if (currentViewerRunIsLive && hadGap && !hasGap) {
           showViewerStatus("Route restored", "good");
           hideViewerStatusSoon("Route restored", 3000);
-        } else if ((wasConnectionLost || wasConnectionWarning) && cleanSequentialResume) {
+        } else if (currentViewerRunIsLive && (wasConnectionLost || wasConnectionWarning) && cleanSequentialResume) {
           showViewerStatus("Motion detected", "good");
           hideViewerStatusSoon("Motion detected", 3000);
-        } else if (!hasGap && (wasConnectionLost || wasConnectionWarning)) {
+        } else if (currentViewerRunIsLive && !hasGap && (wasConnectionLost || wasConnectionWarning)) {
           showViewerStatus("Runner reconnected", "good");
           hideViewerStatusSoon("Runner reconnected", 3000);
         }
@@ -5205,6 +5217,32 @@ function upsertSortedNativeRunPoint(pt) {
 }
     
     
+// Display native accepted coordinates unchanged. Final run totals remain authoritative
+// even when the phone uploads its buffered route tail after the finish update.
+function getNativeViewerStats(point, firstTimestamp, finishedSummary = null) {
+  const nonnegative = value => value != null && String(value).trim() !== ""
+    && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+  const finalDistanceM = nonnegative(finishedSummary?.total_distance_m);
+  const finalTimeMs = nonnegative(finishedSummary?.final_time_ms);
+  const distanceM = finalDistanceM ?? nonnegative(point.distanceM) ?? 0;
+  const distanceMi = metersToMiles(distanceM);
+  const elapsedMs = finalTimeMs ?? Math.max(0, point.timestamp - firstTimestamp);
+  const avgPace = finalDistanceM != null && finalTimeMs != null
+    ? (distanceMi > 0 ? elapsedMs / 60000 / distanceMi : 0)
+    : point.avgPace ?? 0;
+  return { distanceMi, elapsedMs, avgPace };
+}
+
+function applyViewerFinishedRunSummary(run) {
+  if (!run || run.id !== viewerSupabaseRunId || run.is_live !== false) return;
+  viewerFinishedRunSummary = { ...(viewerFinishedRunSummary || {}), ...run };
+  currentViewerRunIsLive = false;
+  setViewerGpsVerification(false);
+  const latest = getLatestSequencePoint(nativePathCoords);
+  if (latest) updateViewerFromNativePoint(latest);
+  updateSplitsPanel(nativePathCoords, { includeFinalPartial: true });
+}
+
 function updateViewerFromNativePoint(pt) {
   if (!isDisplayableNativePoint(pt)) return;
   const nativePoint = normalizeNativeRunPoint(pt);
@@ -5213,11 +5251,9 @@ function updateViewerFromNativePoint(pt) {
     ? nativePathCoords[0].timestamp
     : nativePoint.timestamp;
 
-  const elapsedMs = Math.max(0, nativePoint.timestamp - nativeStartTime);
-
-  const distanceMi = nativePoint.distanceM != null
-    ? metersToMiles(nativePoint.distanceM)
-    : 0;
+  const { elapsedMs, distanceMi, avgPace } = getNativeViewerStats(
+    nativePoint, nativeStartTime, viewerFinishedRunSummary
+  );
 
   const elevationFt =
     nativePoint.elevationFt ??
@@ -5228,7 +5264,7 @@ function updateViewerFromNativePoint(pt) {
   lastViewerData = {
     distance: distanceMi,
     pace: nativePoint.instPace ?? 0,
-    avgPace: nativePoint.avgPace ?? 0,
+    avgPace,
     startTime: nativeStartTime,
     current: [nativePoint.lon, nativePoint.lat],
     elevationFt
@@ -5239,7 +5275,7 @@ function updateViewerFromNativePoint(pt) {
   updateStatsDisplay(
     distanceMi,
     nativePoint.instPace ?? 0,
-    nativePoint.avgPace ?? 0,
+    avgPace,
     elapsedMs,
     elevationFt
   );
@@ -5267,7 +5303,9 @@ function updateViewerFromNativePoint(pt) {
   }
 } 
     
-    async function trackRunnerSupabase(runId, isLive = false, trackedRunnerName = null) {
+    async function trackRunnerSupabase(runId, isLive = false, trackedRunnerName = null, initialRun = null) {
+  viewerSupabaseRunId = runId;
+  viewerFinishedRunSummary = initialRun?.id === runId && initialRun.is_live === false ? initialRun : null;
   currentViewerRunIsLive = Boolean(isLive);
   setViewerGpsVerification(false);
 
@@ -5388,22 +5426,8 @@ activeRunStatusChannel = supabaseClient
     payload => {
       const run = payload.new;
 
-      if (run && run.is_live === false) {
-        currentViewerRunIsLive = false;
-        setViewerGpsVerification(false);
-        updateSplitsPanel(nativePathCoords, { includeFinalPartial: true });
-      
-if (run.final_time_ms != null && lastViewerData) {
-  lastViewerElapsed = run.final_time_ms;
-
-  updateStatsDisplay(
-    lastViewerData.distance,
-    lastViewerData.pace,
-    lastViewerData.avgPace,
-    lastViewerElapsed,
-    lastViewerData.elevationFt ?? null
-  );
-}
+      if (run && run.id === viewerSupabaseRunId && run.is_live === false) {
+        applyViewerFinishedRunSummary(run);
         if (viewerTimerId !== null) {
           clearInterval(viewerTimerId);
           viewerTimerId = null;
@@ -5499,9 +5523,9 @@ if (!existingPoint) return;
   )
   .subscribe();
 
-if (isLive && viewerTimerId === null) {
+if (isLive && currentViewerRunIsLive && viewerTimerId === null) {
   viewerTimerId = setInterval(() => {
-    if (!lastViewerData) return;
+    if (!lastViewerData || !currentViewerRunIsLive) return;
 
     lastViewerElapsed += 1000;
 
@@ -5517,7 +5541,7 @@ if (isLive && viewerTimerId === null) {
 lastPointReceivedTime = Date.now();
 
 viewerConnectionWatchId = setInterval(() => {
-  if (!isLive) return;
+  if (!currentViewerRunIsLive) return;
   if (!lastPointReceivedTime) return;
 
   const now = Date.now();
@@ -5537,6 +5561,8 @@ viewerConnectionWatchId = setInterval(() => {
 
     // -> Firebase legacy fallback viewer function kept for older Firebase-only runs
     function trackRunner(key) {
+      viewerSupabaseRunId = null;
+      viewerFinishedRunSummary = null;
       currentViewerRunIsLive = null;
       setViewerGpsVerification(false);
 

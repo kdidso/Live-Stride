@@ -14,6 +14,58 @@ final class LiveStrideMapContext {
     private LiveStrideMapContext() {
     }
 
+    static final int MAX_SEGMENTS = 2048, MAX_COORDINATES = 60000;
+
+    static void validate(JSONObject response) {
+        JSONArray segments = response.optJSONArray("segments");
+        if (segments == null) throw new IllegalArgumentException("Missing map segments");
+        if (segments.length() > MAX_SEGMENTS) throw new IllegalArgumentException("Too many nearby map features");
+        int count = 0;
+        for (int i=0;i<segments.length();i++) {
+            JSONObject s=segments.optJSONObject(i); if(s==null)continue;
+            JSONArray points=s.optJSONArray("points");count+=points==null?0:points.length();
+            JSONArray variants=s.optJSONArray("variants");
+            if(variants!=null)for(int j=0;j<variants.length();j++) {
+                JSONObject v=variants.optJSONObject(j);JSONArray p=v==null?null:v.optJSONArray("points");count+=p==null?0:p.length();
+            }
+            if(count>MAX_COORDINATES)throw new IllegalArgumentException("Too many nearby map coordinates");
+        }
+    }
+
+    /** Explicit server families work in every region; proximity never establishes parentage. */
+    static JSONObject normalize(JSONObject response) throws Exception {
+        if(response.optJSONArray("segments")==null)return new JSONObject().put("segments",new JSONArray());
+        validate(response);
+        JSONArray input=response.getJSONArray("segments"), output=new JSONArray();
+        Map<String,List<JSONObject>> parents=new LinkedHashMap<>();
+        List<JSONObject> parallels=new ArrayList<>();
+        for(int i=0;i<input.length();i++) {
+            JSONObject s=input.optJSONObject(i);if(s==null)continue;
+            s=new JSONObject(s.toString());
+            boolean parallel=s.optBoolean("is_parallel",false)||s.optInt("ls_parallel",0)==1;
+            if(parallel){parallels.add(s);continue;}
+            String[] id=s.optString("id").split(":");
+            // Legacy server responses have no safe relationship for generated side lines.
+            if(!s.has("family")&&id.length>=2&&"connector".equals(id[0])&&id[1].startsWith("-700"))
+                s.put("subclass","unassociated_parallel");
+            output.put(s);
+            String family=s.optString("family","");
+            if(!family.isEmpty()&&!s.optString("brunnel","").equals("tunnel")&&!s.optString("brunnel","").equals("bridge"))
+                parents.computeIfAbsent(family,k->new ArrayList<>()).add(s);
+        }
+        for(JSONObject side:parallels) {
+            List<JSONObject> family=parents.get(side.optString("family",""));
+            if(family==null)continue; // No center geometry: retain GPS rather than invent a route.
+            for(JSONObject parent:family) {
+                JSONArray variants=parent.optJSONArray("variants");
+                if(variants==null){variants=new JSONArray();parent.put("variants",variants);}
+                variants.put(side);
+            }
+        }
+        JSONObject normalized=new JSONObject(response.toString()).put("segments",output);
+        validate(normalized);return normalized;
+    }
+
     static BridgeTunnelMatcher.Context parse(JSONObject root, long updatedAtMs) {
         JSONArray jsonSegments = root.optJSONArray("segments");
         Map<String, BridgeTunnelMatcher.Segment> segmentsById = new LinkedHashMap<>();
@@ -38,7 +90,8 @@ final class LiveStrideMapContext {
                 if (Double.isNaN(latitude)
                         || Double.isInfinite(latitude)
                         || Double.isNaN(longitude)
-                        || Double.isInfinite(longitude)) {
+                        || Double.isInfinite(longitude)
+                        || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
                     continue;
                 }
                 points.add(new BridgeTunnelMatcher.Point(latitude, longitude));
@@ -52,9 +105,27 @@ final class LiveStrideMapContext {
             String subclass = jsonSegment.isNull("subclass")
                     ? ""
                     : jsonSegment.optString("subclass", "");
+            List<BridgeTunnelMatcher.Segment> variants = new ArrayList<>();
+            JSONArray vv = jsonSegment.optJSONArray("variants");
+            if (vv != null) for (int v = 0; v < vv.length(); v++) {
+                JSONObject item = vv.optJSONObject(v);
+                if (item == null) continue;
+                JSONArray coords = item.optJSONArray("points");
+                List<BridgeTunnelMatcher.Point> path = new ArrayList<>();
+                if (coords != null) for (int k = 0; k < coords.length(); k++) {
+                    JSONArray xy = coords.optJSONArray(k);
+                    if (xy == null || xy.length() < 2) continue;
+                    double lon = xy.optDouble(0, Double.NaN), lat = xy.optDouble(1, Double.NaN);
+                    if (Double.isFinite(lat) && Double.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180)
+                        path.add(new BridgeTunnelMatcher.Point(lat, lon));
+                }
+                if (path.size() >= 2) variants.add(new BridgeTunnelMatcher.Segment(
+                        item.optString("id", id + ":variant:" + v), "", subclass, path));
+            }
             segmentsById.put(
                     id,
-                    new BridgeTunnelMatcher.Segment(id, brunnel, subclass, points)
+                    new BridgeTunnelMatcher.Segment(id, brunnel, subclass, points,
+                            jsonSegment.optString("family", id), jsonSegment.optDouble("layer", 0), variants)
             );
         }
 

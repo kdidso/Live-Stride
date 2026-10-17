@@ -74,12 +74,23 @@ final class BridgeTunnelMatcher {
         final String brunnel;
         final String subclass;
         final List<Point> points;
+        final String family;
+        final double layer;
+        final List<Segment> variants;
 
         Segment(String id, String brunnel, String subclass, List<Point> points) {
+            this(id, brunnel, subclass, points, id, 0, Collections.emptyList());
+        }
+
+        Segment(String id, String brunnel, String subclass, List<Point> points,
+                String family, double layer, List<Segment> variants) {
             this.id = id;
             this.brunnel = brunnel == null ? "" : brunnel;
             this.subclass = subclass == null ? "" : subclass;
             this.points = points;
+            this.family = family;
+            this.layer = layer;
+            this.variants = variants;
         }
 
         boolean isStructure() {

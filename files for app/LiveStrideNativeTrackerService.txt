@@ -489,6 +489,9 @@ private void uploadNativePoint(Location rawLocation) {
         );
     }
     final boolean presumedDriverMode = isPresumedDriver(pointTimeMs);
+    bridgeTunnelMatcher.setEntryHint(presumedDriverMode ? null : trailMatcher.structureHint(
+            new TrailNetworkMatcher.Fix(observationId, rawLocation.getLatitude(),
+                    rawLocation.getLongitude(), accuracy, pointTimeMs)));
     BridgeTunnelMatcher.Result matchResult = bridgeTunnelMatcher.process(
             new BridgeTunnelMatcher.Point(
                     rawLocation.getLatitude(),

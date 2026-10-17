@@ -1,0 +1,92 @@
+package com.kdidso.livestride;
+
+import org.json.JSONObject;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+/** Disposable nearby map geometry only. Never contains or evicts run recordings. */
+final class NearbyMapCache {
+    static final long MAX_BYTES = 64L * 1024 * 1024;
+    static final int MAX_AREAS = 128, MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+    private final File directory;
+    private final long maxBytes;
+    private final int maxAreas;
+    NearbyMapCache(File directory) { this(directory, MAX_BYTES, MAX_AREAS); }
+    NearbyMapCache(File directory, long maxBytes, int maxAreas) {
+        this.directory=directory;this.maxBytes=maxBytes;this.maxAreas=maxAreas;
+        directory.mkdirs(); trim(null);
+    }
+    private File file(String key) {
+        if (!key.matches("-?[0-9]+_-?[0-9]+_[0-9]+")) throw new IllegalArgumentException("Invalid map tile key");
+        return new File(directory,key+".json");
+    }
+    synchronized void write(String key, JSONObject response) throws Exception {
+        byte[] bytes=response.toString().getBytes(StandardCharsets.UTF_8);
+        if(bytes.length>MAX_RESPONSE_BYTES || bytes.length>maxBytes) throw new IOException("Map area exceeds cache limit");
+        if(!directory.isDirectory()&&!directory.mkdirs())throw new IOException("Map cache unavailable");
+        File destination=file(key), temp=new File(directory,key+".tmp");
+        try {
+            try(FileOutputStream out=new FileOutputStream(temp)){out.write(bytes);out.getFD().sync();}
+            if(!temp.renameTo(destination)) {
+                if(destination.exists()&&!destination.delete())throw new IOException("Cannot replace map cache");
+                if(!temp.renameTo(destination))throw new IOException("Cannot publish map cache");
+            }
+        } finally {temp.delete();}
+        trim(destination);
+    }
+    synchronized JSONObject readNearby(String key,double lat,double lon) {
+        File exact=file(key);List<File> candidates=files();
+        candidates.sort(Comparator.comparingDouble(f->f.equals(exact)?-1:tileDistance(f,lat,lon)));
+        int checked=0;
+        for(File f:candidates) {
+            if(checked++>=12)break;
+            try {
+                if(f.length()>MAX_RESPONSE_BYTES){f.delete();continue;}
+                JSONObject json=new JSONObject(readBounded(new FileInputStream(f),MAX_RESPONSE_BYTES));
+                if(!covers(json,lat,lon))continue;
+                LiveStrideMapContext.validate(json);
+                f.setLastModified(System.currentTimeMillis());
+                return json;
+            } catch(Exception ignored){f.delete();}
+        }
+        return null;
+    }
+    static boolean covers(JSONObject json,double lat,double lon) {
+        org.json.JSONArray center=json.optJSONArray("center");
+        if(center==null||center.length()<2)return false;
+        double radius=json.optDouble("radiusMeters",0);
+        return distance(center.optDouble(1,Double.NaN),center.optDouble(0,Double.NaN),lat,lon)+150<=radius;
+    }
+    private static double tileDistance(File f,double lat,double lon) {
+        try {
+            String[] p=f.getName().replace(".json","").split("_");
+            return distance((Long.parseLong(p[0])+.5)*.005,(Long.parseLong(p[1])+.5)*.005,lat,lon);
+        }catch(Exception e){return Double.POSITIVE_INFINITY;}
+    }
+    private static double distance(double a,double b,double c,double d) {
+        return Math.hypot(Math.toRadians(c-a)*6371008.8,
+                Math.toRadians(d-b)*6371008.8*Math.cos(Math.toRadians((a+c)/2)));
+    }
+    static String readBounded(InputStream input,int limit) throws IOException {
+        try(InputStream in=input;ByteArrayOutputStream out=new ByteArrayOutputStream()) {
+            byte[] buffer=new byte[8192];int n,total=0;
+            while((n=in.read(buffer))!=-1){total+=n;if(total>limit)throw new IOException("Map response exceeds size limit");out.write(buffer,0,n);}
+            return new String(out.toByteArray(),StandardCharsets.UTF_8);
+        }
+    }
+    private List<File> files() {
+        List<File> out=new ArrayList<>();File[] all=directory.listFiles();
+        if(all!=null)for(File f:all)if(f.isFile()&&f.getName().matches("-?[0-9]+_-?[0-9]+_[0-9]+\\.json"))out.add(f);
+        return out;
+    }
+    synchronized void trim(File protectedFile) {
+        List<File> all=files();all.sort(Comparator.comparingLong(File::lastModified).thenComparing(File::getName));
+        long total=0;for(File f:all)total+=f.length();int count=all.size();
+        for(File f:all) {
+            if(total<=maxBytes&&count<=maxAreas)break;
+            if(f.equals(protectedFile))continue;
+            long size=f.length();if(f.delete()){total-=size;count--;}
+        }
+    }
+}

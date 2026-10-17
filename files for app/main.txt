@@ -673,6 +673,8 @@ function normalizeProfileRunAnalysis(analysis) {
           segment_elapsed_sec: Number.isFinite(Number(sample.segment_elapsed_sec)) ? Number(sample.segment_elapsed_sec) : null,
           speed_mps: Number.isFinite(Number(sample.speed_mps)) ? Number(sample.speed_mps) : null,
           pace_sec_per_mile: Number.isFinite(Number(sample.pace_sec_per_mile)) ? Number(sample.pace_sec_per_mile) : null,
+          moving_time_ms: sample.moving_time_ms != null && Number.isFinite(Number(sample.moving_time_ms)) ? Number(sample.moving_time_ms) : null,
+          verification_moving_ms: sample.verification_moving_ms != null ? Number(sample.verification_moving_ms) : null,
           is_held: Boolean(sample.is_held || sample.held || sample.is_hold || sample.was_held || sample.hold)
         };
       })
@@ -707,6 +709,7 @@ async function loadProfileRoute(runId, run = null) {
           lat: Number(point.getAttribute("lat")),
           lon: Number(point.getAttribute("lon")),
           elevation: Number.isFinite(elevation) ? elevation : null,
+          movingTimeMs: readGpxMovingMilliseconds(point),
           verificationMovingMs: readGpxVerificationMovingMilliseconds(point),
           time: Number.isFinite(time) ? time : null
         };
@@ -732,6 +735,7 @@ async function loadProfileRoute(runId, run = null) {
           note: point.note,
           app_state: point.app_state,
           gps_status: point.gps_status,
+          movingTimeMs: point.movingTimeMs,
           verificationMovingMs: point.verificationMovingMs,
           lat: point.lat,
           lon: point.lon,
@@ -775,6 +779,64 @@ function readGpxVerificationMovingMilliseconds(point) {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function readGpxMovingMilliseconds(point) {
+  const text = point.getElementsByTagNameNS("https://livestride.run/gpx/1", "moving_ms")[0]?.textContent;
+  if (text == null || text.trim() === "") return null;
+  const value = Number(text);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function getMovingTimeIntervals(points) {
+  const time = point => {
+    const value = point?.timestamp ?? point?.time ?? point?.recorded_at;
+    return typeof value === "number" ? value : Date.parse(value);
+  };
+  const native = point => /foreground_service|private_native|browser_tracking|browser_hold/.test(String(point?.app_state || ""))
+    || /gps_filter=|native Android GPS|Private local run|Map matched to connected/.test(String(point?.note || ""));
+  const held = point => Boolean(point?.is_held || point?.isHeld || /(?:^|_)hold(?:_|$)/.test(String(point?.app_state || ""))
+    || /repeated last accepted coordinate/.test(String(point?.note || "")));
+  const intervals = points.map((point, index) => {
+    if (!index) return 0;
+    const previous = points[index - 1], duration = time(point) - time(previous);
+    if (!Number.isFinite(duration) || duration <= 0) return 0;
+    const status = String(point.gps_status ?? point.gpsStatus ?? "accepted").toLowerCase();
+    if (!["accepted", "normal"].includes(status) || /reject|pending|verifying/.test(String(point.app_state || ""))) return 0;
+    const noteValue = String(point.note || "").match(/(?:^|;\s*)moving_ms=(\d+(?:\.\d+)?)(?:;|\s|$)/);
+    const explicitValue = point.movingTimeMs ?? point.moving_time_ms ?? noteValue?.[1];
+    if (explicitValue != null && explicitValue !== "" && Number.isFinite(Number(explicitValue)) && Number(explicitValue) >= 0) {
+      return Math.min(duration, Number(explicitValue));
+    }
+    const verification = getVerificationMovingMilliseconds(point, duration);
+    if (verification > 0) return verification;
+    if (native(point)) return held(point) ? 0 : duration;
+    const distance = haversineDistance([previous.lon, previous.lat], [point.lon, point.lat]);
+    const speed = distance / (duration / 1000);
+    return speed >= 0.44704 && speed <= 62.5878 ? duration : 0;
+  });
+  // Legacy records lack raw speed. Restore only brief trail-coordinate
+  // suppression bounded by continuing movement, never an explicit stopped timer.
+  for (let start = 1; start < points.length; start += 1) {
+    if (!held(points[start])) continue;
+    let end = start;
+    while (end + 1 < points.length && held(points[end + 1])) end += 1;
+    const duration = time(points[end]) - time(points[start - 1]);
+    const next = points[end + 1];
+    const legacyTrailOnly = points.slice(start, end + 1).every(point =>
+      point.movingTimeMs == null && point.moving_time_ms == null && !/(?:^|;\s*)moving_ms=/.test(String(point.note || ""))
+      && /trail=connected_trail/.test(String(point.note || ""))
+      && /during (?:tiny_movement|stationary_release_wait)|gps_filter=(?:confirmed_turn|forward_recovery)/.test(String(point.note || "")));
+    if (next && duration > 0 && duration <= 8000 && legacyTrailOnly) {
+      const span = time(next) - time(points[start - 1]);
+      const distance = haversineDistance([points[start - 1].lon, points[start - 1].lat], [next.lon, next.lat]);
+      if (span > 0 && distance / (span / 1000) >= 0.44704) {
+        for (let i = start; i <= end; i += 1) intervals[i] = time(points[i]) - time(points[i - 1]);
+      }
+    }
+    start = end;
+  }
+  return intervals;
+}
+
 function analyzeProfilePoints(points) {
   const ELEVATION_GAIN_THRESHOLD_METERS = 5;
   const MOVING_MIN_DISTANCE_METERS = 1;
@@ -813,41 +875,26 @@ function analyzeProfilePoints(points) {
     }
   }
 
-  let movingTimeMs = 0;
+  const movingIntervals = getMovingTimeIntervals(points);
+  const movingTimeMs = movingIntervals.reduce((sum, value) => sum + value, 0);
   let verificationMovingTimeMs = 0;
   let timedSegments = 0;
   for (let index = 1; index < points.length; index += 1) {
-    if (!Number.isFinite(points[index - 1].time) || !Number.isFinite(points[index].time)) continue;
-    const difference = points[index].time - points[index - 1].time;
-    if (difference > 0) {
-      const verifiedMs = getVerificationMovingMilliseconds(points[index], difference);
-      verificationMovingTimeMs += verifiedMs;
-      const segmentMeters = haversineDistance(
-        [points[index - 1].lon, points[index - 1].lat],
-        [points[index].lon, points[index].lat]
-      );
-      const speedMph = (segmentMeters / (difference / 1000)) * 2.23694;
-      if (
-        segmentMeters >= MOVING_MIN_DISTANCE_METERS &&
-        speedMph >= MOVING_MIN_SPEED_MPH &&
-        speedMph <= MOVING_MAX_SPEED_MPH
-      ) {
-        movingTimeMs += difference;
-        timedSegments += 1;
-       } else if (verifiedMs > 0) {
-        movingTimeMs += verifiedMs;
-        timedSegments += 1;
-      }
+    const difference = Number(points[index].time) - Number(points[index - 1].time);
+    if (Number.isFinite(difference) && difference > 0) {
+      verificationMovingTimeMs += getVerificationMovingMilliseconds(points[index], difference);
+      if (movingIntervals[index] > 0) timedSegments += 1;
     }
   }
-
+  const movingTimePolicyVersion = points.some(point => point.movingTimeMs != null || point.moving_time_ms != null
+    || /gps_filter=|moving_ms=/.test(String(point.note || "")) || /foreground_service|private_native/.test(String(point.app_state || ""))) ? 2 : 0;
   return {
     elevationGainM,
     elevationLossM,
     minElevationM,
     maxElevationM,
     totalDistanceM,
-    verificationMovingTimeMs, movingTimeMs: timedSegments ? movingTimeMs : null
+    verificationMovingTimeMs, movingTimePolicyVersion, movingTimeMs: timedSegments || movingTimePolicyVersion === 2 ? movingTimeMs : null
   };
 }
 
@@ -1068,7 +1115,7 @@ function createProfileElevationChart(routeData) {
 }
 
 function getProfileSummaryValue(routeData, key) {
-  if (key === "moving_time_ms" && Number(routeData?.analysis?.verificationMovingTimeMs) > 0) {
+  if (key === "moving_time_ms" && (Number(routeData?.analysis?.movingTimePolicyVersion) === 2 || Number(routeData?.analysis?.verificationMovingTimeMs) > 0)) {
     return Number(routeData.analysis.movingTimeMs || 0);
   }
   const run = routeData?.run;
@@ -1097,6 +1144,8 @@ function createProfilePaceSamples(routeData) {
     ? storedSamples
     : (routeData?.points || []).map((point, index) => ({
         sequence_num: index + 1,
+        moving_time_ms: point.movingTimeMs,
+        verification_moving_ms: point.verificationMovingMs,
         lat: point.lat,
         lon: point.lon,
         elevation_m: point.elevation,
@@ -1140,6 +1189,8 @@ function createProfilePaceSamples(routeData) {
       segmentElapsedSec: Number.isFinite(elapsedSec) ? elapsedSec : null,
       segmentDistanceM: Number.isFinite(segmentDistanceM) ? segmentDistanceM : null,
       speedMps: Number.isFinite(Number(sample.speed_mps)) ? Number(sample.speed_mps) : Number.isFinite(derivedSpeed) ? derivedSpeed : null,
+      movingTimeMs: sample.moving_time_ms != null && Number.isFinite(Number(sample.moving_time_ms)) ? Number(sample.moving_time_ms) : null,
+      verificationMovingMs: sample.verification_moving_ms != null ? Number(sample.verification_moving_ms) : 0,
       isHeld: Boolean(sample.is_held || sample.held || sample.is_hold || sample.was_held || sample.hold)
     };
   }).filter(sample => Number.isFinite(sample.distanceMi));
@@ -1475,7 +1526,9 @@ function getProfileSampleElapsedSec(sample) {
 function isProfileMovingInterval(previous, current) {
   const MIN_MOVING_SPEED_MPS = 0.44704;
   const MAX_MOVING_SPEED_MPS = 62.5878;
-  if (previous?.isHeld || current?.isHeld) return false;
+  if (current?.movingTimeMs != null) return current.movingTimeMs > 0;
+  if (current?.verificationMovingMs > 0) return true;
+  if (current?.isHeld) return false;
   const speed = Number.isFinite(current?.speedMps) ? current.speedMps : null;
   if (speed != null) return speed >= MIN_MOVING_SPEED_MPS && speed <= MAX_MOVING_SPEED_MPS;
   const distanceM = Number.isFinite(current?.segmentDistanceM)
@@ -1484,7 +1537,7 @@ function isProfileMovingInterval(previous, current) {
   const elapsedSec = Number.isFinite(current?.segmentElapsedSec)
     ? current.segmentElapsedSec
     : Math.max(0, getProfileSampleElapsedSec(current) - getProfileSampleElapsedSec(previous));
-  if (!Number.isFinite(distanceM) || !Number.isFinite(elapsedSec) || elapsedSec <= 0 || distanceM < 1) return false;
+  if (!Number.isFinite(distanceM) || !Number.isFinite(elapsedSec) || elapsedSec <= 0 || distanceM <= 0) return false;
   const derivedSpeed = distanceM / elapsedSec;
   return derivedSpeed >= MIN_MOVING_SPEED_MPS && derivedSpeed <= MAX_MOVING_SPEED_MPS;
 }
@@ -1540,7 +1593,12 @@ function calculateProfileSplits(routeData) {
       const intervalStartMi = previous.distanceMi;
       const intervalEndMi = current.distanceMi;
       const intervalDistanceMi = intervalEndMi - intervalStartMi;
-      if (intervalEndMi <= startMi || intervalStartMi >= endMi || intervalDistanceMi <= 0) continue;
+      if (intervalDistanceMi <= 0) {
+        const belongs = intervalEndMi >= startMi && (intervalEndMi < endMi || (isFinalSplit && intervalEndMi <= endMi));
+        if (belongs) movingSec += Math.max(0, Number(current.movingTimeMs ?? current.verificationMovingMs ?? 0)) / 1000;
+        continue;
+      }
+      if (intervalEndMi <= startMi || intervalStartMi >= endMi) continue;
       if (!isProfileMovingInterval(previous, current)) continue;
       const overlapStartMi = Math.max(startMi, intervalStartMi);
       const overlapEndMi = Math.min(endMi, intervalEndMi);
@@ -1549,7 +1607,9 @@ function calculateProfileSplits(routeData) {
         ? current.segmentElapsedSec
         : getProfileSampleElapsedSec(current) - getProfileSampleElapsedSec(previous);
       if (Number.isFinite(intervalElapsedSec) && intervalElapsedSec > 0 && overlapRatio > 0) {
-        movingSec += intervalElapsedSec * overlapRatio;
+        const creditedSeconds = current.movingTimeMs != null ? current.movingTimeMs / 1000
+          : current.verificationMovingMs > 0 ? Math.min(intervalElapsedSec, current.verificationMovingMs / 1000) : intervalElapsedSec;
+        movingSec += Math.min(intervalElapsedSec, creditedSeconds) * overlapRatio;
       }
     }
 
@@ -1699,7 +1759,7 @@ function createProfilePaceChart(routeData, run) {
   const elevationAreaPath = hasElevation
     ? `${elevationPath} L${xFor(maxDistance).toFixed(1)} ${padding.top + plotHeight} L${padding.left} ${padding.top + plotHeight} Z`
     : "";
-  const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms") || Number(run?.moving_time_ms || 0);
+  const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms");
   const elapsedMs = getProfileSummaryValue(routeData, "elapsed_time_ms") || Number(run?.elapsed_time_ms || 0);
   const distanceM = getProfileSummaryValue(routeData, "distance_m") || routeData?.analysis?.totalDistanceM || Number(run?.distance_m || 0);
   const distanceMi = metersToMiles(distanceM);
@@ -2196,7 +2256,7 @@ function applyProfileRouteStats(run, stats, routeData) {
     );
   }
   if (stats.movingStat) {
-    const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms") || run.moving_time_ms;
+    const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms");
     updateProfileStatValue(stats.movingStat, movingTimeMs ? formatProfileDuration(movingTimeMs) : "--");
   }
   if (stats.gainStat) {
@@ -2340,7 +2400,7 @@ async function openProfileActivityDetail(run) {
     const routeDistanceM = getProfileSummaryValue(routeData, "distance_m") || Number(run.distance_m || 0);
     const routeMiles = metersToMiles(routeDistanceM);
     applyProfileRouteStats(run, { distanceStat, paceStat, movingStat, gainStat }, routeData);
-    const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms") || run.moving_time_ms;
+    const movingTimeMs = getProfileSummaryValue(routeData, "moving_time_ms");
     if (movingTimeMs && routeMiles > 0) {
       const movingSecondsPerMile = movingTimeMs / 1000 / routeMiles;
       const movingPace = createProfileStat("Moving pace", formatProfileSecondsPerMile(movingSecondsPerMile));
@@ -5351,6 +5411,7 @@ function convertToGpx(runData) {
     <trkseg>
 `;
 
+  const exportedMovingIntervals = getMovingTimeIntervals(runData.pathCoords);
   runData.pathCoords.forEach((pt, index) => {
     const elevation = Number(pt.elevation);
     const elevationLine = pt.elevation != null && Number.isFinite(elevation)
@@ -5361,9 +5422,10 @@ function convertToGpx(runData) {
         const previousMs = previous ? new Date(previous.time ?? previous.timestamp).getTime() : NaN;
         const durationMs = new Date(time).getTime() - previousMs;
         const verifiedMs = getVerificationMovingMilliseconds(pt, durationMs);
-        const verificationLine = verifiedMs > 0
-          ? `        <extensions><livestride:verification_moving_ms>${verifiedMs}</livestride:verification_moving_ms></extensions>\n`
-          : "";
+        const movingMs = exportedMovingIntervals[index];
+        const timingTags = `<livestride:moving_ms>${movingMs}</livestride:moving_ms>`
+          + (verifiedMs > 0 ? `<livestride:verification_moving_ms>${verifiedMs}</livestride:verification_moving_ms>` : "");
+        const verificationLine = `        <extensions>${timingTags}</extensions>\n`;
     gpx += `      <trkpt lat="${pt.lat}" lon="${pt.lon}">
 ${elevationLine}        <time>${time}</time>
 ${verificationLine}      </trkpt>
@@ -5494,6 +5556,7 @@ function parseGpxAnalysisPoints(gpx) {
         timestamp: Number.isFinite(timestamp) ? timestamp : null,
         time: timeText || null,
         elevation: Number.isFinite(elevation) ? elevation : null,
+          movingTimeMs: readGpxMovingMilliseconds(point),
           verificationMovingMs: readGpxVerificationMovingMilliseconds(point),
         distanceM: null,
         instPace: null,
@@ -5533,6 +5596,7 @@ function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
     : [];
   sortRunPoints(points);
 
+  const movingIntervals = getMovingTimeIntervals(points);
   let cumulativeDistanceM = 0;
   const samples = points.map((point, index) => {
     const previous = index > 0 ? points[index - 1] : null;
@@ -5569,6 +5633,7 @@ function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
       distance_m: cumulativeDistanceM,
       segment_distance_m: segmentDistanceM,
       segment_elapsed_sec: segmentElapsedSec,
+      moving_time_ms: movingIntervals[index],
       verification_moving_ms: getVerificationMovingMilliseconds(point, segmentElapsedSec * 1000),
       speed_mps: derivedSpeedMps,
       pace_sec_per_mile: Number.isFinite(pointPaceSecPerMile) ? pointPaceSecPerMile : null
@@ -5609,8 +5674,9 @@ function buildProfileRunAnalysis(pointsInput, metadata = {}, options = {}) {
       finished_at: metadata.finished_at || null,
       distance_m: distanceM,
       elapsed_time_ms: elapsedMs,
+      moving_time_policy_version: analyzed.movingTimePolicyVersion || 0,
       verification_moving_time_ms: analyzed.verificationMovingTimeMs || 0,
-      moving_time_ms: analyzed.verificationMovingTimeMs > 0 ? analyzed.movingTimeMs : metadata.moving_time_ms != null && Number.isFinite(Number(metadata.moving_time_ms)) && Number(metadata.moving_time_ms) > 0
+      moving_time_ms: analyzed.movingTimePolicyVersion === 2 || analyzed.verificationMovingTimeMs > 0 ? analyzed.movingTimeMs : metadata.moving_time_ms != null && Number.isFinite(Number(metadata.moving_time_ms)) && Number(metadata.moving_time_ms) > 0
         ? Number(metadata.moving_time_ms)
         : analyzed.movingTimeMs,
       average_pace_sec_per_mile: averagePaceSecPerMile,
@@ -5640,8 +5706,8 @@ async function saveGpxToProfile(gpx, metadata, onStatus = null, analysis = null)
   onStatus?.("Creating your profile activity...");
   const analysisMovingTimeMs = Number(analysis?.summary?.moving_time_ms);
   if (
-    (Number(analysis?.summary?.verification_moving_time_ms) > 0 || !Number.isFinite(Number(metadata.moving_time_ms)) || Number(metadata.moving_time_ms) <= 0) &&
-    Number.isFinite(analysisMovingTimeMs) && analysisMovingTimeMs > 0
+    (Number(analysis?.summary?.moving_time_policy_version) === 2 || Number(analysis?.summary?.verification_moving_time_ms) > 0 || !Number.isFinite(Number(metadata.moving_time_ms)) || Number(metadata.moving_time_ms) <= 0) &&
+    Number.isFinite(analysisMovingTimeMs) && analysisMovingTimeMs >= 0
   ) {
     metadata = { ...metadata, moving_time_ms: analysisMovingTimeMs };
   }
@@ -6759,6 +6825,7 @@ function normalizeRunPoint(pt) {
     note: pt.note ?? null,
     app_state: pt.app_state ?? null,
     gps_status: pt.gps_status ?? pt.gpsStatus ?? "accepted",
+    movingTimeMs: pt.movingTimeMs ?? pt.moving_time_ms ?? null,
     verificationMovingMs: pt.verificationMovingMs ?? pt.verification_moving_ms ?? 0,
     sequenceNum: pt.sequence_num ?? null,
     lat: pt.lat,

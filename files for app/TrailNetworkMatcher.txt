@@ -215,6 +215,55 @@ final class TrailNetworkMatcher {
         return Math.abs(length-p.distance(old.xy))/(3+.5*dt)
                 +(edges.get(a.edge).source.segment.family.equals(edges.get(b.edge).source.segment.family)?0:.6);
     }
+    /** Read-only one-step network extension. Does not change the smoothing window. */
+    BridgeTunnelMatcher.StructureHint structureHint(Fix fix) {
+        if (!usable || previous == null || fix.time <= previous.fix.time
+                || fix.time - previous.fix.time > 2500 || fix.accuracy < 0 || fix.accuracy > 10) return null;
+        XY p = xy(fix.lat, fix.lon);
+        List<Candidate> options = candidates(fix, p);
+        double[] scores = new double[options.size()];
+        int best = 0;
+        for (int i = 0; i < options.size(); i++) {
+            double cost = Double.POSITIVE_INFINITY;
+            for (int j = 0; j < previous.candidates.size(); j++) {
+                cost = Math.min(cost, previous.scores[j]
+                        + transition(previous.candidates.get(j), options.get(i), previous, fix, p));
+            }
+            scores[i] = cost + options.get(i).emission;
+            if (scores[i] < scores[best]) best = i;
+        }
+        Candidate chosen = options.get(best);
+        if (chosen.edge < 0) return null;
+        Source source = edges.get(chosen.edge).source;
+        if (!source.segment.isStructure() || chosen.p.distance > 7) return null;
+        double margin = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < options.size(); i++) {
+            if (!family(options.get(i)).equals(family(chosen))) margin = Math.min(margin, scores[i] - scores[best]);
+        }
+        if (margin < MIN_MARGIN) return null;
+        Projection current = source.line.project(p);
+        Fix first = null;
+        double priorAlong = 0;
+        for (Fix old : history) {
+            if (fix.time - old.time > 6000 || old.accuracy < 0 || old.accuracy > 10) continue;
+            Projection prior = source.line.project(xy(old.lat, old.lon));
+            if (prior.distance > 10) continue;
+            if (first == null) { first = old; priorAlong = prior.along; }
+        }
+        if (first == null || fix.time - first.time < 2000
+                || Math.abs(current.along - priorAlong) < 3) return null;
+        boolean forward = current.along > priorAlong;
+        double lastAlong = priorAlong;
+        for (Fix old : history) {
+            if (old.time < first.time) continue;
+            double along = source.line.project(xy(old.lat, old.lon)).along;
+            if ((along - lastAlong) * (forward ? 1 : -1) < -3) return null;
+            lastAlong = along;
+        }
+        if ((current.along - lastAlong) * (forward ? 1 : -1) < -3) return null;
+        return new BridgeTunnelMatcher.StructureHint(source.segment.id, forward, fix.time);
+    }
+
     List<Decision> observe(Fix fix) {
         List<Decision> out=new ArrayList<>();
         if(previous!=null && fix.time<=previous.fix.time)return out;

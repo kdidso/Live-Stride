@@ -110,6 +110,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private long runStartTimeMs = 0L;
     private long previousPointTimeMs = 0L;
     private boolean stationaryHoldActive = false;
+    private Location previousRawAcceptedLocation;
     private LiveStridePointStore pointStore;
     private LiveStrideMapContextProvider mapContextProvider;
     private long lastPendingFlushKickMs = 0L;
@@ -190,6 +191,7 @@ public class LiveStrideNativeTrackerService extends Service {
             lastObservedGpsTimeMs = 0L;
             sequenceNum = 0;
             previousLocation = null;
+            previousRawAcceptedLocation = null;
             totalDistanceMeters = 0.0;
             runStartTimeMs = 0L;
             previousPointTimeMs = 0L;
@@ -593,6 +595,7 @@ private void processGpsCandidate(PendingGpsFix current, boolean presumedDriverMo
 
 private void acceptNativePoint(PendingGpsFix fix, String verificationResolution) {
     final Location savedPreviousLocation = previousLocation;
+    final Location savedPreviousRawLocation = previousRawAcceptedLocation;
     final long savedPreviousTimeMs = previousPointTimeMs, savedRunStartMs = runStartTimeMs;
     final double savedDistanceMeters = totalDistanceMeters;
     final boolean savedStationaryHold = stationaryHoldActive;
@@ -715,6 +718,12 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
         }
     }
 
+    final long movingIntervalMs = MovingTimePolicy.intervalMilliseconds(
+            previousPointTimeMs > 0 ? pointTimeMs - previousPointTimeMs : 0L,
+            heldPoint, matchResult.matched, verificationResolution,
+            rawLocation.hasSpeed() ? rawLocation.getSpeed() : -1f,
+            previousRawAcceptedLocation == null ? 0.0 : previousRawAcceptedLocation.distanceTo(rawLocation));
+    previousRawAcceptedLocation = new Location(rawLocation);
     final double lat = location.getLatitude();
     final double lon = location.getLongitude();
 
@@ -788,7 +797,9 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
                 note = note + "; anchored resume from held coordinate during " + finalAnchorReason;
             }
             body.put("app_state", appState);
-            body.put("note", note + "; gps_filter=" + verificationResolution
+            body.put("note", note + "; moving_ms=" + movingIntervalMs
+                    + "; raw_speed_mps=" + (rawLocation.hasSpeed() ? rawLocation.getSpeed() : "unknown")
+                    + "; gps_filter=" + verificationResolution
                     + "; matcher=" + matchResult.reason + (fix.trailDetail.isEmpty() ? "" : "; trail=" + fix.trailDetail));
 
 
@@ -833,6 +844,7 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
         if (!acceptedStored) {
             previousLocation = savedPreviousLocation; previousPointTimeMs = savedPreviousTimeMs;
             runStartTimeMs = savedRunStartMs; totalDistanceMeters = savedDistanceMeters;
+            previousRawAcceptedLocation = savedPreviousRawLocation;
             stationaryHoldActive = savedStationaryHold; sequenceNum = savedSequenceNum;
             lastCompletedMile = savedCompletedMile; lastMileSplitTimeMs = savedSplitTimeMs;
             latestMileSplitText = savedSplitText;

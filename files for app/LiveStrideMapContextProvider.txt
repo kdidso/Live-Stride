@@ -2,217 +2,91 @@ package com.kdidso.livestride;
 
 import android.content.Context;
 import android.util.Log;
-
 import org.json.JSONObject;
-
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.File;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
+/** One nearby network in memory; bounded on-disk geometry cache for every region. */
 final class LiveStrideMapContextProvider {
-    private static final String TAG = "LiveStrideMapContext";
-    private static final int PREFETCH_RADIUS_METERS = 1_000;
-    private static final long SUCCESS_REFRESH_MS = 5 * 60 * 1_000L;
-    private static final long FAILURE_RETRY_MS = 60_000L;
-    private static final String CACHE_DIRECTORY_NAME = "map_context_cache";
-
-    private final File cacheDirectory;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private final AtomicReference<BridgeTunnelMatcher.Context> pendingContext =
-            new AtomicReference<>();
-    private final Object lock = new Object();
-
-    private String desiredTileKey;
-    private double desiredLatitude;
-    private double desiredLongitude;
-    private String lastHandledTileKey;
-    private long lastAttemptAtMs;
-    private boolean lastAttemptSucceeded;
-    private boolean workerRunning;
-
+    private static final String TAG="LiveStrideMapContext";
+    private static final int RADIUS=1000;
+    private final NearbyMapCache cache;
+    private final ExecutorService executor=Executors.newSingleThreadExecutor();
+    private final AtomicReference<BridgeTunnelMatcher.Context> pending=new AtomicReference<>();
+    private final Object lock=new Object();
+    private String desiredKey,lastKey,publishedFingerprint;
+    private double latitude,longitude;
+    private long lastAttempt;
+    private boolean succeeded,workerRunning,closed;
+    private JSONObject activeArea;
     LiveStrideMapContextProvider(Context context) {
-        cacheDirectory = new File(context.getFilesDir(), CACHE_DIRECTORY_NAME);
+        File files=context.getApplicationContext().getFilesDir();
+        cache=new NearbyMapCache(new File(files,"nearby_map_cache_v2"));
+        // Remove the retired pilot copy only; run databases are untouched.
+        new File(files,"utah_trail_map_v1.sqlite").delete();
+        new File(files,"utah_trail_map_v1.sqlite.tmp").delete();
+        File[] old=new File(files,"map_context_cache").listFiles();
+        if(old!=null)for(File f:old)if(f.isFile()&&(f.getName().endsWith(".json")||f.getName().endsWith(".tmp")))f.delete();
     }
-
-    static int cleanupOldCacheFiles(Context context, long cutoffMs) {
-        File directory = new File(
-                context.getApplicationContext().getFilesDir(),
-                CACHE_DIRECTORY_NAME
-        );
-        return deleteOldFiles(directory, cutoffMs);
+    static int cleanupOldCacheFiles(Context context,long cutoff) {
+        int removed=0;
+        for(String name:new String[]{"map_context_cache","nearby_map_cache_v2"}) {
+            File[] files=new File(context.getFilesDir(),name).listFiles();
+            if(files!=null)for(File f:files)if(f.isFile()&&f.lastModified()<cutoff&&
+                    (f.getName().endsWith(".json")||f.getName().endsWith(".tmp"))&&f.delete())removed++;
+        }
+        return removed;
     }
-
-    void requestForLocation(double latitude, double longitude) {
-        String tileKey = LiveStrideMapContext.tileKey(
-                latitude,
-                longitude,
-                PREFETCH_RADIUS_METERS
-        );
-        long now = System.currentTimeMillis();
-
-        synchronized (lock) {
-            desiredTileKey = tileKey;
-            desiredLatitude = latitude;
-            desiredLongitude = longitude;
-
-            long refreshInterval = lastAttemptSucceeded
-                    ? SUCCESS_REFRESH_MS
-                    : FAILURE_RETRY_MS;
-            boolean tileChanged = !tileKey.equals(lastHandledTileKey);
-            if (!tileChanged && now - lastAttemptAtMs < refreshInterval) return;
-            if (workerRunning) return;
-
-            workerRunning = true;
-            executor.execute(this::runRequests);
+    void requestForLocation(double lat,double lon) {
+        if(!Double.isFinite(lat)||!Double.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return;
+        synchronized(lock) {
+            if(closed)return;
+            desiredKey=LiveStrideMapContext.tileKey(lat,lon,RADIUS);latitude=lat;longitude=lon;
+            if(workerRunning)return;
+            if(desiredKey.equals(lastKey)&&System.currentTimeMillis()-lastAttempt<(succeeded?300000:60000))return;
+            workerRunning=true;executor.execute(this::requests);
         }
     }
-
-    BridgeTunnelMatcher.Context consumePendingContext() {
-        return pendingContext.getAndSet(null);
-    }
-
-    void shutdown() {
-        executor.shutdownNow();
-    }
-
-    private void runRequests() {
-        while (!Thread.currentThread().isInterrupted()) {
-            String tileKey;
-            double latitude;
-            double longitude;
-            synchronized (lock) {
-                tileKey = desiredTileKey;
-                latitude = desiredLatitude;
-                longitude = desiredLongitude;
-                lastHandledTileKey = tileKey;
-                lastAttemptAtMs = System.currentTimeMillis();
-            }
-
-            publishCachedContext(tileKey);
-            boolean succeeded = fetchAndCache(tileKey, latitude, longitude);
-
-            synchronized (lock) {
-                lastAttemptSucceeded = succeeded;
-                if (tileKey.equals(desiredTileKey)) {
-                    workerRunning = false;
-                    return;
-                }
-            }
-        }
-
-        synchronized (lock) {
-            workerRunning = false;
-        }
-    }
-
-    private void publishCachedContext(String tileKey) {
-        File cacheFile = cacheFile(tileKey);
-        if (!cacheFile.isFile()) return;
-
+    BridgeTunnelMatcher.Context consumePendingContext(){return pending.getAndSet(null);}
+    void shutdown(){synchronized(lock){closed=true;}executor.shutdownNow();}
+    private void requests() {
         try {
-            byte[] bytes = new byte[(int) cacheFile.length()];
-            try (InputStream input = new FileInputStream(cacheFile)) {
-                int offset = 0;
-                while (offset < bytes.length) {
-                    int read = input.read(bytes, offset, bytes.length - offset);
-                    if (read < 0) break;
-                    offset += read;
-                }
-                if (offset != bytes.length) {
-                    throw new IllegalStateException("Map-context cache read was incomplete.");
-                }
+            while(!Thread.currentThread().isInterrupted()) {
+                String key;double lat,lon;
+                synchronized(lock){if(closed)return;key=desiredKey;lat=latitude;lon=longitude;lastKey=key;lastAttempt=System.currentTimeMillis();}
+                JSONObject cached=cache.readNearby(key,lat,lon);
+                if(cached!=null)publish(cached);
+                else if(activeArea!=null&&!NearbyMapCache.covers(activeArea,lat,lon))publish(new JSONObject());
+                boolean ok=false;
+                try {
+                    JSONObject response=LiveStrideServerClient.fetchMapContext(lat,lon,RADIUS);
+                    if(response!=null) {
+                        LiveStrideMapContext.validate(response);
+                        // A slow response must not replace the map for a distant newer location.
+                        synchronized(lock) {
+                            if(NearbyMapCache.covers(response,latitude,longitude))publish(response);
+                        }
+                        try{cache.write(key,response);}catch(Exception e){Log.w(TAG,"Map cache write: "+e.getMessage());}
+                        ok=true;
+                    }
+                }catch(Exception e){Log.w(TAG,"Nearby map unavailable: "+e.getMessage());}
+                synchronized(lock){succeeded=ok;if(key.equals(desiredKey)||closed)return;}
             }
-            String json = new String(bytes, StandardCharsets.UTF_8);
-            pendingContext.set(
-                    LiveStrideMapContext.parse(
-                            new JSONObject(json),
-                            cacheFile.lastModified()
-                    )
-            );
-            Log.i(TAG, "Loaded cached map context tile " + tileKey);
-        } catch (Exception error) {
-            Log.w(TAG, "Could not read cached map context: " + message(error));
+        } finally {
+            synchronized(lock){workerRunning=false;}
         }
     }
-
-    private boolean fetchAndCache(
-            String tileKey,
-            double latitude,
-            double longitude
-    ) {
+    private void publish(JSONObject response) {
         try {
-            JSONObject response = LiveStrideServerClient.fetchMapContext(
-                    latitude,
-                    longitude,
-                    PREFETCH_RADIUS_METERS
-            );
-            if (response == null) return false;
-
-            long updatedAtMs = System.currentTimeMillis();
-            BridgeTunnelMatcher.Context context =
-                    LiveStrideMapContext.parse(response, updatedAtMs);
-            pendingContext.set(context);
-            writeCache(tileKey, response.toString());
-            Log.i(
-                    TAG,
-                    "Fetched map context tile " + tileKey
-                            + " with " + context.segments.size() + " segments"
-            );
-            return true;
-        } catch (Exception error) {
-            Log.w(TAG, "Map-context fetch failed: " + message(error));
-            return false;
-        }
-    }
-
-    private void writeCache(String tileKey, String json) {
-        try {
-            if (!cacheDirectory.exists() && !cacheDirectory.mkdirs()) {
-                Log.w(TAG, "Could not create map-context cache directory");
-                return;
+            JSONObject normalized=LiveStrideMapContext.normalize(response);
+            String fingerprint=normalized.optJSONArray("segments")==null?"empty":normalized.getJSONArray("segments").toString();
+            // Don't flush eight seconds of pending fixes just because the same cache is re-read.
+            if(!fingerprint.equals(publishedFingerprint)) {
+                pending.set(LiveStrideMapContext.parse(normalized,System.currentTimeMillis()));
+                publishedFingerprint=fingerprint;
             }
-            try (OutputStream output = new FileOutputStream(cacheFile(tileKey))) {
-                output.write(json.getBytes(StandardCharsets.UTF_8));
-            }
-        } catch (Exception error) {
-            Log.w(TAG, "Could not cache map context: " + message(error));
-        }
-    }
-
-    private File cacheFile(String tileKey) {
-        return new File(cacheDirectory, tileKey + ".json");
-    }
-
-    private static int deleteOldFiles(File directory, long cutoffMs) {
-        if (directory == null || !directory.isDirectory()) return 0;
-
-        int deleted = 0;
-        File[] files = directory.listFiles();
-        if (files == null) return 0;
-
-        for (File file : files) {
-            if (file.isDirectory()) {
-                deleted += deleteOldFiles(file, cutoffMs);
-                File[] remaining = file.listFiles();
-                if ((remaining == null || remaining.length == 0) && file.delete()) {
-                    deleted++;
-                }
-            } else if (file.lastModified() < cutoffMs && file.delete()) {
-                deleted++;
-            }
-        }
-        return deleted;
-    }
-
-    private static String message(Exception error) {
-        return error.getMessage() == null
-                ? error.getClass().getSimpleName()
-                : error.getMessage();
+            activeArea=response;
+        }catch(Exception e){Log.w(TAG,"Map geometry rejected: "+e.getMessage());}
     }
 }

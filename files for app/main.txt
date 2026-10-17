@@ -6406,8 +6406,17 @@ stopRunnerNativeSnapshotPolling();
   }
 
   await stopBackgroundGeolocationWatcher();
-  await stopNativeComparisonRun({ skipFinishSync: !isPrivateMode });
+  const nativeStopCompleted = await stopNativeComparisonRun({ skipFinishSync: !isPrivateMode });
   nativeGpsFilterOwnsTracking = false;
+  // Native Stop resolves the fixed-lag tail before acknowledging completion.
+  // Read those final points before constructing the public finish payload.
+  if (nativeStopCompleted && !isPrivateMode) {
+    await hydrateRunnerFromNativeSqliteInBatches({
+      finalTimeMs: stoppedElapsedMs,
+      afterSequenceNum: runnerNativeLastSequenceNum,
+      focusLatestPoint: true
+    });
+  }
 
   startBtn.disabled = false;
   stopBtn.disabled = true;

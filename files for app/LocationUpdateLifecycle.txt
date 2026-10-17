@@ -1,0 +1,23 @@
+package com.kdidso.livestride;
+
+/** Separates a pending registration from active recording; stop invalidates old callbacks. */
+final class LocationUpdateLifecycle {
+    private long generation;
+    private boolean pending, tracking;
+    long start() {
+        if (isActive()) throw new IllegalStateException("Location recording already requested");
+        pending=true;
+        return ++generation;
+    }
+    boolean markStarted(long session) {
+        if (session!=generation || !pending) return false;
+        pending=false;tracking=true;return true;
+    }
+    boolean markFailed(long session) {
+        if (session!=generation || !isActive()) return false;
+        pending=false;tracking=false;return true;
+    }
+    boolean accepts(long session) {return session==generation && isActive();}
+    boolean isActive() {return pending || tracking;}
+    void stop() {pending=false;tracking=false;generation++;}
+}

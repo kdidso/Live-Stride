@@ -15,6 +15,8 @@ final class TrailNetworkMatcher {
     static final class Decision {
         final Fix fix; final double lat,lon; final boolean matched;
         final String family,reason;
+        BridgeTunnelMatcher.StructureHint structureHint;
+        boolean anchorOnResume;
         Decision(Fix fix,double lat,double lon,boolean matched,String family,String reason) {
             this.fix=fix;this.lat=lat;this.lon=lon;this.matched=matched;this.family=family;this.reason=reason;
         }
@@ -90,6 +92,55 @@ final class TrailNetworkMatcher {
     private boolean usable;
     private double lat0,lon0,cosLat,lateral;
     private String lateralFamily="";private long lateralTime;
+    private String continuityFamily="";
+    private double continuityAlong, continuityCross, continuityDirection;
+    private long continuityTime, turnUntil;
+    private double turnCross;
+    private XY lastEmitted;
+    private boolean lastEmittedMatched;
+
+    private double signedCross(Source source, XY p) {
+        Projection q=source.line.project(p);
+        XY a=source.line.at(q.along-2), b=source.line.at(q.along+2);
+        double dx=b.x-a.x,dy=b.y-a.y,n=Math.hypot(dx,dy);
+        return n>.01 ? ((p.x-q.xy.x)*-dy+(p.y-q.xy.y)*dx)/n : 0;
+    }
+
+    private double turnaroundDistance(Source source, Fix fix, XY p, double distance) {
+        if (!source.segment.family.equals(continuityFamily) || continuityDirection==0
+                || fix.time-continuityTime>20000) return distance;
+        double along=source.line.project(p).along;
+        if (turnUntil<fix.time) {
+            double extreme=along;
+            double earliest=along;
+            boolean found=false;
+            for(Fix old:history) {
+                if(fix.time-old.time>6000) continue;
+                double oldAlong=source.line.project(xy(old.lat,old.lon)).along;
+                if(!found) {earliest=oldAlong;extreme=oldAlong;found=true;}
+                extreme=continuityDirection>0?Math.max(extreme,oldAlong):Math.min(extreme,oldAlong);
+            }
+            if(found && (extreme-earliest)*continuityDirection>=3
+                    && (along-extreme)*continuityDirection<=-2) {
+                double sum=0,min=Double.POSITIVE_INFINITY,max=Double.NEGATIVE_INFINITY;
+                int count=0;
+                for(Fix old:history) {
+                    if(fix.time-old.time>6000) continue;
+                    double cross=signedCross(source,xy(old.lat,old.lon));
+                    sum+=cross;count++;min=Math.min(min,cross);max=Math.max(max,cross);
+                }
+                if(count>=3 && max-min<=6) {
+                    turnCross=sum/count;
+                    turnUntil=fix.time+30000;
+                }
+            }
+        }
+        double cross=signedCross(source,p);
+        if(turnUntil>=fix.time && Math.abs(cross)<=25 && Math.abs(cross-turnCross)<=6) {
+            return Math.min(distance,Math.abs(cross-turnCross));
+        }
+        return distance;
+    }
 
     private XY xy(double lat,double lon) {
         return new XY(Math.toRadians(lon-lon0)*6371008.8*cosLat,Math.toRadians(lat-lat0)*6371008.8);
@@ -196,6 +247,7 @@ final class TrailNetworkMatcher {
                 Projection v=variant.project(p);
                 if(v.xy.distance(projected.xy)<4 && edge.line.project(v.xy).distance<=1.1)d=Math.min(d,v.distance);
             }
+            d=turnaroundDistance(edge.source,fix,p,d);
             double emission=.5*d*d/(sigma*sigma);
             if(hn>5) {
                 XY a=edge.line.at(projected.along-3),b=edge.line.at(projected.along+3);
@@ -217,6 +269,12 @@ final class TrailNetworkMatcher {
     }
     /** Read-only one-step network extension. Does not change the smoothing window. */
     BridgeTunnelMatcher.StructureHint structureHint(Fix fix) {
+        long priorTurnUntil=turnUntil;double priorTurnCross=turnCross;
+        try { return provisionalStructureHint(fix); }
+        finally { turnUntil=priorTurnUntil;turnCross=priorTurnCross; }
+    }
+
+    private BridgeTunnelMatcher.StructureHint provisionalStructureHint(Fix fix) {
         if (!usable || previous == null || fix.time <= previous.fix.time
                 || fix.time - previous.fix.time > 2500 || fix.accuracy < 0 || fix.accuracy > 10) return null;
         XY p = xy(fix.lat, fix.lon);
@@ -269,8 +327,13 @@ final class TrailNetworkMatcher {
         if(previous!=null && fix.time<=previous.fix.time)return out;
         if(!usable) {out.add(new Decision(fix,fix.lat,fix.lon,false,"","no_trail_context"));return out;}
         if(previous!=null&&fix.time-previous.fix.time>10000) {out.addAll(flush());reset();}
-        XY p=xy(fix.lat,fix.lon);List<Candidate> c=candidates(fix,p);double[] scores=new double[c.size()];int[] back=new int[c.size()];
+        boolean trusted=fix.accuracy<0 || fix.accuracy<=10;
+        XY p=!trusted && previous!=null ? previous.xy : xy(fix.lat,fix.lon);
+        List<Candidate> c=!trusted ? previous!=null ? previous.candidates
+                : Collections.singletonList(new Candidate(-1,new Projection(p,0,0),0)) : candidates(fix,p);
+        double[] scores=new double[c.size()];int[] back=new int[c.size()];
         for(int i=0;i<c.size();i++) {
+            if(!trusted && previous!=null) {scores[i]=previous.scores[i];back[i]=i;continue;}
             double best=Double.POSITIVE_INFINITY;int parent=0;
             if(previous!=null)for(int j=0;j<previous.candidates.size();j++) {
                 double cost=previous.scores[j]+transition(previous.candidates.get(j),c.get(i),previous,fix,p);
@@ -279,7 +342,7 @@ final class TrailNetworkMatcher {
             scores[i]=(previous==null?0:best)+c.get(i).emission;back[i]=parent;
         }
         double min=Arrays.stream(scores).min().orElse(0);for(int i=0;i<scores.length;i++)scores[i]-=min;
-        Layer layer=new Layer(fix,p,c,scores,back);layers.addLast(layer);previous=layer;history.addLast(fix);
+        Layer layer=new Layer(fix,p,c,scores,back);layers.addLast(layer);previous=layer;if(trusted)history.addLast(fix);
         while(history.size()>2&&fix.time-history.peekFirst().time>7000)history.removeFirst();
         while(!layers.isEmpty()&&(fix.time-layers.peekFirst().fix.time>=LAG_MS||layers.size()>32))out.add(emit());
         return out;
@@ -293,7 +356,7 @@ final class TrailNetworkMatcher {
         Candidate chosen=first.candidates.get(ancestry[best]);String family=family(chosen);
         double margin=Double.POSITIVE_INFINITY;
         for(int j=0;j<ancestry.length;j++)if(!family(first.candidates.get(ancestry[j])).equals(family))margin=Math.min(margin,last.scores[j]-last.scores[best]);
-        boolean matched=chosen.edge>=0&&margin>=MIN_MARGIN&&!edges.get(chosen.edge).source.segment.isStructure();
+        boolean matched=(first.fix.accuracy<0||first.fix.accuracy<=10)&&chosen.edge>=0&&margin>=MIN_MARGIN&&!edges.get(chosen.edge).source.segment.isStructure();
         XY output=first.xy;String reason=chosen.edge<0?"free_gps":matched?"connected_trail":"ambiguous_or_structure_owned";
         if(matched) {
             Edge edge=edges.get(chosen.edge);XY a=edge.line.at(chosen.p.along-2),b=edge.line.at(chosen.p.along+2);
@@ -308,13 +371,41 @@ final class TrailNetworkMatcher {
             } else output=chosen.p.xy;
             lateralFamily=family;lateralTime=first.fix.time;
         } else {lateralFamily="";lateralTime=0;}
+        BridgeTunnelMatcher.StructureHint hint=null;
+        if(chosen.edge>=0 && margin>=MIN_MARGIN && first.fix.accuracy>=0 && first.fix.accuracy<=10) {
+            Source source=edges.get(chosen.edge).source;
+            if(source.segment.isStructure() && chosen.p.distance<=7) {
+                double firstAlong=source.line.project(first.xy).along;
+                double futureAlong=source.line.project(last.xy).along;
+                if(last.fix.time-first.fix.time>=LAG_MS && Math.abs(futureAlong-firstAlong)>=3) {
+                    hint=new BridgeTunnelMatcher.StructureHint(source.segment.id,futureAlong>firstAlong,first.fix.time,true);
+                }
+            }
+        }
+        if(matched) {
+            Source source=edges.get(chosen.edge).source;
+            double along=source.line.project(first.xy).along;
+            double cross=signedCross(source,first.xy);
+            if(!family.equals(continuityFamily)) {
+                continuityFamily=family;continuityCross=cross;continuityDirection=0;turnUntil=0;
+            } else {
+                double delta=along-continuityAlong;
+                if(Math.abs(delta)>.5 && first.fix.time>=turnUntil) continuityDirection=Math.signum(delta);
+                if(first.fix.time>=turnUntil) continuityCross+=.2*(cross-continuityCross);
+            }
+            continuityAlong=along;continuityTime=first.fix.time;
+        }
         layers.removeFirst();
         double lat=lat0+Math.toDegrees(output.y/6371008.8),lon=lon0+Math.toDegrees(output.x/(6371008.8*cosLat));
-        return new Decision(first.fix,matched?lat:first.fix.lat,matched?lon:first.fix.lon,matched,family,reason);
+        Decision decision=new Decision(first.fix,matched?lat:first.fix.lat,matched?lon:first.fix.lon,matched,family,reason);
+        decision.structureHint=hint;
+        decision.anchorOnResume=matched && !lastEmittedMatched && lastEmitted!=null && lastEmitted.distance(output)>6;
+        lastEmitted=matched?output:first.xy;lastEmittedMatched=matched;
+        return decision;
     }
     List<Decision> flush() {
         List<Decision> out=new ArrayList<>();while(!layers.isEmpty())out.add(emit());return out;
     }
-    void reset() {if(!layers.isEmpty())throw new IllegalStateException("Resolve pending trail fixes before reset");previous=null;history.clear();lateral=0;lateralTime=0;lateralFamily="";}
+    void reset() {if(!layers.isEmpty())throw new IllegalStateException("Resolve pending trail fixes before reset");previous=null;history.clear();lateral=0;lateralTime=0;lateralFamily="";continuityFamily="";continuityTime=0;turnUntil=0;continuityDirection=0;lastEmitted=null;lastEmittedMatched=false;}
     int pendingCount() {return layers.size();}
 }

@@ -222,12 +222,23 @@ final class BridgeTunnelMatcher {
         final String segmentId;
         final boolean forward;
         final long timeMs;
+        final boolean confirmed;
         StructureHint(String segmentId, boolean forward, long timeMs) {
+            this(segmentId, forward, timeMs, false);
+        }
+        StructureHint(String segmentId, boolean forward, long timeMs, boolean confirmed) {
             this.segmentId = segmentId;
             this.forward = forward;
             this.timeMs = timeMs;
+            this.confirmed = confirmed;
         }
     }
+
+    private Point networkPoint;
+    private long networkPointTime;
+    private Point heldJunction;
+    private final Set<String> recoveryVisitedIds = new HashSet<>();
+    void setNetworkPoint(Point point, long timeMs) { networkPoint=point;networkPointTime=timeMs; }
 
     private StructureHint entryHint;
     private long rawRecoveryStartedAtMs;
@@ -287,6 +298,9 @@ final class BridgeTunnelMatcher {
     void setContext(Context context) {
         this.context = context;
     }
+
+    String getActiveStructureId() { return activeStructureId; }
+    double getProgressMeters() { return progressMeters; }
 
     State getState() {
         return state;
@@ -391,6 +405,7 @@ final class BridgeTunnelMatcher {
 
         if (exitBranches.size() > 1) {
             state = State.JUNCTION_HOLD;
+            heldJunction = junction;
             junctionHoldStartedAtMs = timeMs;
             lastMatchedTimeMs = timeMs;
             heldDistanceMeters = 0.0;
@@ -411,7 +426,7 @@ final class BridgeTunnelMatcher {
             long timeMs,
             boolean accuracyIsGood
     ) {
-        Point junction = structureRoute.get(structureRoute.size() - 1);
+        Point junction = heldJunction != null ? heldJunction : structureRoute.get(structureRoute.size() - 1);
         double elapsedSeconds = Math.max(0.0, (timeMs - lastMatchedTimeMs) / 1000.0);
         heldDistanceMeters += estimatedSpeedMps() * elapsedSeconds;
         lastMatchedTimeMs = timeMs;
@@ -422,6 +437,16 @@ final class BridgeTunnelMatcher {
             return releaseRaw(rawPoint, false, "junction_handoff_verified");
         }
 
+        if(networkPoint!=null && networkPointTime==timeMs && accuracyIsGood
+                && distanceMeters(junction,networkPoint)<=50) {
+            for(Branch branch:exitBranches) {
+                if(project(branch.points,networkPoint).distanceMeters<=CONNECTION_RADIUS_METERS) {
+                    selectBranch(branch,heldDistanceMeters,timeMs);
+                    return processRecovery(rawPoint,accuracyMeters,timeMs,accuracyIsGood,
+                            pointAlong(activeRoute,progressMeters));
+                }
+            }
+        }
         Branch selected = selectBranchFromObservedDirection();
         if (selected != null) {
             selectBranch(selected, heldDistanceMeters, timeMs);
@@ -448,6 +473,29 @@ final class BridgeTunnelMatcher {
             boolean accuracyIsGood,
             Point predicted
     ) {
+        if(networkPoint!=null && networkPointTime==timeMs && accuracyIsGood && !activeRoute.isEmpty()) {
+            Projection network=project(activeRoute,networkPoint);
+            if(network.distanceMeters<=CONNECTION_RADIUS_METERS && network.alongMeters>progressMeters) {
+                double seconds=Math.max(0,(timeMs-lastMatchedOutputTimeMs)/1000.0);
+                progressMeters=Math.min(network.alongMeters,progressMeters+Math.min(8,4*seconds));
+                predicted=pointAlong(activeRoute,progressMeters);
+            }
+        }
+        if (networkPoint != null && networkPointTime == timeMs && accuracyIsGood
+                && rawTransitionIsContinuous(networkPoint, timeMs, true)
+                && networkHandoffIsSmall(networkPoint,timeMs)) {
+            return releaseRaw(networkPoint, false, "network_exit_handoff_verified");
+        }
+        if (progressMeters >= activeRouteLengthMeters && !activeRoute.isEmpty()) {
+            Point junction=activeRoute.get(activeRoute.size()-1);
+            List<Branch> onward=findExitBranches(junction);
+            if(onward.size()>1) {
+                state=State.JUNCTION_HOLD;heldJunction=junction;exitBranches=onward;
+                junctionHoldStartedAtMs=timeMs;lastMatchedTimeMs=timeMs;heldDistanceMeters=0;
+                directionObservations.clear();directionObservations.add(new Observation(rawPoint,timeMs));
+                return new Result(junction,true,state,structureType);
+            }
+        }
         if (accuracyIsGood && rawHandoffIsStrong(accuracyMeters)
                 && connectedRecoveryHandoffIsAllowed(rawPoint, timeMs)
                 && rawTransitionIsContinuous(rawPoint, timeMs, true)) {
@@ -466,6 +514,12 @@ final class BridgeTunnelMatcher {
             return new Result(rawPoint, false, state, "", false, "exit_handoff_pending");
         }
         return new Result(predicted, true, state, structureType);
+    }
+
+    private boolean networkHandoffIsSmall(Point point,long timeMs) {
+        if(lastMatchedOutputPoint==null) return false;
+        double seconds=Math.max(0,(timeMs-lastMatchedOutputTimeMs)/1000.0);
+        return distanceMeters(lastMatchedOutputPoint,point)<=Math.max(6,estimatedSpeedMps()*seconds+2);
     }
 
     private void tryEnterStructure(Point rawPoint, float accuracyMeters, long timeMs) {
@@ -556,7 +610,10 @@ final class BridgeTunnelMatcher {
         List<Point> orientedStructure = orientedPoints(best, enterAtStart);
         Projection inside = project(orientedStructure, rawPoint);
         boolean contested = false;
+        Set<String> continuousStructures=new HashSet<>(buildStructureContinuation(best,true).segmentIds);
+        continuousStructures.addAll(buildStructureContinuation(best,false).segmentIds);
         for (Segment alternative : context.segments) {
+            if (continuousStructures.contains(alternative.id)) continue;
             if (alternative.isStructure() && alternative.points.size() >= 2 && !alternative.id.equals(best.id)
                     && project(alternative.points, rawPoint).distanceMeters <= 20.0) {
                 contested = true;
@@ -565,6 +622,7 @@ final class BridgeTunnelMatcher {
         }
         // Nearby structures make the portal ambiguous. Require actual progress
         // inside a bridge before publishing predictions, not just proximity.
+        if (contested && (entryHint == null || !entryHint.confirmed || entryHint.timeMs != timeMs)) return;
         if (isBridge(best) && contested
                 && (inside.alongMeters < Math.min(8.0, polylineLength(orientedStructure) * .4)
                 || inside.distanceMeters > STRICT_ENTRY_RADIUS_METERS)) return;
@@ -630,6 +688,7 @@ final class BridgeTunnelMatcher {
         for (Segment segment : context.segments) {
             if (segment.points.size() < 2
                     || activeStructureIds.contains(segment.id)
+                    || recoveryVisitedIds.contains(segment.id)
                     || segment.isStructure()) {
                 continue;
             }
@@ -683,6 +742,7 @@ final class BridgeTunnelMatcher {
     }
 
     private void selectBranch(Branch branch, double initialDistanceMeters, long timeMs) {
+        recoveryVisitedIds.add(branch.segment.id);
         activeRoute = buildBranchContinuation(branch);
         activeRouteLengthMeters = polylineLength(activeRoute);
         progressMeters = Math.min(activeRouteLengthMeters, initialDistanceMeters);
@@ -707,6 +767,7 @@ final class BridgeTunnelMatcher {
             Segment best = null;
             boolean startsAtEnd = true;
             double bestScore = Double.MAX_VALUE;
+            int possibleContinuations = 0;
 
             for (Segment candidate : context.segments) {
                 if (candidate.points.size() < 2
@@ -722,6 +783,7 @@ final class BridgeTunnelMatcher {
                 );
 
                 if (startDistance <= CONNECTION_RADIUS_METERS) {
+                    possibleContinuations++;
                     double score = startDistance + angleDifference(
                             incomingBearing,
                             bearingDegrees(candidate.points.get(0), candidate.points.get(1))
@@ -733,6 +795,7 @@ final class BridgeTunnelMatcher {
                     }
                 }
                 if (endDistance <= CONNECTION_RADIUS_METERS) {
+                    possibleContinuations++;
                     double score = endDistance + angleDifference(
                             incomingBearing,
                             bearingDegrees(
@@ -748,7 +811,8 @@ final class BridgeTunnelMatcher {
                 }
             }
 
-            if (best == null) break;
+            if (best == null || possibleContinuations > 1) break;
+            recoveryVisitedIds.add(best.id);
             List<Point> continuation = orientedPoints(best, startsAtEnd);
             route.addAll(continuation.subList(1, continuation.size()));
             usedIds.add(best.id);
@@ -884,6 +948,7 @@ final class BridgeTunnelMatcher {
     }
 
     private void clearActiveRoute() {
+        recoveryVisitedIds.clear();heldJunction=null;networkPoint=null;
         activeRoute = Collections.emptyList();
         structureRoute = Collections.emptyList();
         exitBranches = Collections.emptyList();

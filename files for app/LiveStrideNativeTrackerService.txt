@@ -90,7 +90,7 @@ public class LiveStrideNativeTrackerService extends Service {
     private String firebaseRunnerPath;
     private boolean localOnly = false;
 
-    private final TrailNetworkMatcher trailMatcher = new TrailNetworkMatcher();
+    private final TrackingMatchPipeline matchPipeline = new TrackingMatchPipeline();
     private final java.util.Map<Long, PendingGpsFix> pendingTrailFixes = new java.util.LinkedHashMap<>();
     private final GpsReversalFilter gpsReversalFilter = new GpsReversalFilter();
     private final java.util.Map<Long, PendingGpsFix> pendingGpsFixes = new java.util.LinkedHashMap<>();
@@ -116,7 +116,6 @@ public class LiveStrideNativeTrackerService extends Service {
     private long lastPendingFlushKickMs = 0L;
     private long loadedMapContextUpdatedAtMs = 0L;
     private boolean serverMapContextActive = false;
-    private final BridgeTunnelMatcher bridgeTunnelMatcher = new BridgeTunnelMatcher();
     private BridgeTunnelMatcher.State lastSavedMatchingState = null;
     private int lastCompletedMile = 0;
     private long lastMileSplitTimeMs = 0L;
@@ -158,7 +157,7 @@ public class LiveStrideNativeTrackerService extends Service {
             // Resolve an old session before replacing its run identity/configuration.
             flushTrailMatching();
             discardGpsVerification("run_restarted");
-            trailMatcher.setContext(null);
+            matchPipeline.setContext(null);
             supabaseUrl = intent.getStringExtra("supabaseUrl");
             supabaseAnonKey = intent.getStringExtra("supabaseAnonKey");
             runId = intent.getStringExtra("runId");
@@ -201,7 +200,7 @@ public class LiveStrideNativeTrackerService extends Service {
             lastCompletedMile = 0;
             lastMileSplitTimeMs = 0L;
             latestMileSplitText = "Mile split: --";
-            bridgeTunnelMatcher.reset();
+            matchPipeline.reset();
             saveMatchingState(BridgeTunnelMatcher.State.NORMAL);
             saveNativeRunConfig();
             saveNativeTrackerState(true, 0L, 0L);
@@ -480,9 +479,9 @@ private void uploadNativePoint(Location rawLocation) {
     BridgeTunnelMatcher.Context serverContext =
             mapContextProvider.consumePendingContext();
     if (serverContext != null) {
-        flushTrailMatching();
-        trailMatcher.setContext(serverContext);
-        bridgeTunnelMatcher.setContext(serverContext);
+        for (TrackingMatchPipeline.Outcome outcome : matchPipeline.setContext(serverContext)) {
+            processMatchingOutcome(outcome);
+        }
         serverMapContextActive = true;
         Log.i(
                 "LiveStrideNative",
@@ -491,79 +490,46 @@ private void uploadNativePoint(Location rawLocation) {
         );
     }
     final boolean presumedDriverMode = isPresumedDriver(pointTimeMs);
-    bridgeTunnelMatcher.setEntryHint(presumedDriverMode ? null : trailMatcher.structureHint(
-            new TrailNetworkMatcher.Fix(observationId, rawLocation.getLatitude(),
-                    rawLocation.getLongitude(), accuracy, pointTimeMs)));
-    BridgeTunnelMatcher.Result matchResult = bridgeTunnelMatcher.process(
-            new BridgeTunnelMatcher.Point(
-                    rawLocation.getLatitude(),
-                    rawLocation.getLongitude()
-            ),
-            accuracy,
-            pointTimeMs,
-            accuracyIsGood,
-            presumedDriverMode
-    );
-    saveMatchingState(matchResult.state);
+    BridgeTunnelMatcher.Result pendingMatch = new BridgeTunnelMatcher.Result(
+            new BridgeTunnelMatcher.Point(rawLocation.getLatitude(), rawLocation.getLongitude()),
+            false, BridgeTunnelMatcher.State.NORMAL, "");
+    pendingTrailFixes.put(observationId, new PendingGpsFix(observationId, rawLocation,
+            rawLocation, pendingMatch, accuracy, pointTimeMs));
+    for (TrackingMatchPipeline.Outcome outcome : matchPipeline.observe(new TrailNetworkMatcher.Fix(
+            observationId, rawLocation.getLatitude(), rawLocation.getLongitude(), accuracy, pointTimeMs),
+            presumedDriverMode)) {
+        processMatchingOutcome(outcome);
+    }
+}
 
-    if (!matchResult.matched && matcherIsHoldingForCleanerGps(matchResult.state)) {
-        flushTrailMatching();
-        Log.i(
-                "LiveStrideNative",
-                "Holding raw GPS during map-matching recovery: "
-                        + accuracy + " m state=" + matchResult.state
-        );
-        rejectGpsFix(observationId, "map_matching_recovery:" + matchResult.reason);
+private void processMatchingOutcome(TrackingMatchPipeline.Outcome outcome) {
+    TrailNetworkMatcher.Decision decision = outcome.decision;
+    PendingGpsFix pending = pendingTrailFixes.remove(decision.fix.id);
+    if (pending == null) return;
+    BridgeTunnelMatcher.Result match = outcome.structure;
+    saveMatchingState(match.state);
+    if (!match.matched && matcherIsHoldingForCleanerGps(match.state)) {
+        rejectGpsFix(pending.observationId, "map_matching_recovery:" + match.reason);
         publishGpsVerificationState(true, false);
         return;
     }
-
-    if (!matchResult.matched && !accuracyIsGood) {
-        Log.i("LiveStrideNative", "Ignored inaccurate GPS fix: " + accuracy + " m");
-        rejectGpsFix(observationId, "inaccurate_fix");
+    if (!match.matched && pending.accuracy > MAX_ACCEPTED_ACCURACY_METERS) {
+        rejectGpsFix(pending.observationId, "inaccurate_fix");
         return;
     }
-
-    Location location = new Location(rawLocation);
-    if (matchResult.matched) {
-        location.setLatitude(matchResult.point.lat);
-        location.setLongitude(matchResult.point.lon);
-        Log.i(
-                "LiveStrideNative",
-                "Map-matched " + matchResult.structureType
-                        + " point state=" + matchResult.state
-                        + " rawAccuracy=" + accuracy
-        );
-    }
-
-    PendingGpsFix current = new PendingGpsFix(observationId, rawLocation, location, matchResult, accuracy, pointTimeMs);
-    if (matchResult.matched || presumedDriverMode || matchResult.anchorOnResume) {
-        flushTrailMatching();
-        processGpsCandidate(current, presumedDriverMode);
-        return;
-    }
-    pendingTrailFixes.put(observationId, current);
-    for (TrailNetworkMatcher.Decision decision : trailMatcher.observe(new TrailNetworkMatcher.Fix(
-            observationId, rawLocation.getLatitude(), rawLocation.getLongitude(), accuracy, pointTimeMs))) {
-        processTrailDecision(decision);
-    }
-}
-
-private void processTrailDecision(TrailNetworkMatcher.Decision decision) {
-    PendingGpsFix pending = pendingTrailFixes.remove(decision.fix.id);
-    if (pending == null) return;
-    Location candidate = new Location(pending.candidate);
-    if (decision.matched) {
-        candidate.setLatitude(decision.lat); candidate.setLongitude(decision.lon);
+    Location candidate = new Location(pending.raw);
+    if (match.matched) {
+        candidate.setLatitude(match.point.lat);candidate.setLongitude(match.point.lon);
+    } else if (decision.matched) {
+        candidate.setLatitude(decision.lat);candidate.setLongitude(decision.lon);
     }
     processGpsCandidate(new PendingGpsFix(pending.observationId, pending.raw, candidate,
-            pending.match, pending.accuracy, pending.pointTimeMs, decision.matched,
-            decision.reason + "; trail_family=" + decision.family), false);
+            match, pending.accuracy, pending.pointTimeMs, !match.matched && decision.matched,
+            decision.reason + "; trail_family=" + decision.family), "driver_mode".equals(decision.reason));
 }
 
 private void flushTrailMatching() {
-    for (TrailNetworkMatcher.Decision decision : trailMatcher.flush()) processTrailDecision(decision);
-    trailMatcher.reset();
+    for (TrackingMatchPipeline.Outcome outcome : matchPipeline.flush()) processMatchingOutcome(outcome);
 }
 
 private void processGpsCandidate(PendingGpsFix current, boolean presumedDriverMode) {
@@ -963,9 +929,10 @@ private void refreshMapMatchingContext() {
             ));
         }
 
-        bridgeTunnelMatcher.setContext(
-                new BridgeTunnelMatcher.Context(updatedAtMs, segments)
-        );
+        for (TrackingMatchPipeline.Outcome outcome : matchPipeline.setContext(
+                new BridgeTunnelMatcher.Context(updatedAtMs, segments))) {
+            processMatchingOutcome(outcome);
+        }
         Log.i(
                 "LiveStrideNative",
                 "Loaded bridge/tunnel map context with " + segments.size() + " segments"

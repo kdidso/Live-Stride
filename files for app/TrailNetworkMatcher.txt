@@ -64,8 +64,8 @@ final class TrailNetworkMatcher {
         Edge(Source source,Line line,int a,int b) {this.source=source;this.line=line;this.a=a;this.b=b;}
     }
     private static final class Link {
-        final int node;final double length;
-        Link(int node,double length) {this.node=node;this.length=length;}
+        final int node,edge;final double length;
+        Link(int node,double length,int edge) {this.node=node;this.length=length;this.edge=edge;}
     }
     private static final class Candidate {
         final int edge;final Projection p;final double emission;
@@ -186,8 +186,8 @@ final class TrailNetworkMatcher {
                     if(!nodes.containsKey(ak))nodes.put(ak,nodes.size());if(!nodes.containsKey(bk))nodes.put(bk,nodes.size());
                     if(edges.size()>=4096){edges.clear();adjacency.clear();grid.clear();longEdges.clear();usable=false;return;}
                     int a=nodes.get(ak),b=nodes.get(bk),id=edges.size();edges.add(new Edge(s,part,a,b));
-                    adjacency.computeIfAbsent(a,k->new ArrayList<>()).add(new Link(b,part.length));
-                    adjacency.computeIfAbsent(b,k->new ArrayList<>()).add(new Link(a,part.length));
+                    adjacency.computeIfAbsent(a,k->new ArrayList<>()).add(new Link(b,part.length,id));
+                    adjacency.computeIfAbsent(b,k->new ArrayList<>()).add(new Link(a,part.length,id));
                     index(id,part);
                 }
                 start=end;
@@ -232,6 +232,48 @@ final class TrailNetworkMatcher {
         }
         return best;
     }
+    // Enumerate bounded simple routes; an ambiguous or disconnected span earns no credit.
+    double verifiedDistance(BridgeTunnelMatcher.Point from,String fromKey,
+            BridgeTunnelMatcher.Point to,String toKey,double limit,String forbidden) {
+        Candidate a=routeAnchor(from,fromKey),b=routeAnchor(to,toKey);
+        if(a==null||b==null)return Double.NaN;
+        Edge ea=edges.get(a.edge),eb=edges.get(b.edge);
+        List<Double> found=new ArrayList<>();int[] budget={1024};
+        if(a.edge==b.edge && !ea.source.segment.id.equals(forbidden))
+            found.add(Math.abs(a.p.along-b.p.along));
+        int[] nodes={ea.a,ea.b};double[] partial={a.p.along,ea.line.length-a.p.along};
+        for(int i=0;i<2;i++) {
+            if(ea.source.segment.id.equals(forbidden)&&partial[i]>.2)continue;
+            routeWalk(nodes[i],partial[i],b,a.edge,new HashSet<Integer>(),found,budget,limit,forbidden,0);
+        }
+        return budget[0]>0&&found.size()==1&&found.get(0)<=limit?found.get(0):Double.NaN;
+    }
+    private Candidate routeAnchor(BridgeTunnelMatcher.Point point,String key) {
+        Candidate best=null;
+        for(int i=0;i<edges.size();i++) {
+            Edge e=edges.get(i);
+            if(!e.source.segment.id.equals(key)&&!e.source.segment.family.equals(key))continue;
+            Projection p=e.line.project(xy(point.lat,point.lon));
+            if(p.distance<=3&&(best==null||p.distance<best.p.distance))best=new Candidate(i,p,0);
+        }
+        return best;
+    }
+    private void routeWalk(int node,double distance,Candidate target,int startEdge,Set<Integer> seen,
+            List<Double> found,int[] budget,double limit,String forbidden,int depth) {
+        if(found.size()>1||distance>limit||depth>64||--budget[0]<=0||!seen.add(node))return;
+        Edge end=edges.get(target.edge);
+        if(!(depth==0&&startEdge==target.edge) && !end.source.segment.id.equals(forbidden)) {
+            if(node==end.a && distance+target.p.along<=limit)found.add(distance+target.p.along);
+            else if(node==end.b && distance+end.line.length-target.p.along<=limit)
+                found.add(distance+end.line.length-target.p.along);
+        }
+        for(Link link:adjacency.getOrDefault(node,Collections.emptyList())) {
+            if(link.edge==startEdge||link.edge==target.edge||edges.get(link.edge).source.segment.id.equals(forbidden))continue;
+            routeWalk(link.node,distance+link.length,target,startEdge,seen,found,budget,limit,forbidden,depth+1);
+        }
+        seen.remove(node);
+    }
+
     private List<Candidate> candidates(Fix fix,XY p) {
         int cx=(int)Math.floor(p.x/100),cy=(int)Math.floor(p.y/100);Set<Integer> nearby=new HashSet<>(longEdges);
         for(int x=cx-1;x<=cx+1;x++)for(int y=cy-1;y<=cy+1;y++)nearby.addAll(grid.getOrDefault(cell(x,y),Collections.emptySet()));

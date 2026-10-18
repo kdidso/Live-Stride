@@ -301,6 +301,15 @@ final class BridgeTunnelMatcher {
 
     String getActiveStructureId() { return activeStructureId; }
     double getProgressMeters() { return progressMeters; }
+    private long supportedExitTime=-1;
+    Point forwardExit(long time) {
+        return state==State.STRUCTURE && "tunnel".equals(structureType)
+                && time-structureEntryStartedAtMs>5000 && progressMeters>=activeRouteLengthMeters*.6
+                && activeRouteLengthMeters-progressMeters<=25 && !activeRoute.isEmpty()
+                ? activeRoute.get(activeRoute.size()-1):null;
+    }
+    void supportForwardExit(long time,boolean supported) { supportedExitTime=supported?time:-1; }
+
 
     State getState() {
         return state;
@@ -998,6 +1007,10 @@ final class BridgeTunnelMatcher {
             return false;
         }
 
+        if(supportedExitTime==timeMs && forwardExit(timeMs)!=null) {
+            resetFalseMatchDivergence();
+            return false;
+        }
         Projection rawProjection = project(activeRoute, rawPoint);
         if (rawProjection.distanceMeters < FALSE_MATCH_ESCAPE_DISTANCE_METERS) {
             resetFalseMatchDivergence();

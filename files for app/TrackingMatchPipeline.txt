@@ -10,6 +10,7 @@ final class TrackingMatchPipeline {
         final BridgeTunnelMatcher.Result structure;
         final String structureId;
         final double progressMeters;
+        VerifiedRouteDistance.Span routeSpan;
         Outcome(TrailNetworkMatcher.Decision decision, BridgeTunnelMatcher.Result structure, BridgeTunnelMatcher matcher) {
             this.decision = decision;
             this.structure = structure;
@@ -18,6 +19,9 @@ final class TrackingMatchPipeline {
         }
     }
 
+    private TrailNetworkMatcher.Fix trustedFix;
+    private BridgeTunnelMatcher.Point trustedPoint;
+    private String trustedKey;
     private final TrailNetworkMatcher trails = new TrailNetworkMatcher();
     private final BridgeTunnelMatcher structures = new BridgeTunnelMatcher();
 
@@ -32,6 +36,7 @@ final class TrackingMatchPipeline {
         if (trails.pendingCount() != 0) throw new IllegalStateException("Flush the run before resetting");
         trails.reset();
         structures.reset();
+        trustedFix=null;trustedPoint=null;trustedKey=null;
     }
 
     List<Outcome> observe(TrailNetworkMatcher.Fix fix, boolean driver) {
@@ -61,6 +66,11 @@ final class TrackingMatchPipeline {
             structures.setEntryHint(decision.structureHint);
             structures.setNetworkPoint(decision.matched
                     ? new BridgeTunnelMatcher.Point(decision.lat, decision.lon) : null, fix.time);
+            BridgeTunnelMatcher.Point exit=structures.forwardExit(fix.time);
+            structures.supportForwardExit(fix.time,exit!=null && decision.matched
+                    && Double.isFinite(trails.verifiedDistance(exit,structures.getActiveStructureId(),
+                    new BridgeTunnelMatcher.Point(decision.lat,decision.lon),decision.family,100,
+                    structures.getActiveStructureId())));
             BridgeTunnelMatcher.Result result = structures.process(
                     new BridgeTunnelMatcher.Point(fix.lat, fix.lon), (float) fix.accuracy,
                     fix.time, fix.accuracy < 0 || fix.accuracy <= 10, false);
@@ -69,7 +79,21 @@ final class TrackingMatchPipeline {
                 result = new BridgeTunnelMatcher.Result(new BridgeTunnelMatcher.Point(decision.lat, decision.lon),
                         false, result.state, "", true, "trail_reattachment_anchor");
             }
-            out.add(new Outcome(decision, result, structures));
+            Outcome outcome=new Outcome(decision,result,structures);
+            boolean reliable=result.matched || (result.state==BridgeTunnelMatcher.State.NORMAL&&decision.matched);
+            if(reliable) {
+                BridgeTunnelMatcher.Point point=result.matched?result.point:new BridgeTunnelMatcher.Point(decision.lat,decision.lon);
+                String key=result.matched && result.state==BridgeTunnelMatcher.State.STRUCTURE
+                        ?outcome.structureId:decision.matched?decision.family:outcome.structureId;
+                if(trustedFix!=null && result.anchorOnResume && !result.reason.startsWith("false_match")
+                        && fix.time-trustedFix.time<=15000) {
+                    double meters=trails.verifiedDistance(trustedPoint,trustedKey,point,key,150,"");
+                    if(Double.isFinite(meters))outcome.routeSpan=new VerifiedRouteDistance.Span(
+                            trustedFix.id,trustedFix.time,fix.time,meters);
+                }
+                trustedFix=fix;trustedPoint=point;trustedKey=key;
+            }
+            out.add(outcome);
         }
         return out;
     }

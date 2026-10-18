@@ -1,0 +1,25 @@
+package com.kdidso.livestride;
+
+/** Credits only a bounded, unambiguous mapped span between accepted trusted fixes. */
+final class VerifiedRouteDistance {
+    static final class Span {
+        final long fromId, fromTime, toTime;
+        final double meters;
+        Span(long fromId,long fromTime,long toTime,double meters) {
+            this.fromId=fromId;this.fromTime=fromTime;this.toTime=toTime;this.meters=meters;
+        }
+    }
+    private long trustedId=-1, trustedTime;
+    private double trustedTotal;
+    void reset() { trustedId=-1;trustedTime=0;trustedTotal=0; }
+    void commit(long id,long time,double total) { trustedId=id;trustedTime=time;trustedTotal=total; }
+    double remaining(Span span,double total) {
+        if(span==null || span.fromId!=trustedId || span.fromTime!=trustedTime
+                || !Double.isFinite(span.meters) || span.meters<0 || !Double.isFinite(total)) return Double.NaN;
+        double seconds=(span.toTime-span.fromTime)/1000.0;
+        if(seconds<=0 || seconds>15 || span.meters>Math.min(150,10*seconds+5)) return Double.NaN;
+        double alreadyCounted=total-trustedTotal;
+        if(alreadyCounted<0) return Double.NaN;
+        return Math.max(0,span.meters-alreadyCounted);
+    }
+}

@@ -1,0 +1,76 @@
+package com.kdidso.livestride;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/** One chronological finalization window for trail and structure decisions. */
+final class TrackingMatchPipeline {
+    static final class Outcome {
+        final TrailNetworkMatcher.Decision decision;
+        final BridgeTunnelMatcher.Result structure;
+        final String structureId;
+        final double progressMeters;
+        Outcome(TrailNetworkMatcher.Decision decision, BridgeTunnelMatcher.Result structure, BridgeTunnelMatcher matcher) {
+            this.decision = decision;
+            this.structure = structure;
+            this.structureId=matcher.getActiveStructureId();
+            this.progressMeters=matcher.getProgressMeters();
+        }
+    }
+
+    private final TrailNetworkMatcher trails = new TrailNetworkMatcher();
+    private final BridgeTunnelMatcher structures = new BridgeTunnelMatcher();
+
+    List<Outcome> setContext(BridgeTunnelMatcher.Context context) {
+        List<Outcome> out = flush();
+        trails.setContext(context);
+        structures.setContext(context);
+        return out;
+    }
+
+    void reset() {
+        if (trails.pendingCount() != 0) throw new IllegalStateException("Flush the run before resetting");
+        trails.reset();
+        structures.reset();
+    }
+
+    List<Outcome> observe(TrailNetworkMatcher.Fix fix, boolean driver) {
+        if (!driver) return resolve(trails.observe(fix));
+        List<Outcome> out = flush();
+        TrailNetworkMatcher.Decision raw = new TrailNetworkMatcher.Decision(
+                fix, fix.lat, fix.lon, false, "", "driver_mode");
+        structures.setEntryHint(null);
+        structures.setNetworkPoint(null, fix.time);
+        out.add(new Outcome(raw, structures.process(new BridgeTunnelMatcher.Point(fix.lat, fix.lon),
+                (float) fix.accuracy, fix.time, fix.accuracy < 0 || fix.accuracy <= 10, true), structures));
+        return out;
+    }
+
+    List<Outcome> flush() {
+        List<Outcome> out = resolve(trails.flush());
+        trails.reset();
+        return out;
+    }
+
+    int pendingCount() { return trails.pendingCount(); }
+
+    private List<Outcome> resolve(List<TrailNetworkMatcher.Decision> decisions) {
+        List<Outcome> out = new ArrayList<>();
+        for (TrailNetworkMatcher.Decision decision : decisions) {
+            TrailNetworkMatcher.Fix fix = decision.fix;
+            structures.setEntryHint(decision.structureHint);
+            structures.setNetworkPoint(decision.matched
+                    ? new BridgeTunnelMatcher.Point(decision.lat, decision.lon) : null, fix.time);
+            BridgeTunnelMatcher.Result result = structures.process(
+                    new BridgeTunnelMatcher.Point(fix.lat, fix.lon), (float) fix.accuracy,
+                    fix.time, fix.accuracy < 0 || fix.accuracy <= 10, false);
+            if (!result.matched && result.state == BridgeTunnelMatcher.State.NORMAL
+                    && decision.anchorOnResume && !result.anchorOnResume) {
+                result = new BridgeTunnelMatcher.Result(new BridgeTunnelMatcher.Point(decision.lat, decision.lon),
+                        false, result.state, "", true, "trail_reattachment_anchor");
+            }
+            out.add(new Outcome(decision, result, structures));
+        }
+        return out;
+    }
+}

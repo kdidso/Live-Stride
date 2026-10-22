@@ -157,22 +157,30 @@ final class LiveStrideServerClient {
         return getJson(endpoint, "map-context");
     }
 
+    static JSONObject fetchRoadEvidence(double latitude,double longitude,int radiusMeters) {
+        if(radiusMeters<1||radiusMeters>5000)throw new IllegalArgumentException("Road radius must be 1-5000 meters");
+        return getJson(BuildConfig.MAP_CONTEXT_API_BASE_URL+"/road-evidence?lat="+latitude
+                +"&lon="+longitude+"&radius="+radiusMeters,"road-evidence");
+    }
+
     private static JSONObject getJson(String endpoint, String endpointName) {
-        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        int attempts="road-evidence".equals(endpointName)?1:MAX_ATTEMPTS;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
             HttpURLConnection connection = null;
             try {
                 connection = (HttpURLConnection) new URL(endpoint).openConnection();
                 connection.setRequestMethod("GET");
                 connection.setRequestProperty("Accept", "application/json");
-                connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-                connection.setReadTimeout(READ_TIMEOUT_MS);
+                connection.setConnectTimeout("road-evidence".equals(endpointName)?5000:CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout("road-evidence".equals(endpointName)?5000:READ_TIMEOUT_MS);
 
                 int status = connection.getResponseCode();
                 if (status >= 200 && status < 300) {
-                    if ("map-context".equals(endpointName)) {
-                        if (connection.getContentLengthLong() > NearbyMapCache.MAX_RESPONSE_BYTES)
+                    if ("map-context".equals(endpointName)||"road-evidence".equals(endpointName)) {
+                        int limit="road-evidence".equals(endpointName)?RoadEvidence.MAX_BYTES:NearbyMapCache.MAX_RESPONSE_BYTES;
+                        if (connection.getContentLengthLong() > limit)
                             return null;
-                        return new JSONObject(NearbyMapCache.readBounded(connection.getInputStream(), NearbyMapCache.MAX_RESPONSE_BYTES));
+                        return new JSONObject(NearbyMapCache.readBounded(connection.getInputStream(), limit));
                     }
                     return new JSONObject(readFully(connection.getInputStream()));
                 }
@@ -189,7 +197,7 @@ final class LiveStrideServerClient {
                 if (connection != null) connection.disconnect();
             }
 
-            if (attempt < MAX_ATTEMPTS && !sleepBeforeRetry(attempt)) {
+            if (attempt < attempts && !sleepBeforeRetry(attempt)) {
                 return null;
             }
         }

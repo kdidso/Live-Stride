@@ -492,6 +492,8 @@ private void uploadNativePoint(Location rawLocation) {
                         + serverContext.segments.size() + " segments"
         );
     }
+    RoadEvidence roadEvidence=mapContextProvider.consumePendingRoadEvidence();
+    if(roadEvidence!=null)matchPipeline.setRoadEvidence(roadEvidence);
     final boolean presumedDriverMode = isPresumedDriver(pointTimeMs);
     BridgeTunnelMatcher.Result pendingMatch = new BridgeTunnelMatcher.Result(
             new BridgeTunnelMatcher.Point(rawLocation.getLatitude(), rawLocation.getLongitude()),
@@ -499,7 +501,7 @@ private void uploadNativePoint(Location rawLocation) {
     pendingTrailFixes.put(observationId, new PendingGpsFix(observationId, rawLocation,
             rawLocation, pendingMatch, accuracy, pointTimeMs));
     for (TrackingMatchPipeline.Outcome outcome : matchPipeline.observe(new TrailNetworkMatcher.Fix(
-            observationId, rawLocation.getLatitude(), rawLocation.getLongitude(), accuracy, pointTimeMs),
+            observationId, rawLocation.getLatitude(), rawLocation.getLongitude(), accuracy, pointTimeMs, stationaryHoldActive),
             presumedDriverMode)) {
         processMatchingOutcome(outcome);
     }

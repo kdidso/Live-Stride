@@ -7,9 +7,12 @@ final class TrailNetworkMatcher {
     static final long LAG_MS = 8_000;
     static final double SEARCH_METERS = 60, MIN_MARGIN = 1.5;
     static final class Fix {
-        final long id,time; final double lat,lon,accuracy;
+        final long id,time; final double lat,lon,accuracy; final boolean routeSwitchHeld;
         Fix(long id,double lat,double lon,double accuracy,long time) {
-            this.id=id;this.lat=lat;this.lon=lon;this.accuracy=accuracy;this.time=time;
+            this(id,lat,lon,accuracy,time,false);
+        }
+        Fix(long id,double lat,double lon,double accuracy,long time,boolean held) {
+            this.id=id;this.lat=lat;this.lon=lon;this.accuracy=accuracy;this.time=time;this.routeSwitchHeld=held;
         }
     }
     static final class Decision {
@@ -72,6 +75,7 @@ final class TrailNetworkMatcher {
         Candidate(int edge,Projection p,double emission) {this.edge=edge;this.p=p;this.emission=emission;}
     }
     private static final class Layer {
+        boolean allowTrail=true;
         final Fix fix;final XY xy;final List<Candidate> candidates;final double[] scores;final int[] back;
         Layer(Fix f,XY xy,List<Candidate> c,double[] s,int[] b) {fix=f;this.xy=xy;candidates=c;scores=s;back=b;}
     }
@@ -90,6 +94,89 @@ final class TrailNetworkMatcher {
     private final Deque<Fix> history=new ArrayDeque<>();
     private Layer previous;
     private boolean usable;
+    private RoadEvidence roadEvidence;
+    private final List<RoadLine> roadLines=new ArrayList<>();
+    private static final class RoadLine {
+        final RoadEvidence.Road road;final Line line;
+        final double minX,minY,maxX,maxY;
+        RoadLine(RoadEvidence.Road road,Line line) {
+            this.road=road;this.line=line;
+            double a=Double.POSITIVE_INFINITY,b=a,c=-a,d=-a;
+            for(XY p:line.p){a=Math.min(a,p.x);b=Math.min(b,p.y);c=Math.max(c,p.x);d=Math.max(d,p.y);}
+            minX=a;minY=b;maxX=c;maxY=d;
+        }
+    }
+    private String corridor="unknown", evidenceKind="";
+    private Fix evidenceStart, evidenceLast;
+    private int evidenceCount;
+    void setRoadEvidence(RoadEvidence evidence) {
+        roadEvidence=evidence;rebuildRoadLines();
+    }
+    private void rebuildRoadLines() {
+        roadLines.clear();
+        if(roadEvidence!=null && usable) for(RoadEvidence.Road road:roadEvidence.roads)
+            roadLines.add(new RoadLine(road,line(road.points)));
+    }
+    private static double alignment(Line line,Projection q,double hx,double hy,double length) {
+        XY a=line.at(q.along-3),b=line.at(q.along+3);
+        double dx=b.x-a.x,dy=b.y-a.y,n=Math.hypot(dx,dy);
+        return n>.01 && length>0?Math.abs((hx*dx+hy*dy)/(length*n)):0;
+    }
+    /** Only distinct, accurate movement earns route-switch evidence; ambiguity never accumulates. */
+    private boolean allowTrail(Fix fix,XY p,List<Candidate> options) {
+        Candidate nearest=null;
+        for(Candidate c:options)if(c.edge>=0 && !edges.get(c.edge).source.segment.isStructure()
+                && (nearest==null||c.p.distance<nearest.p.distance))nearest=c;
+        if(nearest==null){clearRoadVote();return !corridor.equals("road");}
+        Edge trail=edges.get(nearest.edge);
+        Fix prior=null;
+        for(Fix old:history)if(fix.time-old.time>=3000 && fix.time-old.time<=7000){prior=old;break;}
+        XY start=prior==null?p:xy(prior.lat,prior.lon);
+        double hx=p.x-start.x,hy=p.y-start.y,movement=Math.hypot(hx,hy);
+        double roadDistance=Double.POSITIVE_INFINITY;
+        boolean competitor=false;
+        for(RoadLine r:roadLines) {
+            if(r.road.structure || Math.abs(r.road.layer-trail.source.segment.layer)>.1
+                    || p.x<r.minX-40||p.x>r.maxX+40||p.y<r.minY-40||p.y>r.maxY+40)continue;
+            Projection q=r.line.project(p);
+            if(q.distance>35)continue;
+            // A perpendicular crossing is not an explanation for movement along the trail.
+            double align=alignment(r.line,q,hx,hy,movement);
+            if(movement>=4 && align<.85)continue;
+            competitor=true;
+            roadDistance=Math.min(roadDistance,Math.max(0,q.distance-r.road.slack));
+        }
+        boolean establishedTrail=corridor.equals("trail");
+        if(fix.routeSwitchHeld || fix.accuracy<0 || fix.accuracy>10 || movement<4) {
+            clearRoadVote();return establishedTrail || (!competitor&&!corridor.equals("road"));
+        }
+        double margin=Math.max(3,fix.accuracy*1.25);
+        double trailDistance=nearest.p.distance;
+        String winner="";
+        if(competitor && trailDistance-roadDistance>margin)winner="road";
+        else if(((!competitor && (!corridor.equals("road") || (roadEvidence!=null&&!roadEvidence.truncated&&!roadEvidence.roads.isEmpty()))) || (competitor && roadDistance-trailDistance>margin)) && trailDistance<=5
+                && alignment(trail.line,nearest.p,hx,hy,movement)>=.85)winner="trail";
+        if(winner.isEmpty()){clearRoadVote();}
+        else {
+            if(!winner.equals(evidenceKind)||evidenceLast==null||fix.time-evidenceLast.time>2500) {
+                clearRoadVote();evidenceKind=winner;evidenceStart=fix;
+            }
+            // One stationary cluster or duplicated readings cannot build confidence.
+            if(evidenceLast==null || xy(evidenceLast.lat,evidenceLast.lon).distance(p)>=.7) {
+                evidenceLast=fix;evidenceCount++;
+            }
+            if(evidenceCount>=4 && fix.time-evidenceStart.time>=3000
+                    && xy(evidenceStart.lat,evidenceStart.lon).distance(p)>=6) {
+                corridor=winner;
+            }
+        }
+        if(corridor.equals("road"))return false;
+        if(corridor.equals("trail"))return true;
+        // Preserve legacy behavior away from competing roads; an ambiguous start stays GPS.
+        return !competitor;
+    }
+    private void clearRoadVote(){evidenceKind="";evidenceStart=null;evidenceLast=null;evidenceCount=0;}
+
     private double lat0,lon0,cosLat,lateral;
     private String lateralFamily="";private long lateralTime;
     private String continuityFamily="";
@@ -160,7 +247,8 @@ final class TrailNetworkMatcher {
 
     void setContext(BridgeTunnelMatcher.Context context) {
         if(!layers.isEmpty())throw new IllegalStateException("Flush pending trail points before replacing context");
-        reset();edges.clear();adjacency.clear();grid.clear();longEdges.clear();distanceCache.clear();usable=false;
+        String priorCorridor=corridor;
+        reset();corridor=priorCorridor;edges.clear();adjacency.clear();grid.clear();longEdges.clear();distanceCache.clear();usable=false;
         if(context==null||context.segments.isEmpty())return;
         BridgeTunnelMatcher.Point origin=context.segments.get(0).points.get(0);
         lat0=origin.lat;lon0=origin.lon;cosLat=Math.cos(Math.toRadians(lat0));
@@ -175,6 +263,7 @@ final class TrailNetworkMatcher {
                 n.families.add(segment.family);n.levels.add(segment.layer);n.allEnds&=i==0||i==s.line.p.size()-1;
             }
         }
+        rebuildRoadLines();
         Map<String,Integer> nodes=new HashMap<>();
         for(Source s:sources) {
             int start=0;
@@ -373,6 +462,13 @@ final class TrailNetworkMatcher {
         XY p=!trusted && previous!=null ? previous.xy : xy(fix.lat,fix.lon);
         List<Candidate> c=!trusted ? previous!=null ? previous.candidates
                 : Collections.singletonList(new Candidate(-1,new Projection(p,0,0),0)) : candidates(fix,p);
+        boolean allow=allowTrail(fix,xy(fix.lat,fix.lon),c);
+        if(!allow && trusted) {
+            List<Candidate> gated=new ArrayList<>();
+            for(Candidate option:c)gated.add(new Candidate(option.edge,option.p,
+                    option.edge<0?0:option.emission+(edges.get(option.edge).source.segment.isStructure()?0:12)));
+            c=gated;
+        }
         double[] scores=new double[c.size()];int[] back=new int[c.size()];
         for(int i=0;i<c.size();i++) {
             if(!trusted && previous!=null) {scores[i]=previous.scores[i];back[i]=i;continue;}
@@ -384,7 +480,7 @@ final class TrailNetworkMatcher {
             scores[i]=(previous==null?0:best)+c.get(i).emission;back[i]=parent;
         }
         double min=Arrays.stream(scores).min().orElse(0);for(int i=0;i<scores.length;i++)scores[i]-=min;
-        Layer layer=new Layer(fix,p,c,scores,back);layers.addLast(layer);previous=layer;if(trusted)history.addLast(fix);
+        Layer layer=new Layer(fix,p,c,scores,back);layer.allowTrail=allow;layers.addLast(layer);previous=layer;if(trusted)history.addLast(fix);
         while(history.size()>2&&fix.time-history.peekFirst().time>7000)history.removeFirst();
         while(!layers.isEmpty()&&(fix.time-layers.peekFirst().fix.time>=LAG_MS||layers.size()>32))out.add(emit());
         return out;
@@ -398,8 +494,8 @@ final class TrailNetworkMatcher {
         Candidate chosen=first.candidates.get(ancestry[best]);String family=family(chosen);
         double margin=Double.POSITIVE_INFINITY;
         for(int j=0;j<ancestry.length;j++)if(!family(first.candidates.get(ancestry[j])).equals(family))margin=Math.min(margin,last.scores[j]-last.scores[best]);
-        boolean matched=(first.fix.accuracy<0||first.fix.accuracy<=10)&&chosen.edge>=0&&margin>=MIN_MARGIN&&!edges.get(chosen.edge).source.segment.isStructure();
-        XY output=first.xy;String reason=chosen.edge<0?"free_gps":matched?"connected_trail":"ambiguous_or_structure_owned";
+        boolean matched=first.allowTrail&&(first.fix.accuracy<0||first.fix.accuracy<=10)&&chosen.edge>=0&&margin>=MIN_MARGIN&&!edges.get(chosen.edge).source.segment.isStructure();
+        XY output=first.xy;String reason=!first.allowTrail?"road_evidence_preserve_gps":chosen.edge<0?"free_gps":matched?"connected_trail":"ambiguous_or_structure_owned";
         if(matched) {
             Edge edge=edges.get(chosen.edge);XY a=edge.line.at(chosen.p.along-2),b=edge.line.at(chosen.p.along+2);
             double dx=b.x-a.x,dy=b.y-a.y,norm=Math.hypot(dx,dy);
@@ -448,6 +544,6 @@ final class TrailNetworkMatcher {
     List<Decision> flush() {
         List<Decision> out=new ArrayList<>();while(!layers.isEmpty())out.add(emit());return out;
     }
-    void reset() {if(!layers.isEmpty())throw new IllegalStateException("Resolve pending trail fixes before reset");previous=null;history.clear();lateral=0;lateralTime=0;lateralFamily="";continuityFamily="";continuityTime=0;turnUntil=0;continuityDirection=0;lastEmitted=null;lastEmittedMatched=false;}
+    void reset() {if(!layers.isEmpty())throw new IllegalStateException("Resolve pending trail fixes before reset");previous=null;history.clear();corridor="unknown";clearRoadVote();lateral=0;lateralTime=0;lateralFamily="";continuityFamily="";continuityTime=0;turnUntil=0;continuityDirection=0;lastEmitted=null;lastEmittedMatched=false;}
     int pendingCount() {return layers.size();}
 }

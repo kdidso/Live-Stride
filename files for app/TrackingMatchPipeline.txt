@@ -26,11 +26,13 @@ final class TrackingMatchPipeline {
     private final BridgeTunnelMatcher structures = new BridgeTunnelMatcher();
 
     List<Outcome> setContext(BridgeTunnelMatcher.Context context) {
-        List<Outcome> out = flush();
+        List<Outcome> out = resolve(trails.flush());
         trails.setContext(context);
         structures.setContext(context);
         return out;
     }
+
+    void setRoadEvidence(RoadEvidence roads) { trails.setRoadEvidence(roads); }
 
     void reset() {
         if (trails.pendingCount() != 0) throw new IllegalStateException("Flush the run before resetting");

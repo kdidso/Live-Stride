@@ -11,9 +11,12 @@ import java.util.concurrent.atomic.AtomicReference;
 final class LiveStrideMapContextProvider {
     private static final String TAG="LiveStrideMapContext";
     private static final int RADIUS=1000;
-    private final NearbyMapCache cache;
+    private final NearbyMapCache cache,roadCache;
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
     private final AtomicReference<BridgeTunnelMatcher.Context> pending=new AtomicReference<>();
+    private final AtomicReference<RoadEvidence> pendingRoads=new AtomicReference<>();
+    private JSONObject activeRoadArea;
+    private String roadFingerprint;
     private final Object lock=new Object();
     private String desiredKey,lastKey,publishedFingerprint;
     private double latitude,longitude;
@@ -22,7 +25,8 @@ final class LiveStrideMapContextProvider {
     private JSONObject activeArea;
     LiveStrideMapContextProvider(Context context) {
         File files=context.getApplicationContext().getFilesDir();
-        cache=new NearbyMapCache(new File(files,"nearby_map_cache_v2"));
+        cache=new NearbyMapCache(new File(files,"nearby_map_cache_v2"),48L*1024*1024,128);
+        roadCache=new NearbyMapCache(new File(files,"nearby_road_cache_v1"),16L*1024*1024,32);
         // Remove the retired pilot copy only; run databases are untouched.
         new File(files,"utah_trail_map_v1.sqlite").delete();
         new File(files,"utah_trail_map_v1.sqlite.tmp").delete();
@@ -31,7 +35,7 @@ final class LiveStrideMapContextProvider {
     }
     static int cleanupOldCacheFiles(Context context,long cutoff) {
         int removed=0;
-        for(String name:new String[]{"map_context_cache","nearby_map_cache_v2"}) {
+        for(String name:new String[]{"map_context_cache","nearby_map_cache_v2","nearby_road_cache_v1"}) {
             File[] files=new File(context.getFilesDir(),name).listFiles();
             if(files!=null)for(File f:files)if(f.isFile()&&f.lastModified()<cutoff&&
                     (f.getName().endsWith(".json")||f.getName().endsWith(".tmp"))&&f.delete())removed++;
@@ -49,6 +53,7 @@ final class LiveStrideMapContextProvider {
         }
     }
     BridgeTunnelMatcher.Context consumePendingContext(){return pending.getAndSet(null);}
+    RoadEvidence consumePendingRoadEvidence(){return pendingRoads.getAndSet(null);}
     void shutdown(){synchronized(lock){closed=true;}executor.shutdownNow();}
     private void requests() {
         try {
@@ -58,6 +63,9 @@ final class LiveStrideMapContextProvider {
                 JSONObject cached=cache.readNearby(key,lat,lon);
                 if(cached!=null)publish(cached);
                 else if(activeArea!=null&&!NearbyMapCache.covers(activeArea,lat,lon))publish(new JSONObject());
+                JSONObject cachedRoads=roadCache.readNearby(key,lat,lon);
+                if(cachedRoads!=null)publishRoads(cachedRoads);
+                else if(activeRoadArea!=null&&!NearbyMapCache.covers(activeRoadArea,lat,lon))clearRoadArea();
                 boolean ok=false;
                 try {
                     JSONObject response=LiveStrideServerClient.fetchMapContext(lat,lon,RADIUS);
@@ -71,11 +79,33 @@ final class LiveStrideMapContextProvider {
                         ok=true;
                     }
                 }catch(Exception e){Log.w(TAG,"Nearby map unavailable: "+e.getMessage());}
+                // Publish trails first; road loading never blocks GPS or trail startup.
+                try {
+                    JSONObject roads=LiveStrideServerClient.fetchRoadEvidence(lat,lon,RADIUS);
+                    if(roads!=null) {
+                        RoadEvidence.parse(roads);
+                        roads.put("segments",new org.json.JSONArray());
+                        synchronized(lock){if(NearbyMapCache.covers(roads,latitude,longitude))publishRoads(roads);}
+                        try{roadCache.write(key,roads);}catch(Exception e){Log.w(TAG,"Road cache write: "+e.getMessage());}
+                    }
+                }catch(Exception e){Log.w(TAG,"Road evidence unavailable: "+e.getMessage());}
                 synchronized(lock){succeeded=ok;if(key.equals(desiredKey)||closed)return;}
             }
         } finally {
             synchronized(lock){workerRunning=false;}
         }
+    }
+    private void clearRoadArea() {
+        pendingRoads.set(new RoadEvidence(java.util.Collections.emptyList(),true));
+        roadFingerprint=null;activeRoadArea=null;
+    }
+    private void publishRoads(JSONObject response) {
+        try {
+            RoadEvidence roads=RoadEvidence.parse(response);
+            String fingerprint=response.getJSONArray("roads").toString()+roads.truncated;
+            if(!fingerprint.equals(roadFingerprint)){pendingRoads.set(roads);roadFingerprint=fingerprint;}
+            activeRoadArea=response;
+        }catch(Exception e){Log.w(TAG,"Road geometry rejected: "+e.getMessage());}
     }
     private void publish(JSONObject response) {
         try {

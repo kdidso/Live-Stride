@@ -2467,6 +2467,7 @@ async function hydrateBrowserProfileRoute(container, run, detailed = false, shou
     let viewerConnectionLost = false;
     let viewerConnectionWarning = false;
     let nativeRouteGapActive = false;
+let nativeRouteRecoveryConfirmed = false;
     let viewerGpsVerificationEl = null;
     let viewerGpsVerifying = false;
     const GPS_VERIFICATION_MESSAGE = "GPS signal unstable — verifying runner’s location…";
@@ -5064,6 +5065,19 @@ async function fetchAllNativeRunPoints(runId) {
   return allRows.filter(isDisplayableNativePoint);
 }
 
+// A matching/upload batch can arrive out of order without any network outage.
+// Only an observed disconnect or genuinely delayed uploads confirm recovery.
+function nativeRouteRecoveryNotice(confirmed, hadGap, hasGap, incomingGap, connectionLost, point) {
+  const recorded = Date.parse(point?.recorded_at || "");
+  const uploaded = Date.parse(point?.uploaded_at || "");
+  const delayedUpload = Number.isFinite(recorded) && Number.isFinite(uploaded)
+    && uploaded - recorded >= 30000;
+  const recovery = confirmed || connectionLost || ((hadGap || hasGap || incomingGap) && delayedUpload);
+  const message = hadGap && !hasGap && recovery ? "Route restored"
+    : incomingGap && recovery && !confirmed ? "Reconnecting - rebuilding route" : null;
+  return { confirmed: hasGap && recovery, message };
+}
+
 async function startNativePathComparison(runId) {
   if (!runId) return;
 
@@ -5098,6 +5112,7 @@ async function startNativePathComparison(runId) {
       return (a.timestamp || 0) - (b.timestamp || 0);
     });
   nativeRouteGapActive = hasSequenceGap(nativePathCoords);
+  nativeRouteRecoveryConfirmed = false;
 
   if (document.body.classList.contains("viewer-mode")) {
     addOrUpdateNativePath();
@@ -5152,12 +5167,12 @@ async function startNativePathComparison(runId) {
           previousLatestSequence != null &&
           incomingSequence - previousLatestSequence === 1;
 
-        if (currentViewerRunIsLive && incomingSequenceGap) {
-          showViewerStatus("Reconnecting - rebuilding route", "good");
-          hideViewerStatusSoon("Reconnecting - rebuilding route", 6000);
-        } else if (currentViewerRunIsLive && hadGap && !hasGap) {
-          showViewerStatus("Route restored", "good");
-          hideViewerStatusSoon("Route restored", 3000);
+        const recoveryNotice = nativeRouteRecoveryNotice(nativeRouteRecoveryConfirmed,
+          hadGap, hasGap, incomingSequenceGap, wasConnectionLost, pt);
+        nativeRouteRecoveryConfirmed = recoveryNotice.confirmed;
+        if (currentViewerRunIsLive && recoveryNotice.message) {
+          showViewerStatus(recoveryNotice.message, "good");
+          hideViewerStatusSoon(recoveryNotice.message, recoveryNotice.message === "Route restored" ? 3000 : 6000);
         } else if (currentViewerRunIsLive && (wasConnectionLost || wasConnectionWarning) && cleanSequentialResume) {
           showViewerStatus("Motion detected", "good");
           hideViewerStatusSoon("Motion detected", 3000);
@@ -5409,6 +5424,7 @@ nativePathCoords = [];
 viewerConnectionWarning = false;
 viewerConnectionLost = false;
 nativeRouteGapActive = false;
+nativeRouteRecoveryConfirmed = false;
 clearRunPathLayer();
 clearNativeRunPathLayer();
 hideSplitsPanel();

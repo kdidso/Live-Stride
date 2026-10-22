@@ -1,0 +1,63 @@
+package com.kdidso.livestride;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.*;
+
+/** Bounded, disposable context. Roads never enter the trail/structure routing graph. */
+final class RoadEvidence {
+    static final int MAX_BYTES=1024*1024, MAX_ROADS=256, MAX_COORDINATES=12000;
+    static final class Road {
+        final String id;
+        final double layer, slack;
+        final boolean structure;
+        final List<BridgeTunnelMatcher.Point> points;
+        Road(String id,double layer,double slack,boolean structure,List<BridgeTunnelMatcher.Point> points) {
+            this.id=id;this.layer=layer;this.slack=slack;this.structure=structure;this.points=points;
+        }
+    }
+    final List<Road> roads;
+    final boolean truncated;
+    RoadEvidence(List<Road> roads,boolean truncated) {this.roads=roads;this.truncated=truncated;}
+    static RoadEvidence parse(JSONObject root) {
+        JSONArray items=root.optJSONArray("roads");
+        if(items==null || items.length()>MAX_ROADS)throw new IllegalArgumentException("Invalid road evidence feature count");
+        List<Road> roads=new ArrayList<>();int coordinates=0;
+        for(int i=0;i<items.length();i++) {
+            JSONObject item=items.optJSONObject(i);if(item==null)continue;
+            JSONArray points=item.optJSONArray("points");if(points==null)continue;
+            coordinates+=points.length();
+            if(coordinates>MAX_COORDINATES)throw new IllegalArgumentException("Too many road coordinates");
+            List<BridgeTunnelMatcher.Point> path=new ArrayList<>();
+            boolean valid=true;
+            for(int j=0;j<points.length();j++) {
+                JSONArray p=points.optJSONArray(j);
+                double lon=p==null?Double.NaN:p.optDouble(0,Double.NaN),lat=p==null?Double.NaN:p.optDouble(1,Double.NaN);
+                if(!Double.isFinite(lat)||!Double.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180){valid=false;break;}
+                path.add(new BridgeTunnelMatcher.Point(lat,lon));
+            }
+            if(!valid||path.size()<2)continue;
+            // Width only expresses uncertainty about the centerline; never constructs a snap buffer.
+            double width=number(item.optString("width",""));
+            if(!Double.isFinite(width))width=number(item.optString("est_width",""));
+            double lanes=number(item.optString("lanes",""));
+            double slack=Double.isFinite(width)?width/2:Double.isFinite(lanes)?lanes*1.6:3.5;
+            slack=Math.max(2,Math.min(8,slack));
+            roads.add(new Road(item.optString("id","road_"+i),item.optDouble("layer",0),slack,
+                    tagged(item,"bridge")||tagged(item,"tunnel"),path));
+        }
+        return new RoadEvidence(Collections.unmodifiableList(roads),root.optBoolean("truncated",false));
+    }
+    private static boolean tagged(JSONObject item,String key) {
+        String value=item.optString(key,"");return !value.isEmpty()&&!value.equals("null")&&!value.equals("no")&&!value.equals("false")&&!value.equals("0");
+    }
+    private static double number(String value) {
+        try {
+            String s=value.trim().toLowerCase(Locale.ROOT);
+            double factor=s.endsWith("ft")||s.endsWith("'")?.3048:1;
+            s=s.replaceAll("\\s*(m|ft|')$","").trim();
+            double result=Double.parseDouble(s)*factor;
+            return Double.isFinite(result)&&result>0?result:Double.NaN;
+        }catch(Exception e){return Double.NaN;}
+    }
+}

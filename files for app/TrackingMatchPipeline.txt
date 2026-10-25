@@ -24,26 +24,32 @@ final class TrackingMatchPipeline {
     private String trustedKey;
     private final TrailNetworkMatcher trails = new TrailNetworkMatcher();
     private final BridgeTunnelMatcher structures = new BridgeTunnelMatcher();
+    private final RoadNetworkMatcher roads = new RoadNetworkMatcher();
 
     List<Outcome> setContext(BridgeTunnelMatcher.Context context) {
         List<Outcome> out = resolve(trails.flush());
         trails.setContext(context);
         structures.setContext(context);
+        roads.setContext(context);
         return out;
     }
 
-    void setRoadEvidence(RoadEvidence roads) { trails.setRoadEvidence(roads); }
+    void setRoadEvidence(RoadEvidence evidence) { trails.setRoadEvidence(evidence); roads.setRoadEvidence(evidence); }
+    void setRoadCoverage(RoadCoverage coverage) { roads.setCoverage(coverage); trails.setRoadCoverage(coverage); }
 
     void reset() {
         if (trails.pendingCount() != 0) throw new IllegalStateException("Flush the run before resetting");
         trails.reset();
         structures.reset();
+        roads.reset();
         trustedFix=null;trustedPoint=null;trustedKey=null;
     }
 
     List<Outcome> observe(TrailNetworkMatcher.Fix fix, boolean driver) {
+        roads.record(fix);
         if (!driver) return resolve(trails.observe(fix));
         List<Outcome> out = flush();
+        roads.release();
         TrailNetworkMatcher.Decision raw = new TrailNetworkMatcher.Decision(
                 fix, fix.lat, fix.lon, false, "", "driver_mode");
         structures.setEntryHint(null);
@@ -63,7 +69,8 @@ final class TrackingMatchPipeline {
 
     private List<Outcome> resolve(List<TrailNetworkMatcher.Decision> decisions) {
         List<Outcome> out = new ArrayList<>();
-        for (TrailNetworkMatcher.Decision decision : decisions) {
+        for (TrailNetworkMatcher.Decision incoming : decisions) {
+            TrailNetworkMatcher.Decision decision=incoming;
             TrailNetworkMatcher.Fix fix = decision.fix;
             structures.setEntryHint(decision.structureHint);
             structures.setNetworkPoint(decision.matched
@@ -80,6 +87,12 @@ final class TrackingMatchPipeline {
                     && decision.anchorOnResume && !result.anchorOnResume) {
                 result = new BridgeTunnelMatcher.Result(new BridgeTunnelMatcher.Point(decision.lat, decision.lon),
                         false, result.state, "", true, "trail_reattachment_anchor");
+            }
+            decision=roads.resolve(decision,result.matched || result.state!=BridgeTunnelMatcher.State.NORMAL || result.anchorOnResume);
+            if(decision.matched && decision.reason.startsWith("road_") && decision.anchorOnResume
+                    && !result.matched && result.state==BridgeTunnelMatcher.State.NORMAL && !result.anchorOnResume) {
+                result=new BridgeTunnelMatcher.Result(new BridgeTunnelMatcher.Point(decision.lat,decision.lon),
+                        false,result.state,"",true,"road_position_correction_anchor");
             }
             Outcome outcome=new Outcome(decision,result,structures);
             boolean reliable=result.matched || (result.state==BridgeTunnelMatcher.State.NORMAL&&decision.matched);

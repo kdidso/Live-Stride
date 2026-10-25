@@ -494,6 +494,8 @@ private void uploadNativePoint(Location rawLocation) {
     }
     RoadEvidence roadEvidence=mapContextProvider.consumePendingRoadEvidence();
     if(roadEvidence!=null)matchPipeline.setRoadEvidence(roadEvidence);
+    RoadCoverage roadCoverage=mapContextProvider.consumePendingRoadCoverage();
+    if(roadCoverage!=null)matchPipeline.setRoadCoverage(roadCoverage);
     final boolean presumedDriverMode = isPresumedDriver(pointTimeMs);
     BridgeTunnelMatcher.Result pendingMatch = new BridgeTunnelMatcher.Result(
             new BridgeTunnelMatcher.Point(rawLocation.getLatitude(), rawLocation.getLongitude()),
@@ -585,8 +587,9 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
     boolean heldPoint = false;
     String holdReason = null;
     final boolean wasMapMatched = matchResult.matched || fix.trailMatched;
-    final String matchingState = fix.trailMatched ? "trail_tracking" : matchResult.state.name().toLowerCase(java.util.Locale.US);
-    final String matchedStructureType = fix.trailMatched ? "trail" : matchResult.structureType;
+    final boolean roadMatched=fix.trailMatched && fix.trailDetail.startsWith("road_");
+    final String matchingState = fix.trailMatched ? roadMatched ? "road_tracking" : "trail_tracking" : matchResult.state.name().toLowerCase(java.util.Locale.US);
+    final String matchedStructureType = fix.trailMatched ? roadMatched ? "road" : "trail" : matchResult.structureType;
 
     double segmentMeters = 0.0;
     double instPaceMinPerMile = 0.0;

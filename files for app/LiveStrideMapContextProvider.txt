@@ -11,10 +11,13 @@ import java.util.concurrent.atomic.AtomicReference;
 final class LiveStrideMapContextProvider {
     private static final String TAG="LiveStrideMapContext";
     private static final int RADIUS=1000;
-    private final NearbyMapCache cache,roadCache;
+    private final NearbyMapCache cache,roadCache,coverageCache;
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
     private final AtomicReference<BridgeTunnelMatcher.Context> pending=new AtomicReference<>();
     private final AtomicReference<RoadEvidence> pendingRoads=new AtomicReference<>();
+    private final AtomicReference<RoadCoverage> pendingCoverage=new AtomicReference<>();
+    private JSONObject activeCoverageArea;
+    private String coverageFingerprint;
     private JSONObject activeRoadArea;
     private String roadFingerprint;
     private final Object lock=new Object();
@@ -27,6 +30,7 @@ final class LiveStrideMapContextProvider {
         File files=context.getApplicationContext().getFilesDir();
         cache=new NearbyMapCache(new File(files,"nearby_map_cache_v2"),48L*1024*1024,128);
         roadCache=new NearbyMapCache(new File(files,"nearby_road_cache_v1"),16L*1024*1024,32);
+        coverageCache=new NearbyMapCache(new File(files,"nearby_coverage_cache_v1"),16L*1024*1024,32);
         // Remove the retired pilot copy only; run databases are untouched.
         new File(files,"utah_trail_map_v1.sqlite").delete();
         new File(files,"utah_trail_map_v1.sqlite.tmp").delete();
@@ -35,7 +39,7 @@ final class LiveStrideMapContextProvider {
     }
     static int cleanupOldCacheFiles(Context context,long cutoff) {
         int removed=0;
-        for(String name:new String[]{"map_context_cache","nearby_map_cache_v2","nearby_road_cache_v1"}) {
+        for(String name:new String[]{"map_context_cache","nearby_map_cache_v2","nearby_road_cache_v1","nearby_coverage_cache_v1"}) {
             File[] files=new File(context.getFilesDir(),name).listFiles();
             if(files!=null)for(File f:files)if(f.isFile()&&f.lastModified()<cutoff&&
                     (f.getName().endsWith(".json")||f.getName().endsWith(".tmp"))&&f.delete())removed++;
@@ -54,6 +58,7 @@ final class LiveStrideMapContextProvider {
     }
     BridgeTunnelMatcher.Context consumePendingContext(){return pending.getAndSet(null);}
     RoadEvidence consumePendingRoadEvidence(){return pendingRoads.getAndSet(null);}
+    RoadCoverage consumePendingRoadCoverage(){return pendingCoverage.getAndSet(null);}
     void shutdown(){synchronized(lock){closed=true;}executor.shutdownNow();}
     private void requests() {
         try {
@@ -66,6 +71,8 @@ final class LiveStrideMapContextProvider {
                 JSONObject cachedRoads=roadCache.readNearby(key,lat,lon);
                 if(cachedRoads!=null)publishRoads(cachedRoads);
                 else if(activeRoadArea!=null&&!NearbyMapCache.covers(activeRoadArea,lat,lon))clearRoadArea();
+                JSONObject cachedCoverage=coverageCache.readNearby(key,lat,lon);
+                if(cachedCoverage!=null)publishCoverage(cachedCoverage);
                 boolean ok=false;
                 try {
                     JSONObject response=LiveStrideServerClient.fetchMapContext(lat,lon,RADIUS);
@@ -89,6 +96,15 @@ final class LiveStrideMapContextProvider {
                         try{roadCache.write(key,roads);}catch(Exception e){Log.w(TAG,"Road cache write: "+e.getMessage());}
                     }
                 }catch(Exception e){Log.w(TAG,"Road evidence unavailable: "+e.getMessage());}
+                try {
+                    JSONObject response=LiveStrideServerClient.fetchRoadCoverage(lat,lon,RADIUS);
+                    if(response!=null) {
+                        RoadCoverage.parse(response);
+                        response.put("segments",new org.json.JSONArray());
+                        synchronized(lock){if(NearbyMapCache.covers(response,latitude,longitude))publishCoverage(response);}
+                        try{coverageCache.write(key,response);}catch(Exception e){Log.w(TAG,"Coverage cache write: "+e.getMessage());}
+                    }
+                }catch(Exception e){Log.w(TAG,"Road coverage unavailable: "+e.getMessage());}
                 synchronized(lock){succeeded=ok;if(key.equals(desiredKey)||closed)return;}
             }
         } finally {
@@ -98,6 +114,16 @@ final class LiveStrideMapContextProvider {
     private void clearRoadArea() {
         pendingRoads.set(new RoadEvidence(java.util.Collections.emptyList(),true));
         roadFingerprint=null;activeRoadArea=null;
+    }
+    private void publishCoverage(JSONObject response) {
+        try {
+            RoadCoverage coverage=RoadCoverage.parse(response);
+            // Query bounds matter: identical piece IDs can carry different clips.
+            String fingerprint=coverage.version+response.getJSONArray("queryBounds").toString()
+                    +response.getJSONArray("features").toString()+coverage.available+coverage.truncated;
+            if(!fingerprint.equals(coverageFingerprint)){pendingCoverage.set(coverage);coverageFingerprint=fingerprint;}
+            activeCoverageArea=response;
+        }catch(Exception e){Log.w(TAG,"Road coverage rejected: "+e.getMessage());}
     }
     private void publishRoads(JSONObject response) {
         try {

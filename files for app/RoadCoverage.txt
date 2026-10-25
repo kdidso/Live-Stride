@@ -1,0 +1,108 @@
+package com.kdidso.livestride;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.*;
+
+/** One bounded query window. Pieces are a union, not route identities. */
+final class RoadCoverage {
+    static final int MAX_BYTES=1048576, MAX_FEATURES=512, MAX_COORDINATES=20000;
+    enum Status { INSIDE, OUTSIDE, UNKNOWN }
+    private final List<double[][][]> polygons;
+    private final List<double[]> extents=new ArrayList<>();
+    final boolean available,truncated;
+    final String version;
+    private final double west,south,east,north;
+    private RoadCoverage(List<double[][][]> p,boolean a,boolean t,String v,double[] b) {
+        polygons=p;available=a;truncated=t;version=v;west=b[0];south=b[1];east=b[2];north=b[3];
+        for(double[][][] polygon:p) {
+            double w=Double.POSITIVE_INFINITY,s=w,e=-w,n=-w;
+            for(double[] xy:polygon[0]){w=Math.min(w,xy[0]);s=Math.min(s,xy[1]);e=Math.max(e,xy[0]);n=Math.max(n,xy[1]);}
+            extents.add(new double[]{w,s,e,n});
+        }
+    }
+    static RoadCoverage parse(JSONObject root) {
+        if(root.optInt("schemaVersion")!=1 || !"road-coverage-evidence".equals(root.optString("purpose")))
+            throw new IllegalArgumentException("Unsupported road coverage");
+        JSONArray bounds=root.optJSONArray("queryBounds"),features=root.optJSONArray("features"),datasets=root.optJSONArray("datasets");
+        if(bounds==null||bounds.length()!=4||features==null||features.length()>MAX_FEATURES||datasets==null)
+            throw new IllegalArgumentException("Invalid coverage envelope");
+        double[] b=new double[4];for(int i=0;i<4;i++){b[i]=bounds.optDouble(i,Double.NaN);if(!Double.isFinite(b[i]))throw new IllegalArgumentException("Invalid bounds");}
+        if(b[0]<-180||b[2]>180||b[1]<-90||b[3]>90||b[0]>=b[2]||b[1]>=b[3])throw new IllegalArgumentException("Invalid bounds");
+        StringBuilder version=new StringBuilder();
+        for(int i=0;i<datasets.length();i++) {
+            JSONObject d=datasets.optJSONObject(i);
+            if(d==null||d.optInt("srid")!=4326||!d.optString("source_sha256").matches("[a-fA-F0-9]{64}"))throw new IllegalArgumentException("Invalid coverage dataset");
+            version.append(d.optString("region")).append(':').append(d.optString("source_sha256")).append(';');
+        }
+        List<double[][][]> result=new ArrayList<>();int[] count={0};
+        for(int i=0;i<features.length();i++) {
+            JSONObject f=features.optJSONObject(i),g=f==null?null:f.optJSONObject("geometry");
+            if(g==null)throw new IllegalArgumentException("Missing coverage geometry");
+            JSONArray coordinates=g.optJSONArray("coordinates");
+            if("Polygon".equals(g.optString("type")))result.add(polygon(coordinates,count));
+            else if("MultiPolygon".equals(g.optString("type"))&&coordinates!=null) {
+                for(int j=0;j<coordinates.length();j++)result.add(polygon(coordinates.optJSONArray(j),count));
+            } else throw new IllegalArgumentException("Unsupported coverage geometry");
+        }
+        boolean available=root.optBoolean("dataAvailable",false);
+        if(available&&datasets.length()==0||!available&&!result.isEmpty())throw new IllegalArgumentException("Inconsistent coverage availability");
+        return new RoadCoverage(Collections.unmodifiableList(result),available,root.optBoolean("truncated",true),version.toString(),b);
+    }
+    private static double[][][] polygon(JSONArray rings,int[] count) {
+        if(rings==null||rings.length()==0)throw new IllegalArgumentException("Empty polygon");
+        double[][][] p=new double[rings.length()][][];
+        for(int r=0;r<rings.length();r++) {
+            JSONArray ring=rings.optJSONArray(r);if(ring==null||ring.length()<4)throw new IllegalArgumentException("Invalid ring");
+            count[0]+=ring.length();if(count[0]>MAX_COORDINATES)throw new IllegalArgumentException("Too many coverage coordinates");
+            p[r]=new double[ring.length()][2];
+            for(int i=0;i<ring.length();i++) {
+                JSONArray xy=ring.optJSONArray(i);if(xy==null||xy.length()<2)throw new IllegalArgumentException("Invalid coordinate");
+                double x=xy.optDouble(0,Double.NaN),y=xy.optDouble(1,Double.NaN);
+                if(!Double.isFinite(x)||!Double.isFinite(y)||Math.abs(x)>180||Math.abs(y)>90)throw new IllegalArgumentException("Invalid coordinate");
+                p[r][i][0]=x;p[r][i][1]=y;
+            }
+            if(!Arrays.equals(p[r][0],p[r][p[r].length-1]))throw new IllegalArgumentException("Unclosed ring");
+        }
+        return p;
+    }
+    Status status(double lat,double lon) {
+        if(!Double.isFinite(lat)||!Double.isFinite(lon)||lon<=west||lon>=east||lat<=south||lat>=north)return Status.UNKNOWN;
+        for(int i=0;i<polygons.size();i++) {
+            double[] b=extents.get(i);if(lon<b[0]-1e-11||lon>b[2]+1e-11||lat<b[1]-1e-11||lat>b[3]+1e-11)continue;
+            double[][][] p=polygons.get(i);
+            if(!ring(p[0],lon,lat))continue;
+            boolean hole=false;for(int r=1;r<p.length;r++)if(ring(p[r],lon,lat)){hole=true;break;}
+            if(!hole)return Status.INSIDE;
+        }
+        return available&&!truncated?Status.OUTSIDE:Status.UNKNOWN;
+    }
+    /** Nearest delivered road point, not a route attachment or a piece identity. */
+    BridgeTunnelMatcher.Point nearest(double lat,double lon,double maximumMeters) {
+        if(status(lat,lon)==Status.UNKNOWN)return null;
+        double sx=6371008.8*Math.cos(Math.toRadians(lat))*Math.PI/180,sy=6371008.8*Math.PI/180;
+        double best=maximumMeters;BridgeTunnelMatcher.Point result=null;
+        for(double[][][] polygon:polygons)for(double[][] ring:polygon)for(int i=1;i<ring.length;i++) {
+            double ax=(ring[i-1][0]-lon)*sx,ay=(ring[i-1][1]-lat)*sy;
+            double dx=(ring[i][0]-ring[i-1][0])*sx,dy=(ring[i][1]-ring[i-1][1])*sy,l2=dx*dx+dy*dy;
+            double t=l2>0?Math.max(0,Math.min(1,-(ax*dx+ay*dy)/l2)):0;
+            double x=ax+t*dx,y=ay+t*dy,d=Math.hypot(x,y);
+            if(d<best) {
+                double qlat=lat+y/sy,qlon=lon+x/sx;
+                // Exterior ring boundaries are included; do not fill a hole.
+                if(status(qlat,qlon)==Status.INSIDE){best=d;result=new BridgeTunnelMatcher.Point(qlat,qlon);}
+            }
+        }
+        return result;
+    }
+    private static boolean ring(double[][] p,double x,double y) {
+        boolean inside=false;
+        for(int i=1;i<p.length;i++) {
+            double[] a=p[i-1],b=p[i];double dx=b[0]-a[0],dy=b[1]-a[1],l2=dx*dx+dy*dy;
+            double t=l2>0?Math.max(0,Math.min(1,((x-a[0])*dx+(y-a[1])*dy)/l2)):0;
+            if(Math.hypot(x-a[0]-t*dx,y-a[1]-t*dy)<1e-11)return true;
+            if((a[1]>y)!=(b[1]>y)&&x<(b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0])inside=!inside;
+        }
+        return inside;
+    }
+}

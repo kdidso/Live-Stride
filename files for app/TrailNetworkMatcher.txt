@@ -114,6 +114,7 @@ final class TrailNetworkMatcher {
     private Layer previous;
     private boolean usable;
     private RoadEvidence roadEvidence;
+    private RoadCoverage roadCoverage;
     private final List<RoadLine> roadLines=new ArrayList<>();
     private static final class RoadLine {
         final RoadEvidence.Road road;final Line line;
@@ -131,6 +132,7 @@ final class TrailNetworkMatcher {
     void setRoadEvidence(RoadEvidence evidence) {
         roadEvidence=evidence;rebuildRoadLines();
     }
+    void setRoadCoverage(RoadCoverage coverage) { roadCoverage=coverage; }
     private void rebuildRoadLines() {
         roadLines.clear();
         if(roadEvidence!=null && usable) for(RoadEvidence.Road road:roadEvidence.roads)
@@ -163,7 +165,16 @@ final class TrailNetworkMatcher {
             double align=alignment(r.line,q,hx,hy,movement);
             if(movement>=4 && align<.85)continue;
             competitor=true;
-            roadDistance=Math.min(roadDistance,Math.max(0,q.distance-r.road.slack));
+            double distance=Math.max(0,q.distance-r.road.slack);
+            if(roadCoverage!=null && roadCoverage.status(fix.lat,fix.lon)==RoadCoverage.Status.INSIDE) {
+                boolean sameBody=true;
+                for(double t:new double[]{.25,.5,.75,1}) {
+                    double x=p.x+(q.xy.x-p.x)*t,y=p.y+(q.xy.y-p.y)*t;
+                    if(roadCoverage.status(lat0+Math.toDegrees(y/6371008.8),lon0+Math.toDegrees(x/(6371008.8*cosLat)))!=RoadCoverage.Status.INSIDE){sameBody=false;break;}
+                }
+                if(sameBody)distance=0; // Actual coverage, not an invented symmetric width.
+            }
+            roadDistance=Math.min(roadDistance,distance);
         }
         boolean establishedTrail=corridor.equals("trail");
         if(fix.routeSwitchHeld || fix.accuracy<0 || fix.accuracy>10 || movement<4) {

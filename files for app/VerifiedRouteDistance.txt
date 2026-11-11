@@ -13,6 +13,11 @@ final class VerifiedRouteDistance {
     private double trustedTotal;
     void reset() { trustedId=-1;trustedTime=0;trustedTotal=0; }
     void commit(long id,long time,double total) { trustedId=id;trustedTime=time;trustedTotal=total; }
+    /** Every accepted transition counts, including recovery and correction jumps. */
+    double acceptedSegmentMeters(Span span, double total, double directMeters) {
+        double verifiedMeters = remaining(span, total);
+        return Double.isFinite(verifiedMeters) ? Math.max(directMeters, verifiedMeters) : directMeters;
+    }
     double remaining(Span span,double total) {
         if(span==null || span.fromId!=trustedId || span.fromTime!=trustedTime
                 || !Double.isFinite(span.meters) || span.meters<0 || !Double.isFinite(total)) return Double.NaN;

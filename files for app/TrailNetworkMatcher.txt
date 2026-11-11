@@ -183,8 +183,22 @@ final class TrailNetworkMatcher {
         double margin=Math.max(3,fix.accuracy*1.25);
         double trailDistance=nearest.p.distance;
         String winner="";
-        if(competitor && trailDistance-roadDistance>margin)winner="road";
-        else if(((!competitor && (!corridor.equals("road") || (roadEvidence!=null&&!roadEvidence.truncated&&!roadEvidence.roads.isEmpty()))) || (competitor && roadDistance-trailDistance>margin)) && trailDistance<=5
+        // A parallel-road explanation needs a meaningful departure from an established trail.
+        int outwardSteps = 0;
+        double previousDistance = trail.line.project(start).distance;
+        for (Fix observation : history) {
+            if (prior == null || observation.time < prior.time) continue;
+            double distance = trail.line.project(xy(observation.lat, observation.lon)).distance;
+            if (distance - previousDistance >= .4) outwardSteps++;
+            previousDistance = distance;
+        }
+        if (trailDistance - previousDistance >= .4) outwardSteps++;
+        boolean sustainedDeparture = outwardSteps >= 3
+                && trailDistance - trail.line.project(start).distance >= 3;
+        boolean withinEstablishedTrail = establishedTrail && !sustainedDeparture
+                && trailDistance <= Math.max(8, 2*fix.accuracy);
+        if(competitor && !withinEstablishedTrail && trailDistance-roadDistance>margin)winner="road";
+        else if(((!competitor && (!corridor.equals("road") || (roadEvidence!=null&&!roadEvidence.roads.isEmpty()&&(!roadEvidence.truncated||trailDistance<=3)))) || (competitor && roadDistance-trailDistance>margin)) && trailDistance<=5
                 && alignment(trail.line,nearest.p,hx,hy,movement)>=.85)winner="trail";
         if(winner.isEmpty()){clearRoadVote();}
         else {
@@ -411,7 +425,10 @@ final class TrailNetworkMatcher {
                 if(v.xy.distance(projected.xy)<4 && edge.line.project(v.xy).distance<=1.1)d=Math.min(d,v.distance);
             }
             d=turnaroundDistance(edge.source,fix,p,d);
-            double emission=.5*d*d/(sigma*sigma);
+            double candidateSigma = sigma;
+            if(edge.source.segment.family.equals(continuityFamily) && fix.time-continuityTime<=20000 && d<=20)
+                candidateSigma = Math.max(6, sigma);
+            double emission=.5*d*d/(candidateSigma*candidateSigma);
             if(hn>5) {
                 XY a=edge.line.at(projected.along-3),b=edge.line.at(projected.along+3);
                 double dx=b.x-a.x,dy=b.y-a.y,norm=Math.hypot(dx,dy);
@@ -423,14 +440,13 @@ final class TrailNetworkMatcher {
         result.sort(Comparator.comparingDouble((Candidate c)->c.p.distance).thenComparingInt(c->c.edge));
         if(result.size()>12)result=new ArrayList<>(result.subList(0,12));
         double freeEmission=3.5;
-        // A modest accuracy decline is not independent evidence of leaving an
-        // established trail. Give its physically reachable projections room to
-        // explain a bounded drift, while retaining GPS for a sustained departure.
+        // Reported accuracy can stay good during a short drift. Give an established
+        // trail room to explain bounded displacement; real departures still compete.
         if(!continuityFamily.isEmpty() && fix.time-continuityTime<=20000
-                && fix.accuracy>=continuityAccuracy+.75 && fix.accuracy<=10) {
+                && fix.accuracy>=0 && fix.accuracy<=10) {
             for(Candidate option:result) {
                 if(edges.get(option.edge).source.segment.family.equals(continuityFamily)
-                        && option.p.distance<=Math.min(20,Math.max(12,3*fix.accuracy))) {
+                        && option.p.distance<=20) {
                     freeEmission=6.5;break;
                 }
             }
@@ -568,7 +584,7 @@ final class TrailNetworkMatcher {
                     // from the end of the same look-ahead window before prediction commits.
                     for(Edge alternative:edges) {
                         if("tunnel".equals(alternative.source.segment.brunnel)
-                                && alternative.line.project(first.xy).distance<=20) {
+                                && alternative.line.project(first.xy).distance<=SEARCH_METERS) {
                             supportsFuture=source.line.project(last.xy).distance<=7;
                             break;
                         }

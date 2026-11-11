@@ -400,6 +400,8 @@ final class BridgeTunnelMatcher {
     ) {
         Point junction = structureRoute.get(structureRoute.size() - 1);
         exitBranches = findExitBranches(junction);
+        if (!exitBranches.isEmpty() && connectedRecoveryStartedAtMs == 0L)
+            connectedRecoveryStartedAtMs = timeMs;
 
         if (exitBranches.size() == 1) {
             selectBranch(exitBranches.get(0), 0.0, timeMs);
@@ -444,6 +446,11 @@ final class BridgeTunnelMatcher {
         if (accuracyIsGood && rawHandoffIsStrong(accuracyMeters)
                 && rawTransitionIsContinuous(rawPoint, timeMs, true)) {
             return releaseRaw(rawPoint, false, "junction_handoff_verified");
+        }
+
+        if (recoveryPredictionExpired(timeMs)) {
+            beginVerifiedRawRecovery(timeMs, false);
+            return new Result(rawPoint, false, state, "", false, "junction_handoff_pending");
         }
 
         if(networkPoint!=null && networkPointTime==timeMs && accuracyIsGood
@@ -495,6 +502,10 @@ final class BridgeTunnelMatcher {
                 && networkHandoffIsSmall(networkPoint,timeMs)) {
             return releaseRaw(networkPoint, false, "network_exit_handoff_verified");
         }
+        if (recoveryPredictionExpired(timeMs)) {
+            beginVerifiedRawRecovery(timeMs, false);
+            return new Result(rawPoint, false, state, "", false, "exit_handoff_pending");
+        }
         if (progressMeters >= activeRouteLengthMeters && !activeRoute.isEmpty()) {
             Point junction=activeRoute.get(activeRoute.size()-1);
             List<Branch> onward=findExitBranches(junction);
@@ -516,13 +527,13 @@ final class BridgeTunnelMatcher {
             return releaseRaw(rawPoint, false, "exit_relaxed_handoff_verified");
         }
 
+        return new Result(predicted, true, state, structureType);
+    }
+
+    private boolean recoveryPredictionExpired(long timeMs) {
         long startedAt = connectedRecoveryStartedAtMs > 0L
                 ? connectedRecoveryStartedAtMs : noExitRecoveryStartedAtMs;
-        if (startedAt > 0L && timeMs - startedAt >= VERIFIED_RECOVERY_PREDICTION_LIMIT_MS) {
-            beginVerifiedRawRecovery(timeMs, false);
-            return new Result(rawPoint, false, state, "", false, "exit_handoff_pending");
-        }
-        return new Result(predicted, true, state, structureType);
+        return startedAt > 0L && timeMs - startedAt >= VERIFIED_RECOVERY_PREDICTION_LIMIT_MS;
     }
 
     private boolean networkHandoffIsSmall(Point point,long timeMs) {
@@ -618,13 +629,18 @@ final class BridgeTunnelMatcher {
                 : best.points.get(best.points.size() - 1);
         List<Point> orientedStructure = orientedPoints(best, enterAtStart);
         Projection inside = project(orientedStructure, rawPoint);
+        // A late tunnel entry near the outgoing portal needs observed forward progress.
+        // Look-ahead alone can mistake portal jitter for travel out of the tunnel.
+        if (networkSupported && "tunnel".equals(best.brunnel)
+                && polylineLength(orientedStructure) - inside.alongMeters <= 20
+                && !hasRecentForwardProgress(orientedStructure, rawPoint, timeMs)) return;
         boolean contested = false;
         Set<String> continuousStructures=new HashSet<>(buildStructureContinuation(best,true).segmentIds);
         continuousStructures.addAll(buildStructureContinuation(best,false).segmentIds);
         for (Segment alternative : context.segments) {
             if (continuousStructures.contains(alternative.id)) continue;
             if (alternative.isStructure() && alternative.points.size() >= 2 && !alternative.id.equals(best.id)
-                    && project(alternative.points, rawPoint).distanceMeters <= 20.0) {
+                    && project(alternative.points, rawPoint).distanceMeters <= 60.0) {
                 contested = true;
                 break;
             }
@@ -687,6 +703,15 @@ final class BridgeTunnelMatcher {
                 || (entryEvidence.recentAlignedStructureStep && entryEvidence.headingError <= 25.0);
         state = !presumedDriverMode && "tunnel".equals(structureType) && !supportedApproach
                 ? State.ENTRY_VERIFYING : State.STRUCTURE;
+    }
+
+    private boolean hasRecentForwardProgress(List<Point> route, Point rawPoint, long timeMs) {
+        double currentAlong = project(route, rawPoint).alongMeters;
+        for (Observation observation : entryObservations) {
+            if (timeMs - observation.timeMs >= DIRECTION_MIN_OBSERVATION_MS)
+                return currentAlong - project(route, observation.point).alongMeters >= ENTRY_MIN_MOVEMENT_METERS;
+        }
+        return false;
     }
 
     private List<Branch> findExitBranches(Point junction) {
@@ -760,7 +785,7 @@ final class BridgeTunnelMatcher {
         directionObservations.clear();
         exitBranches = Collections.emptyList();
         heldDistanceMeters = 0.0;
-        connectedRecoveryStartedAtMs = timeMs;
+        if (connectedRecoveryStartedAtMs == 0L) connectedRecoveryStartedAtMs = timeMs;
         noExitRecoveryStartedAtMs = 0L;
     }
 

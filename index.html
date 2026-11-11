@@ -1809,7 +1809,7 @@ function createFinishedGoogleRouteMap(host, points, detailed, maps) {
   const map = new maps.Map(host, {
     center: path[0], zoom: 13, mapTypeId: "satellite", tilt: 0,
     mapTypeControl: false, streetViewControl: false, fullscreenControl: false,
-    zoomControl: detailed, gestureHandling: detailed ? "cooperative" : "none",
+    zoomControl: detailed, gestureHandling: detailed ? "greedy" : "none",
     clickableIcons: false, keyboardShortcuts: detailed
   });
   const overlays = [

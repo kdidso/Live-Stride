@@ -41,7 +41,6 @@ public class LiveStrideNativeTrackerService extends Service {
     private static final int NOTIFICATION_ID = 44221;
     private static final float MAX_ACCEPTED_ACCURACY_METERS = 10.0f;
     private static final double RESUME_ANCHOR_GAP_SECONDS = 45.0;
-    private static final double RESUME_ANCHOR_MIN_DISTANCE_METERS = 25.0;
     private static final double STATIONARY_HOLD_RELEASE_DISTANCE_METERS = 4.0;
     private static final double PRESUMED_DRIVER_AVG_SPEED_MPS = 8.9408;
     private static final double METERS_PER_MILE = 1609.34;
@@ -613,89 +612,47 @@ private void acceptNativePoint(PendingGpsFix fix, String verificationResolution)
             return;
         }
 
-        boolean resumeAfterLongGap = elapsedSeconds > RESUME_ANCHOR_GAP_SECONDS
-                && segmentMeters > RESUME_ANCHOR_MIN_DISTANCE_METERS;
+        boolean resumeAfterLongGap = elapsedSeconds > RESUME_ANCHOR_GAP_SECONDS;
+        double speedMps = segmentMeters / elapsedSeconds;
+        double speedMph = speedMps * 2.23694;
+        boolean releaseStationaryHold = !matchResult.matched
+                && stationaryHoldActive
+                && accuracyIsGood
+                && segmentMeters >= STATIONARY_HOLD_RELEASE_DISTANCE_METERS;
+        boolean shouldHoldStationaryPoint = !matchResult.matched
+                && !matchResult.anchorOnResume
+                && !resumeAfterLongGap
+                && !releaseStationaryHold
+                && (segmentMeters < 1.0 || speedMph < 1.0
+                    || (stationaryHoldActive && segmentMeters < STATIONARY_HOLD_RELEASE_DISTANCE_METERS));
 
-        if (matchResult.anchorOnResume) {
-            double credit=routeDistanceLedger.remaining(fix.routeSpan,totalDistanceMeters);
-            segmentMeters = Double.isFinite(credit)?credit:0.0;
-            if(segmentMeters>0) {
-                double before=totalDistanceMeters;
-                totalDistanceMeters+=segmentMeters;
-                alertNotificationForMileSplit=updateMileSplit(before,totalDistanceMeters,previousPointTimeMs,pointTimeMs);
-            }
-            stationaryHoldActive = false;
-            anchoredResumePoint = true;
-            anchorReason = Double.isFinite(credit)?"verified_mapped_route_distance":matchResult.reason;
-        } else if (resumeAfterLongGap) {
+        if (shouldHoldStationaryPoint) {
+            heldPoint = true;
+            holdReason = segmentMeters < 1.0 ? "tiny_movement"
+                    : speedMph < 1.0 ? "low_speed" : "stationary_release_wait";
+            location = new Location(previousLocation);
             segmentMeters = 0.0;
-            System.out.println(
-                    "LiveStride native anchored resume after long GPS gap: "
-                            + elapsedSeconds + " s"
-            );
+            stationaryHoldActive = true;
         } else {
-            double speedMps = segmentMeters / elapsedSeconds;
-            double speedMph = speedMps * 2.23694;
-
-            boolean releaseStationaryHold = !matchResult.matched
-                    && stationaryHoldActive
-                    && accuracyIsGood
-                    && segmentMeters >= STATIONARY_HOLD_RELEASE_DISTANCE_METERS;
-
-            boolean shouldHoldStationaryPoint = !matchResult.matched
-                    && !releaseStationaryHold
-                    && (segmentMeters < 1.0 || speedMph < 1.0 || speedMph > 140.0);
-
-            if (!matchResult.matched
-                    && stationaryHoldActive
-                    && segmentMeters < STATIONARY_HOLD_RELEASE_DISTANCE_METERS) {
-                shouldHoldStationaryPoint = true;
+            stationaryHoldActive = false;
+            if (matchResult.anchorOnResume) {
+                segmentMeters = routeDistanceLedger.acceptedSegmentMeters(
+                        fix.routeSpan, totalDistanceMeters, segmentMeters);
+                anchoredResumePoint = true;
+                anchorReason = matchResult.reason;
+            } else if (resumeAfterLongGap || releaseStationaryHold) {
+                anchoredResumePoint = true;
+                anchorReason = resumeAfterLongGap ? "after_long_gps_gap" : "after_stationary_hold";
             }
 
-            if (releaseStationaryHold) {
-                segmentMeters = 0.0;
-                stationaryHoldActive = false;
-                anchoredResumePoint = true;
-                anchorReason = speedMph > 140.0
-                        ? "after_unrealistic_speed_hold"
-                        : "after_stationary_hold";
-                System.out.println(
-                        "LiveStride native anchored resume from hold: "
-                                + anchorReason + " speed=" + speedMph + " mph"
-                );
-            } else if (shouldHoldStationaryPoint) {
-                heldPoint = true;
-                holdReason = segmentMeters < 1.0
-                        ? "tiny_movement"
-                        : speedMph < 1.0
-                        ? "low_speed"
-                        : speedMph > 140.0
-                        ? "unrealistic_speed"
-                        : "stationary_release_wait";
-                location = new Location(previousLocation);
-                segmentMeters = 0.0;
-                stationaryHoldActive = true;
-                System.out.println(
-                        "LiveStride native recorded hold point: "
-                                + holdReason + " speed=" + speedMph + " mph"
-                );
-            } else {
-                stationaryHoldActive = false;
-                double previousTotalDistanceMeters = totalDistanceMeters;
-                totalDistanceMeters += segmentMeters;
-                alertNotificationForMileSplit = updateMileSplit(
-                        previousTotalDistanceMeters,
-                        totalDistanceMeters,
-                        previousPointTimeMs,
-                        pointTimeMs
-                );
-
-                double segmentMiles = segmentMeters / METERS_PER_MILE;
-                double elapsedMinutes = elapsedSeconds / 60.0;
-
-                if (segmentMiles > 0) {
-                    instPaceMinPerMile = elapsedMinutes / segmentMiles;
-                }
+            double previousTotalDistanceMeters = totalDistanceMeters;
+            totalDistanceMeters += segmentMeters;
+            alertNotificationForMileSplit = updateMileSplit(
+                    previousTotalDistanceMeters, totalDistanceMeters,
+                    previousPointTimeMs, pointTimeMs);
+            double segmentMiles = segmentMeters / METERS_PER_MILE;
+            if (segmentMiles > 0) {
+                instPaceMinPerMile = (elapsedSeconds / 60.0) / segmentMiles;
             }
         }
     }

@@ -1808,7 +1808,7 @@ function createFinishedGoogleRouteMap(host, points, detailed, maps) {
   path.forEach(point => bounds.extend(point));
   const map = new maps.Map(host, {
     center: path[0], zoom: 13, mapTypeId: "satellite", tilt: 0,
-    mapTypeControl: false, streetViewControl: false, fullscreenControl: detailed,
+    mapTypeControl: false, streetViewControl: false, fullscreenControl: false,
     zoomControl: detailed, gestureHandling: detailed ? "cooperative" : "none",
     clickableIcons: false, keyboardShortcuts: detailed
   });
@@ -1821,12 +1821,87 @@ function createFinishedGoogleRouteMap(host, points, detailed, maps) {
       fillOpacity:1, strokeColor:"#ffffff", strokeWeight:2, clickable:false}));
   }
   let removed = false;
+  const frame = host.parentElement;
+  const expand = detailed ? document.createElement("button") : null;
+  let dialog = null, placeholder = null, frameStyle = "", bodyOverflow = "";
+  const resizeMap = () => {
+    const center = map.getCenter();
+    window.requestAnimationFrame(() => {
+      if (removed) return;
+      maps.event.trigger(map,"resize");
+      map.setCenter(center);
+    });
+  };
+  const restoreMap = (focus = true) => {
+    if (!dialog) return;
+    const previousDialog = dialog;
+    dialog = null;
+    placeholder.replaceWith(frame);
+    placeholder = null;
+    frame.style.cssText = frameStyle;
+    document.body.style.overflow = bodyOverflow;
+    previousDialog.remove();
+    document.removeEventListener("keydown",onExpandedKey);
+    expand.textContent = "⛶";
+    expand.setAttribute("aria-label","Expand map");
+    expand.setAttribute("aria-expanded","false");
+    expand.title = "Expand map";
+    if (focus) expand.focus({preventScroll:true});
+    resizeMap();
+  };
+  const onExpandedKey = event => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    restoreMap();
+  };
+  if (expand) {
+    expand.type = "button";
+    expand.textContent = "⛶";
+    expand.title = "Expand map";
+    expand.setAttribute("aria-label","Expand map");
+    expand.setAttribute("aria-expanded","false");
+    expand.style.cssText = "position:absolute;top:max(8px,env(safe-area-inset-top));right:max(8px,env(safe-area-inset-right));z-index:3;width:44px;height:44px;min-width:44px;padding:0;border:1px solid #bbb;border-radius:4px;background:white;color:#223;font:26px Arial,sans-serif;cursor:pointer;";
+    expand.addEventListener("click",event => {
+      event.stopPropagation();
+      if (dialog) { restoreMap(); return; }
+      frameStyle = frame.style.cssText;
+      bodyOverflow = document.body.style.overflow;
+      placeholder = document.createElement("div");
+      placeholder.style.cssText = frameStyle;
+      frame.replaceWith(placeholder);
+      dialog = document.createElement("dialog");
+      dialog.setAttribute("aria-label","Expanded run map");
+      dialog.style.cssText = "position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;box-sizing:border-box;margin:0;padding:0;border:0;background:white;overflow:hidden;z-index:2147483000;";
+      frame.style.cssText = "position:relative;width:100%;height:100%;min-height:0;";
+      dialog.append(frame);
+      document.body.append(dialog);
+      document.body.style.overflow = "hidden";
+      dialog.addEventListener("cancel",event => {event.preventDefault();restoreMap();});
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else {
+        dialog.setAttribute("open","");
+        dialog.setAttribute("role","dialog");
+        dialog.setAttribute("aria-modal","true");
+        dialog.style.display = "block";
+      }
+      document.addEventListener("keydown",onExpandedKey);
+      expand.textContent = "×";
+      expand.title = "Restore map";
+      expand.setAttribute("aria-label","Restore map");
+      expand.setAttribute("aria-expanded","true");
+      expand.focus({preventScroll:true});
+      resizeMap();
+    });
+    frame.append(expand);
+  }
   maps.event.addListenerOnce(map,"idle",() => {
     if (!removed && map.getZoom() > (detailed ? 16 : 15)) map.setZoom(detailed ? 16 : 15);
   });
   map.fitBounds(bounds,detailed ? 44 : 28);
   return {remove() {
     removed = true;
+    restoreMap(false);
+    expand?.remove();
     overlays.forEach(overlay => overlay.setMap(null));
     maps.event.clearInstanceListeners(map);
     host.replaceChildren();
@@ -1842,7 +1917,7 @@ function createFinishedRouteMapWithOptions(container, points, detailed, createSt
   picker.setAttribute("aria-label","Finished run map view");
   picker.addEventListener("click", event => event.stopPropagation());
   picker.addEventListener("keydown", event => event.stopPropagation());
-  picker.style.cssText = "position:absolute;top:8px;left:8px;z-index:2;padding:7px;background:white;color:#223;border:1px solid #bbb;border-radius:4px;max-width:85%;";
+  picker.style.cssText = "position:absolute;top:8px;left:8px;z-index:2;padding:7px;background:white;color:#223;border:1px solid #bbb;border-radius:4px;max-width:calc(100% - 72px);";
   const streetOption = document.createElement("option");
   streetOption.value = "streets"; streetOption.textContent = "Street map";
   const googleOption = document.createElement("option");

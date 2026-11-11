@@ -6159,8 +6159,8 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
     const speedMps = segmentMeters / elapsedSeconds;
     const speedMph = speedMps * 2.23694;
 
-    let shouldHoldStationaryPoint = segmentMeters < 1 || speedMph < 1 || speedMph > 140;
-    if (stationaryHoldActive && segmentMeters < 4) {
+    let shouldHoldStationaryPoint = elapsedSeconds <= 45 && (segmentMeters < 1 || speedMph < 1);
+    if (elapsedSeconds <= 45 && stationaryHoldActive && segmentMeters < 4) {
       shouldHoldStationaryPoint = true;
     }
 
@@ -6170,8 +6170,6 @@ async function handleLocationUpdate(coord, accuracy = null, locationTime = Date.
         ? "tiny_movement"
         : speedMph < 1
         ? "low_speed"
-        : speedMph > 140
-        ? "unrealistic_speed"
         : "stationary_release_wait";
       effectiveCoord = [prev.lon, prev.lat];
       segmentMeters = 0;

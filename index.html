@@ -664,7 +664,7 @@
               elapsed_sec: Number.isFinite(Number(sample.elapsed_sec)) ? Number(sample.elapsed_sec) : null,
               lat: Number(sample.lat),
               lon: Number(sample.lon),
-              elevation_m: Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) : null,
+              elevation_m: sample.elevation_m != null && sample.elevation_m !== "" && Number.isFinite(Number(sample.elevation_m)) ? Number(sample.elevation_m) : null,
               distance_m: distanceM,
               distance_mi: Number.isFinite(Number(sample.distance_mi))
                 ? Number(sample.distance_mi)
@@ -843,15 +843,85 @@ function getMovingTimeIntervals(points) {
   return intervals;
 }
 
+// Shared derived-gain policy. Original heights and route points remain untouched.
+function calculateTerrainElevationGain(samples) {
+  const STEP_METERS = 5;
+  const CONFIRMATION_METERS = 2;
+  const valid = [];
+  let usableCount = 0;
+  for (const sample of samples) {
+    if (!Number.isFinite(sample?.distanceM) || sample.distanceM < 0
+        || !Number.isFinite(sample?.elevationM)) continue;
+    usableCount += 1;
+    // Repeated stationary fixes must not give one height extra filter weight.
+    if (valid.length && sample.distanceM <= valid[valid.length - 1].distanceM) continue;
+    valid.push(sample);
+  }
+  if (usableCount < 2) return { gainM: null, lossM: null };
+  if (valid.length < 2) return { gainM: 0, lossM: 0 };
+
+  const heights = [];
+  const origin = valid[0].distanceM;
+  const length = valid[valid.length - 1].distanceM - origin;
+  let right = 1;
+  for (let offset = 0; offset <= length; offset += STEP_METERS) {
+    const distance = origin + offset;
+    while (right < valid.length - 1 && valid[right].distanceM < distance) right += 1;
+    const a = valid[right - 1], b = valid[right];
+    const fraction = (distance - a.distanceM) / (b.distanceM - a.distanceM);
+    heights.push(a.elevationM + (b.elevationM - a.elevationM) * fraction);
+  }
+
+  // Centered 41-sample median (~200 m), then 25-sample mean (~120 m).
+  // Use the original samples in each window, never an already filtered neighbor.
+  const median = heights.map((_, index) => {
+    const window = heights.slice(Math.max(0, index - 20), index + 21).sort((a, b) => a - b);
+    const middle = Math.floor(window.length / 2);
+    return window.length % 2 ? window[middle] : (window[middle - 1] + window[middle]) / 2;
+  });
+  const filtered = median.map((_, index) => {
+    const window = median.slice(Math.max(0, index - 12), index + 13);
+    return window.reduce((sum, height) => sum + height, 0) / window.length;
+  });
+
+  function countClimbs(sign) {
+    let valley = sign * filtered[0];
+    let peak = valley;
+    let climbing = false;
+    let total = 0;
+    for (let index = 1; index < filtered.length; index += 1) {
+      const height = sign * filtered[index];
+      if (!climbing) {
+        valley = Math.min(valley, height);
+        if (height - valley >= CONFIRMATION_METERS) {
+          climbing = true;
+          peak = height;
+        }
+      } else if (height > peak) {
+        peak = height;
+      } else if (peak - height >= CONFIRMATION_METERS) {
+        total += peak - valley;
+        climbing = false;
+        valley = height;
+      }
+    }
+    // Include a qualifying climb even if the activity ends before its descent.
+    if (climbing) total += peak - valley;
+    return total;
+  }
+  return { gainM: countClimbs(1), lossM: countClimbs(-1) };
+}
+
 function analyzeBrowserProfilePoints(points) {
-      const ELEVATION_GAIN_THRESHOLD_METERS = 5;
+      
       const MOVING_MIN_DISTANCE_METERS = 1;
       const MOVING_MIN_SPEED_MPH = 1;
       const MOVING_MAX_SPEED_MPH = 140;
       const elevationSamples = createBrowserProfileElevationSamples(points);
+  const terrainGain = calculateTerrainElevationGain(elevationSamples);
       const smoothedElevations = smoothBrowserProfileElevationSamples(elevationSamples);
-      let elevationGainM = null;
-      let elevationLossM = null;
+      const elevationGainM = terrainGain.gainM;
+      const elevationLossM = terrainGain.lossM;
       let minElevationM = null;
       let maxElevationM = null;
       let totalDistanceM = 0;
@@ -866,20 +936,8 @@ function analyzeBrowserProfilePoints(points) {
       if (smoothedElevations.length >= 2) {
         minElevationM = Math.min(...smoothedElevations);
         maxElevationM = Math.max(...smoothedElevations);
-        elevationGainM = 0;
-        elevationLossM = 0;
-        let anchor = smoothedElevations[0];
-        for (let index = 1; index < smoothedElevations.length; index += 1) {
-          const difference = smoothedElevations[index] - anchor;
-          if (difference >= ELEVATION_GAIN_THRESHOLD_METERS) {
-            elevationGainM += difference;
-            anchor = smoothedElevations[index];
-          } else if (difference <= -ELEVATION_GAIN_THRESHOLD_METERS) {
-            elevationLossM += -difference;
-            anchor = smoothedElevations[index];
-          }
-        }
-      }
+  }
+
   const movingIntervals = getMovingTimeIntervals(points);
   const movingTimeMs = movingIntervals.reduce((sum, value) => sum + value, 0);
   let verificationMovingTimeMs = 0;
@@ -893,7 +951,7 @@ function analyzeBrowserProfilePoints(points) {
   }
   const movingTimePolicyVersion = points.some(point => point.movingTimeMs != null || point.moving_time_ms != null
     || /gps_filter=|moving_ms=/.test(String(point.note || "")) || /foreground_service|private_native/.test(String(point.app_state || ""))) ? 2 : 0;
-      return { elevationGainM, elevationLossM, minElevationM, maxElevationM, totalDistanceM, verificationMovingTimeMs, movingTimePolicyVersion, movingTimeMs: timedSegments || movingTimePolicyVersion === 2 ? movingTimeMs : null };
+      return { elevationGainPolicyVersion: 1, elevationGainM, elevationLossM, minElevationM, maxElevationM, totalDistanceM, verificationMovingTimeMs, movingTimePolicyVersion, movingTimeMs: timedSegments || movingTimePolicyVersion === 2 ? movingTimeMs : null };
     }
     function createBrowserProfileElevationSamples(points) {
       const samples = [];
@@ -989,7 +1047,7 @@ function analyzeBrowserProfilePoints(points) {
       title.textContent = "Elevation";
       const infoButton = createBrowserProfileChartInfoButton(
         "Elevation",
-        "LiveStride gets elevation from its elevation service, which looks up terrain height for each GPS point using the hosted MapTiler elevation dataset. The graph smooths those values for readability. Elevation gain adds meaningful uphill changes using a 5 meter threshold, so tiny GPS/elevation noise is ignored."
+        "LiveStride gets elevation from its elevation service, which looks up terrain height for each GPS point using the hosted MapTiler elevation dataset. The graph smooths those values for readability. Elevation gain uses distance-based filtering to reduce terrain-height spikes, then counts complete climbs after a sustained rise. Short or noisy height changes may be smoothed out."
       );
       header.append(title, infoButton);
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -2712,7 +2770,7 @@ let nativeRouteRecoveryConfirmed = false;
         : null,
       lat: Number(point.lat),
       lon: Number(point.lon),
-      elevation_m: Number.isFinite(Number(point.elevation)) ? Number(point.elevation) : null,
+      elevation_m: point.elevation != null && point.elevation !== "" && Number.isFinite(Number(point.elevation)) ? Number(point.elevation) : null,
       distance_m: cumulativeDistanceM,
       segment_distance_m: segmentDistanceM,
       segment_elapsed_sec: segmentElapsedSec,
@@ -2763,6 +2821,7 @@ let nativeRouteRecoveryConfirmed = false;
         ? Number(metadata.moving_time_ms)
         : analyzed.movingTimeMs,
       average_pace_sec_per_mile: averagePaceSecPerMile,
+      elevation_gain_policy_version: analyzed.elevationGainPolicyVersion || 0,
       elevation_gain_m: analyzed.elevationGainM,
       min_elevation_m: analyzed.minElevationM,
       max_elevation_m: analyzed.maxElevationM,
@@ -2772,7 +2831,78 @@ let nativeRouteRecoveryConfirmed = false;
   };
 }
 
-    async function saveGpxToProfile(gpx, metadata, analysis = null) {
+    // Shared by the Android app and standalone browser page.
+async function saveProfileArchiveOnce(gpx, metadata, analysis, userId, onStatus = null) {
+  const key = metadata.source_run_id
+    ? `${userId}|${metadata.source || "broadcast"}|${metadata.source_run_id}` : null;
+  const inFlight = saveProfileArchiveOnce.inFlight ||= new Map();
+  if (key && inFlight.has(key)) return inFlight.get(key);
+
+  const save = async () => {
+    onStatus?.("Checking whether this run is already saved...");
+    let savedRun = null;
+    if (key) {
+      const { data: existing, error } = await profilesSupabaseClient.from("saved_runs")
+        .select("id,archive_status")
+        .eq("user_id", userId).eq("source", metadata.source || "broadcast")
+        .eq("source_run_id", metadata.source_run_id)
+        .order("created_at", { ascending: false }).limit(20);
+      if (error) throw error;
+      const ready = (existing || []).find(run => run.archive_status === "ready");
+      if (ready) return ready.id;
+      savedRun = existing?.[0] || null;
+    }
+
+    const payload = { ...metadata, user_id: userId, archive_status: "pending" };
+    if (savedRun) {
+      onStatus?.("Resuming this run's save...");
+      const { error } = await profilesSupabaseClient.from("saved_runs")
+        .update(payload).eq("id", savedRun.id).eq("user_id", userId);
+      if (error) throw error;
+    } else {
+      onStatus?.("Creating your profile activity...");
+      const { data, error } = await profilesSupabaseClient.from("saved_runs")
+        .insert(payload).select("id").single();
+      if (error) throw error;
+      savedRun = data;
+    }
+
+    onStatus?.("Uploading the completed run securely...");
+    let failure;
+    try {
+      const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
+        body: { action: "upload-gpx", savedRunId: savedRun.id, gpx, analysis }
+      });
+      if (!error && data?.ready) return savedRun.id;
+      failure = error || new Error(data?.error || "The run archive could not be confirmed.");
+    } catch (error) {
+      failure = error;
+    }
+
+    // A lost reply may follow a successful upload. Check before offering a retry,
+    // and leave an uncertain archive available to resume instead of creating a duplicate.
+    const { data: confirmed } = await profilesSupabaseClient.from("saved_runs")
+      .select("id,archive_status").eq("id", savedRun.id).eq("user_id", userId).maybeSingle();
+    if (confirmed?.archive_status === "ready") return savedRun.id;
+    throw failure;
+  };
+  const pending = save();
+  if (key) inFlight.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (key) inFlight.delete(key);
+  }
+}
+
+function getExportAnalysisPoints(data) {
+  if (!Array.isArray(data.nativePoints) || data.nativePoints.length !== Number(data.pointCount)
+      || data.nativePoints.some(point => point.run_id !== data.run?.id)) return null;
+  return sortRunPoints(data.nativePoints.filter(isDisplayableNativePoint).map(normalizeRunPoint))
+    .filter(point => Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lon)));
+}
+
+async function saveGpxToProfile(gpx, metadata, analysis = null, onStatus = null) {
       const { data: sessionData, error: sessionError } = await profilesSupabaseClient.auth.getSession();
       if (sessionError) throw sessionError;
       applyProfilesSession(sessionData?.session || null);
@@ -2781,34 +2911,26 @@ let nativeRouteRecoveryConfirmed = false;
         throw new Error("Sign in to your LiveStride Profile before saving this run.");
       }
 
-      const analysisMovingTimeMs = Number(analysis?.summary?.moving_time_ms);
+  const analysisMovingTimeMs = Number(analysis?.summary?.moving_time_ms);
       if (Number.isFinite(analysisMovingTimeMs) && analysisMovingTimeMs >= 0 &&
           (Number(analysis?.summary?.moving_time_policy_version) === 2 || Number(analysis?.summary?.verification_moving_time_ms) > 0 ||
            !Number.isFinite(Number(metadata.moving_time_ms)) || Number(metadata.moving_time_ms) <= 0)) {
         metadata = { ...metadata, moving_time_ms: analysisMovingTimeMs };
       }
-      const { data: savedRun, error: insertError } = await profilesSupabaseClient
-        .from("saved_runs")
-        .insert({ ...metadata, user_id: sessionData.session.user.id, archive_status: "pending" })
-        .select("id")
-        .single();
-      if (insertError) throw insertError;
+  const savedRunId = await saveProfileArchiveOnce(gpx, metadata, analysis, sessionData.session.user.id, onStatus);
+  // The saved archive is the success boundary. A slow activity-list refresh must
+  // not turn a completed save into a timeout or a reported failure.
+  setTimeout(() => {
+    Promise.resolve().then(() => loadBrowserProfileActivities()).catch(error => console.warn("Activity refresh deferred:", error));
+  }, 0);
+  return savedRunId;
+}
 
-      const { data, error } = await profilesSupabaseClient.functions.invoke("run-archive", {
-        body: { action: "upload-gpx", savedRunId: savedRun.id, gpx, analysis }
-      });
-      if (error || !data?.ready) {
-        await profilesSupabaseClient.from("saved_runs").update({ archive_status: "failed" }).eq("id", savedRun.id);
-        throw error || new Error(data?.error || "The run archive could not be completed.");
-      }
-      return savedRun.id;
-    }
-
-    function handleExportPageMessage(event) {
+    async function handleExportPageMessage(event) {
       if (event.origin !== "https://kdidso.github.io") return;
 
       const data = event.data || {};
-      if (data.source !== "livestride-export") return;
+      if (data.source !== "livestride-export" || event.source !== exportPageFrame?.contentWindow) return;
 
       const replyToExportPage = (payload) => {
         if (!exportPageFrame?.contentWindow) return;
@@ -2850,41 +2972,64 @@ let nativeRouteRecoveryConfirmed = false;
           });
         }
       } else if (data.type === "saveToProfile") {
-        const saveBroadcastRun = async () => {
-          const run = data.run || {};
-          const startedAt = run.started_at || new Date().toISOString();
-          const finishedAt = run.finished_at || startedAt;
-          const metadata = {
-            source: "broadcast",
-            source_run_id: isUuid(run.id) ? run.id : null,
-            title: `${run.runner_name || "LiveStride"} - ${new Date(startedAt).toLocaleString()}`,
-            started_at: new Date(startedAt).toISOString(),
-            finished_at: new Date(finishedAt).toISOString(),
-            elapsed_time_ms: Math.max(0, new Date(finishedAt).getTime() - new Date(startedAt).getTime()),
-            distance_m: Math.max(0, Number(run.total_distance_m || 0)),
-            start_lat: Number.isFinite(Number(data.startLat)) ? Number(data.startLat) : null,
-            start_lon: Number.isFinite(Number(data.startLon)) ? Number(data.startLon) : null,
-            end_lat: Number.isFinite(Number(run.latest_lat)) ? Number(run.latest_lat) : null,
-            end_lon: Number.isFinite(Number(run.latest_lon)) ? Number(run.latest_lon) : null,
-            point_count: Math.max(0, Number(data.pointCount || 0))
-          };
-          const gpx = String(data.content || "");
-          let analysisPoints = await getBroadcastRunAnalysisPoints(metadata.source_run_id);
-          if (analysisPoints.length < 2) {
-            analysisPoints = parseGpxAnalysisPoints(gpx);
-          }
-          const analysis = buildProfileRunAnalysis(analysisPoints, metadata, { preferMetadataDistance: true });
-          if (Number.isFinite(Number(analysis?.summary?.point_count)) && Number(analysis.summary.point_count) > 0) {
-            metadata.point_count = Number(analysis.summary.point_count);
-          }
-          await saveGpxToProfile(gpx, metadata, analysis);
-        };
-        saveBroadcastRun().then(() => {
-          replyToExportPage({ type: "saveToProfileResult", ok: true });
-        }).catch(err => {
-          replyToExportPage({ type: "saveToProfileResult", ok: false, message: err?.message || String(err) });
-        });
-      } else if (data.type === "openExternal" || data.type === "openInPanel") {
+    let status = "Preparing your run for saving...";
+    const reportStatus = message => {
+      status = message;
+      replyToExportPage({ type: "saveToProfileProgress", message: status });
+    };
+    reportStatus(status);
+    const heartbeat = setInterval(() => reportStatus(status), 10000);
+    try {
+      const run = data.run || {};
+      const startedAt = run.started_at || new Date().toISOString();
+      const finishedAt = run.finished_at || startedAt;
+      const metadata = {
+        source: "broadcast",
+        source_run_id: isUuid(run.id) ? run.id : null,
+        title: `${run.runner_name || "LiveStride"} - ${new Date(startedAt).toLocaleString()}`,
+        started_at: new Date(startedAt).toISOString(),
+        finished_at: new Date(finishedAt).toISOString(),
+        elapsed_time_ms: Math.max(0, new Date(finishedAt).getTime() - new Date(startedAt).getTime()),
+        distance_m: Math.max(0, Number(run.total_distance_m || 0)),
+        start_lat: Number.isFinite(Number(data.startLat)) ? Number(data.startLat) : null,
+        start_lon: Number.isFinite(Number(data.startLon)) ? Number(data.startLon) : null,
+        end_lat: Number.isFinite(Number(run.latest_lat)) ? Number(run.latest_lat) : null,
+        end_lon: Number.isFinite(Number(run.latest_lon)) ? Number(run.latest_lon) : null,
+        point_count: Math.max(0, Number(data.pointCount || 0))
+      };
+      const gpx = String(data.content || "");
+      let analysisPoints = getExportAnalysisPoints(data);
+      if (!analysisPoints || analysisPoints.length < 2) analysisPoints = await getBroadcastRunAnalysisPoints(metadata.source_run_id);
+      if (analysisPoints.length >= 2) {
+        const pointDistanceM = analysisPoints.reduce((maximum, point) => {
+          const distanceM = Number(point.distanceM);
+          return Number.isFinite(distanceM) ? Math.max(maximum, distanceM) : maximum;
+        }, 0);
+        if (pointDistanceM > 0) metadata.distance_m = pointDistanceM;
+      }
+      if (analysisPoints.length < 2) {
+        analysisPoints = parseGpxAnalysisPoints(gpx);
+      }
+      const analysis = buildProfileRunAnalysis(analysisPoints, metadata, {
+        source: "broadcast",
+        sourceRunId: metadata.source_run_id,
+        preferMetadataDistance: true
+      });
+      if (Number.isFinite(Number(analysis?.summary?.point_count)) && Number(analysis.summary.point_count) > 0) {
+        metadata.point_count = Number(analysis.summary.point_count);
+      }
+      await saveGpxToProfile(gpx, metadata, analysis, reportStatus);
+      replyToExportPage({ type: "saveToProfileResult", ok: true });
+    } catch (err) {
+      replyToExportPage({
+        type: "saveToProfileResult",
+        ok: false,
+        message: err?.message || String(err)
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
+} else if (data.type === "openExternal" || data.type === "openInPanel") {
         const url = String(data.url || "");
         if (url.startsWith("https://www.strava.com/") || url.startsWith("https://strava.com/")) {
           openExternalUrl(url);

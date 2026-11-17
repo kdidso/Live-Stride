@@ -16,6 +16,25 @@ final class LiveStrideMapContext {
 
     static final int MAX_SEGMENTS = 2048, MAX_COORDINATES = 60000;
 
+    static void validateNearbyFamilies(JSONObject response) {
+        validate(response);
+        if(response.optBoolean("truncated",false))throw new IllegalArgumentException("Incomplete walking context");
+        java.util.Set<String> centers=new java.util.HashSet<>();
+        JSONArray segments=response.optJSONArray("segments");
+        for(int i=0;i<segments.length();i++) {
+            JSONObject s=segments.optJSONObject(i);
+            if(s!=null&&!s.optBoolean("is_parallel",false)&&s.optInt("ls_parallel",0)!=1)
+                centers.add(s.optString("family",""));
+        }
+        for(int i=0;i<segments.length();i++) {
+            JSONObject s=segments.optJSONObject(i);
+            if(s!=null&&(s.optBoolean("is_parallel",false)||s.optInt("ls_parallel",0)==1)) {
+                String family=s.optString("family","");
+                if(family.isEmpty()||!centers.contains(family))throw new IllegalArgumentException("Nearby parallel is missing its explicit parent");
+            }
+        }
+    }
+
     static void validate(JSONObject response) {
         JSONArray segments = response.optJSONArray("segments");
         if (segments == null) throw new IllegalArgumentException("Missing map segments");

@@ -53,10 +53,18 @@ final class NearbyMapCache {
         return null;
     }
     static boolean covers(JSONObject json,double lat,double lon) {
+        return contains(json,lat,lon,true);
+    }
+    static boolean containsForMatching(JSONObject json,double lat,double lon) {
+        return contains(json,lat,lon,false);
+    }
+    private static boolean contains(JSONObject json,double lat,double lon,boolean refreshing) {
         org.json.JSONArray center=json.optJSONArray("center");
         if(center==null||center.length()<2)return false;
         double radius=json.optDouble("radiusMeters",0);
-        return distance(center.optDouble(1,Double.NaN),center.optDouble(0,Double.NaN),lat,lon)+150<=radius;
+        // Keep refresh headroom even when the server has reduced a dense area.
+        double headroom=refreshing?Math.min(150,Math.max(60,radius*.4)):60;
+        return Double.isFinite(radius)&&distance(center.optDouble(1,Double.NaN),center.optDouble(0,Double.NaN),lat,lon)+headroom<=radius;
     }
     private static double tileDistance(File f,double lat,double lon) {
         try {
@@ -64,7 +72,7 @@ final class NearbyMapCache {
             return distance((Long.parseLong(p[0])+.5)*.005,(Long.parseLong(p[1])+.5)*.005,lat,lon);
         }catch(Exception e){return Double.POSITIVE_INFINITY;}
     }
-    private static double distance(double a,double b,double c,double d) {
+    static double distance(double a,double b,double c,double d) {
         return Math.hypot(Math.toRadians(c-a)*6371008.8,
                 Math.toRadians(d-b)*6371008.8*Math.cos(Math.toRadians((a+c)/2)));
     }

@@ -26,6 +26,8 @@ final class TrackingMatchPipeline {
     private final BridgeTunnelMatcher structures = new BridgeTunnelMatcher();
     private final RoadNetworkMatcher roads = new RoadNetworkMatcher();
 
+    TrackingMatchPipeline() { trails.setRoadContinuity(roads); }
+
     List<Outcome> setContext(BridgeTunnelMatcher.Context context) {
         List<Outcome> out = resolve(trails.flush());
         trails.setContext(context);

@@ -171,15 +171,18 @@ final class LiveStrideServerClient {
 
     private static JSONObject getJson(String endpoint, String endpointName) {
         boolean roadRequest=endpointName.startsWith("road-");
-        int attempts=roadRequest?1:MAX_ATTEMPTS;
+        boolean nearbyRequest=roadRequest||"map-context".equals(endpointName);
+        // The nearby loader keeps useful cached evidence and schedules retries.
+        // Do not hold its single worker for three 15-second map attempts.
+        int attempts=nearbyRequest?1:MAX_ATTEMPTS;
         for (int attempt = 1; attempt <= attempts; attempt++) {
             HttpURLConnection connection = null;
             try {
                 connection = (HttpURLConnection) new URL(endpoint).openConnection();
                 connection.setRequestMethod("GET");
                 connection.setRequestProperty("Accept", "application/json");
-                connection.setConnectTimeout(roadRequest?5000:CONNECT_TIMEOUT_MS);
-                connection.setReadTimeout(roadRequest?5000:READ_TIMEOUT_MS);
+                connection.setConnectTimeout(nearbyRequest?5000:CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout(nearbyRequest?5000:READ_TIMEOUT_MS);
 
                 int status = connection.getResponseCode();
                 if (status >= 200 && status < 300) {

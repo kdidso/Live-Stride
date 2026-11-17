@@ -127,6 +127,8 @@ final class TrailNetworkMatcher {
         }
     }
     private String corridor="unknown", evidenceKind="";
+    private RoadNetworkMatcher roadContinuity;
+    void setRoadContinuity(RoadNetworkMatcher roads){roadContinuity=roads;}
     private Fix evidenceStart, evidenceLast;
     private int evidenceCount;
     void setRoadEvidence(RoadEvidence evidence) {
@@ -149,6 +151,12 @@ final class TrailNetworkMatcher {
         for(Candidate c:options)if(c.edge>=0 && !edges.get(c.edge).source.segment.isStructure()
                 && (nearest==null||c.p.distance<nearest.p.distance))nearest=c;
         if(nearest==null){clearRoadVote();return !corridor.equals("road");}
+        // Feedback is an established road history, never a vote from one fix.
+        // An already-established walking route keeps priority over this guard.
+        if(!corridor.equals("trail")&&roadContinuity!=null) {
+            if(roadContinuity.isEstablished(fix)&&corridor.equals("unknown"))corridor="road";
+            if(roadContinuity.protectsCrosswalk(fix)){corridor="road";clearRoadVote();return false;}
+        }
         Edge trail=edges.get(nearest.edge);
         Fix prior=null;
         for(Fix old:history)if(fix.time-old.time>=3000 && fix.time-old.time<=7000){prior=old;break;}
@@ -197,7 +205,10 @@ final class TrailNetworkMatcher {
                 && trailDistance - trail.line.project(start).distance >= 3;
         boolean withinEstablishedTrail = establishedTrail && !sustainedDeparture
                 && trailDistance <= Math.max(8, 2*fix.accuracy);
-        if(competitor && !withinEstablishedTrail && trailDistance-roadDistance>margin)winner="road";
+        boolean sidewalkTie=competitor&&!corridor.equals("road")&&trailDistance<=2
+                && alignment(trail.line,nearest.p,hx,hy,movement)>=.85;
+        if(sidewalkTie)winner="trail";
+        else if(competitor && !withinEstablishedTrail && trailDistance-roadDistance>margin)winner="road";
         else if(((!competitor && (!corridor.equals("road") || (roadEvidence!=null&&!roadEvidence.roads.isEmpty()&&(!roadEvidence.truncated||trailDistance<=3)))) || (competitor && roadDistance-trailDistance>margin)) && trailDistance<=5
                 && alignment(trail.line,nearest.p,hx,hy,movement)>=.85)winner="trail";
         if(winner.isEmpty()){clearRoadVote();}

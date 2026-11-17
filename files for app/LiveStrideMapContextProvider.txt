@@ -6,31 +6,47 @@ import org.json.JSONObject;
 import java.io.File;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
+import java.util.function.Consumer;
 
 /** One nearby network in memory; bounded on-disk geometry cache for every region. */
 final class LiveStrideMapContextProvider {
     private static final String TAG="LiveStrideMapContext";
-    private static final int RADIUS=1000;
+    static final int RADIUS=400, MIN_RADIUS=100;
+    static final long REFRESH_MS=300000, RETRY_MS=15000;
+    static final String FETCHED_AT="_lsFetchedAtMs";
     private final NearbyMapCache cache,roadCache,coverageCache;
-    private final ExecutorService executor=Executors.newSingleThreadExecutor();
+    private final ExecutorService executor;
+    interface Fetcher {JSONObject fetch(int endpoint,double lat,double lon,int radius) throws Exception;}
+    private final Fetcher fetcher;
+    private final LongSupplier clock;
+    private final Consumer<String> logger;
+    private static final class AreaState {
+        long attemptedAt,fetchedAt;String attemptedKey;double attemptedLat,attemptedLon;
+        int radius=RADIUS;JSONObject area;
+    }
+    private final AreaState[] areas={new AreaState(),new AreaState(),new AreaState()};
     private final AtomicReference<BridgeTunnelMatcher.Context> pending=new AtomicReference<>();
     private final AtomicReference<RoadEvidence> pendingRoads=new AtomicReference<>();
     private final AtomicReference<RoadCoverage> pendingCoverage=new AtomicReference<>();
-    private JSONObject activeCoverageArea;
     private String coverageFingerprint;
-    private JSONObject activeRoadArea;
     private String roadFingerprint;
     private final Object lock=new Object();
-    private String desiredKey,lastKey,publishedFingerprint;
+    private String desiredKey,publishedFingerprint;
     private double latitude,longitude;
-    private long lastAttempt;
-    private boolean succeeded,workerRunning,closed;
-    private JSONObject activeArea;
+    private boolean workerRunning,closed;
     LiveStrideMapContextProvider(Context context) {
-        File files=context.getApplicationContext().getFilesDir();
-        cache=new NearbyMapCache(new File(files,"nearby_map_cache_v2"),48L*1024*1024,128);
-        roadCache=new NearbyMapCache(new File(files,"nearby_road_cache_v1"),16L*1024*1024,32);
-        coverageCache=new NearbyMapCache(new File(files,"nearby_coverage_cache_v1"),16L*1024*1024,32);
+        this(context.getApplicationContext().getFilesDir(),(endpoint,lat,lon,radius)->endpoint==0
+                ?LiveStrideServerClient.fetchMapContext(lat,lon,radius):endpoint==1
+                ?LiveStrideServerClient.fetchRoadEvidence(lat,lon,radius):LiveStrideServerClient.fetchRoadCoverage(lat,lon,radius),
+                System::currentTimeMillis,Executors.newSingleThreadExecutor(),message->Log.w(TAG,message));
+    }
+    LiveStrideMapContextProvider(File files,Fetcher fetcher,LongSupplier clock,ExecutorService executor,Consumer<String> logger) {
+        this.fetcher=fetcher;this.clock=clock;this.executor=executor;this.logger=logger;
+        // A new cache generation prevents mixing pre-sidewalk polygons with new trails.
+        cache=new NearbyMapCache(new File(files,"nearby_map_cache_v3"),48L*1024*1024,128);
+        roadCache=new NearbyMapCache(new File(files,"nearby_road_cache_v2"),16L*1024*1024,32);
+        coverageCache=new NearbyMapCache(new File(files,"nearby_coverage_cache_v2"),16L*1024*1024,32);
         // Remove the retired pilot copy only; run databases are untouched.
         new File(files,"utah_trail_map_v1.sqlite").delete();
         new File(files,"utah_trail_map_v1.sqlite.tmp").delete();
@@ -39,7 +55,7 @@ final class LiveStrideMapContextProvider {
     }
     static int cleanupOldCacheFiles(Context context,long cutoff) {
         int removed=0;
-        for(String name:new String[]{"map_context_cache","nearby_map_cache_v2","nearby_road_cache_v1","nearby_coverage_cache_v1"}) {
+        for(String name:new String[]{"map_context_cache","nearby_map_cache_v2","nearby_road_cache_v1","nearby_coverage_cache_v1","nearby_map_cache_v3","nearby_road_cache_v2","nearby_coverage_cache_v2"}) {
             File[] files=new File(context.getFilesDir(),name).listFiles();
             if(files!=null)for(File f:files)if(f.isFile()&&f.lastModified()<cutoff&&
                     (f.getName().endsWith(".json")||f.getName().endsWith(".tmp"))&&f.delete())removed++;
@@ -51,11 +67,34 @@ final class LiveStrideMapContextProvider {
         synchronized(lock) {
             if(closed)return;
             desiredKey=LiveStrideMapContext.tileKey(lat,lon,RADIUS);latitude=lat;longitude=lon;
+            // A network cooldown must never extend the geographic validity of
+            // the old context. Clear it promptly even while a worker is waiting.
+            for(int kind=0;kind<2;kind++) {
+                AreaState s=areas[kind];
+                if(s.area!=null&&!NearbyMapCache.containsForMatching(s.area,lat,lon)) {
+                    if(kind==0)publish(new JSONObject());else clearRoadArea();
+                    s.area=null;s.fetchedAt=0;
+                }
+            }
             if(workerRunning)return;
-            if(desiredKey.equals(lastKey)&&System.currentTimeMillis()-lastAttempt<(succeeded?300000:60000))return;
+            if(!needsAny(lat,lon))return;
             workerRunning=true;executor.execute(this::requests);
         }
     }
+    static boolean shouldThrottle(boolean sameKey,boolean success,long elapsed,JSONObject area,double lat,double lon) {
+        if(!success)return sameKey && elapsed>=0 && elapsed<RETRY_MS;
+        // A cache-tile boundary is not a geometry boundary. Reuse actual coverage.
+        return elapsed>=0 && elapsed<REFRESH_MS && area!=null && NearbyMapCache.covers(area,lat,lon);
+    }
+    private boolean needs(int kind,double lat,double lon) {
+        AreaState s=areas[kind];long now=clock.getAsLong();
+        boolean complete=s.area!=null&&!s.area.optBoolean("truncated",kind==2);
+        if(complete && s.fetchedAt>0 && shouldThrottle(true,true,now-s.fetchedAt,s.area,lat,lon))return false;
+        boolean sameAttempt=LiveStrideMapContext.tileKey(lat,lon,RADIUS).equals(s.attemptedKey)
+                && NearbyMapCache.distance(s.attemptedLat,s.attemptedLon,lat,lon)<75;
+        return !shouldThrottle(sameAttempt,false,now-s.attemptedAt,null,lat,lon);
+    }
+    private boolean needsAny(double lat,double lon){for(int k=0;k<3;k++)if(needs(k,lat,lon))return true;return false;}
     BridgeTunnelMatcher.Context consumePendingContext(){return pending.getAndSet(null);}
     RoadEvidence consumePendingRoadEvidence(){return pendingRoads.getAndSet(null);}
     RoadCoverage consumePendingRoadCoverage(){return pendingCoverage.getAndSet(null);}
@@ -64,56 +103,74 @@ final class LiveStrideMapContextProvider {
         try {
             while(!Thread.currentThread().isInterrupted()) {
                 String key;double lat,lon;
-                synchronized(lock){if(closed)return;key=desiredKey;lat=latitude;lon=longitude;lastKey=key;lastAttempt=System.currentTimeMillis();}
-                JSONObject cached=cache.readNearby(key,lat,lon);
-                if(cached!=null)publish(cached);
-                else if(activeArea!=null&&!NearbyMapCache.covers(activeArea,lat,lon))publish(new JSONObject());
-                JSONObject cachedRoads=roadCache.readNearby(key,lat,lon);
-                if(cachedRoads!=null)publishRoads(cachedRoads);
-                else if(activeRoadArea!=null&&!NearbyMapCache.covers(activeRoadArea,lat,lon))clearRoadArea();
-                JSONObject cachedCoverage=coverageCache.readNearby(key,lat,lon);
-                if(cachedCoverage!=null)publishCoverage(cachedCoverage);
-                boolean ok=false;
-                try {
-                    JSONObject response=LiveStrideServerClient.fetchMapContext(lat,lon,RADIUS);
-                    if(response!=null) {
-                        LiveStrideMapContext.validate(response);
-                        // A slow response must not replace the map for a distant newer location.
-                        synchronized(lock) {
-                            if(NearbyMapCache.covers(response,latitude,longitude))publish(response);
-                        }
-                        try{cache.write(key,response);}catch(Exception e){Log.w(TAG,"Map cache write: "+e.getMessage());}
-                        ok=true;
-                    }
-                }catch(Exception e){Log.w(TAG,"Nearby map unavailable: "+e.getMessage());}
-                // Publish trails first; road loading never blocks GPS or trail startup.
-                try {
-                    JSONObject roads=LiveStrideServerClient.fetchRoadEvidence(lat,lon,RADIUS);
-                    if(roads!=null) {
-                        RoadEvidence.parse(roads);
-                        roads.put("segments",new org.json.JSONArray());
-                        synchronized(lock){if(NearbyMapCache.covers(roads,latitude,longitude))publishRoads(roads);}
-                        try{roadCache.write(key,roads);}catch(Exception e){Log.w(TAG,"Road cache write: "+e.getMessage());}
-                    }
-                }catch(Exception e){Log.w(TAG,"Road evidence unavailable: "+e.getMessage());}
-                try {
-                    JSONObject response=LiveStrideServerClient.fetchRoadCoverage(lat,lon,RADIUS);
-                    if(response!=null) {
-                        RoadCoverage.parse(response);
-                        response.put("segments",new org.json.JSONArray());
-                        synchronized(lock){if(NearbyMapCache.covers(response,latitude,longitude))publishCoverage(response);}
-                        try{coverageCache.write(key,response);}catch(Exception e){Log.w(TAG,"Coverage cache write: "+e.getMessage());}
-                    }
-                }catch(Exception e){Log.w(TAG,"Road coverage unavailable: "+e.getMessage());}
-                synchronized(lock){succeeded=ok;if(key.equals(desiredKey)||closed)return;}
+                synchronized(lock){if(closed)return;key=desiredKey;lat=latitude;lon=longitude;}
+                // Trails publish first. Endpoint cooldowns are independent, so one
+                // failed road call cannot repeatedly rebuild a healthy trail graph.
+                for(int kind=0;kind<3;kind++) {
+                    synchronized(lock){if(closed)return;if(NearbyMapCache.distance(lat,lon,latitude,longitude)>100)break;}
+                    load(kind,key,lat,lon);
+                }
+                synchronized(lock){if(closed||!needsAny(latitude,longitude))return;}
             }
         } finally {
-            synchronized(lock){workerRunning=false;}
+            synchronized(lock){
+                workerRunning=false;
+                // A GPS update arriving just before this finally must not be lost.
+                if(!closed&&!Thread.currentThread().isInterrupted()&&needsAny(latitude,longitude)) {
+                    workerRunning=true;executor.execute(this::requests);
+                }
+            }
         }
+    }
+    private void load(int kind,String key,double lat,double lon) {
+        NearbyMapCache disk=kind==0?cache:kind==1?roadCache:coverageCache;AreaState s=areas[kind];
+        synchronized(lock){if(!needs(kind,lat,lon))return;}
+        JSONObject cached=disk.readNearby(key,lat,lon);
+        synchronized(lock) {
+            if(cached!=null&&NearbyMapCache.covers(cached,latitude,longitude)&&(kind!=0||!cached.optBoolean("truncated",false))) {
+                accept(kind,cached);s.fetchedAt=cached.optLong(FETCHED_AT,0);
+            }
+            if(!needs(kind,lat,lon))return;
+            if(s.area!=null&&!NearbyMapCache.containsForMatching(s.area,latitude,longitude)) {
+                if(kind==0)publish(new JSONObject());else if(kind==1)clearRoadArea();
+                // Coverage.status already returns UNKNOWN outside its query bounds.
+            }
+            s.attemptedKey=key;s.attemptedAt=clock.getAsLong();s.attemptedLat=lat;s.attemptedLon=lon;
+        }
+        try {
+            for(int radius=s.radius;;radius=radius>250?250:radius>150?150:MIN_RADIUS) {
+                JSONObject response=fetcher.fetch(kind,lat,lon,radius);
+                if(response==null)throw new IllegalStateException("No response");
+                boolean truncated=response.optBoolean("truncated",kind==2);
+                if(truncated&&radius>MIN_RADIUS)continue;
+                if(kind==0) {
+                    if(truncated)throw new IllegalArgumentException("Incomplete walking context; keep previous covered map");
+                    LiveStrideMapContext.validateNearbyFamilies(response);LiveStrideMapContext.normalize(response);
+                }else {
+                    if(kind==1)RoadEvidence.parse(response);else RoadCoverage.parse(response);
+                    response.put("segments",new org.json.JSONArray());
+                }
+                if(!NearbyMapCache.covers(response,lat,lon))throw new IllegalArgumentException("Response lacks nearby search headroom");
+                long fetched=clock.getAsLong();response.put(FETCHED_AT,fetched);
+                synchronized(lock) {
+                    if(closed)return;
+                    if(NearbyMapCache.covers(response,latitude,longitude)){accept(kind,response);s.fetchedAt=fetched;}
+                    s.radius=radius;
+                }
+                try{disk.write(key,response);}catch(Exception e){logger.accept("Nearby cache write: "+e.getMessage());}
+                logger.accept("Nearby endpoint "+kind+": radius="+radius+", returned="+response.optInt("radiusMeters")+", truncated="+truncated);
+                return;
+            }
+        }catch(Exception e){logger.accept("Nearby endpoint "+kind+" unavailable: "+e.getMessage());}
+        finally {synchronized(lock){s.attemptedAt=clock.getAsLong();}}
+    }
+    private void accept(int kind,JSONObject response) {
+        if(kind==0)publish(response);else if(kind==1)publishRoads(response);else publishCoverage(response);
+        areas[kind].area=response;
     }
     private void clearRoadArea() {
         pendingRoads.set(new RoadEvidence(java.util.Collections.emptyList(),true));
-        roadFingerprint=null;activeRoadArea=null;
+        roadFingerprint=null;
     }
     private void publishCoverage(JSONObject response) {
         try {
@@ -122,7 +179,6 @@ final class LiveStrideMapContextProvider {
             String fingerprint=coverage.version+response.getJSONArray("queryBounds").toString()
                     +response.getJSONArray("features").toString()+coverage.available+coverage.truncated;
             if(!fingerprint.equals(coverageFingerprint)){pendingCoverage.set(coverage);coverageFingerprint=fingerprint;}
-            activeCoverageArea=response;
         }catch(Exception e){Log.w(TAG,"Road coverage rejected: "+e.getMessage());}
     }
     private void publishRoads(JSONObject response) {
@@ -130,7 +186,6 @@ final class LiveStrideMapContextProvider {
             RoadEvidence roads=RoadEvidence.parse(response);
             String fingerprint=response.getJSONArray("roads").toString()+roads.truncated;
             if(!fingerprint.equals(roadFingerprint)){pendingRoads.set(roads);roadFingerprint=fingerprint;}
-            activeRoadArea=response;
         }catch(Exception e){Log.w(TAG,"Road geometry rejected: "+e.getMessage());}
     }
     private void publish(JSONObject response) {
@@ -142,7 +197,6 @@ final class LiveStrideMapContextProvider {
                 pending.set(LiveStrideMapContext.parse(normalized,System.currentTimeMillis()));
                 publishedFingerprint=fingerprint;
             }
-            activeArea=response;
         }catch(Exception e){Log.w(TAG,"Map geometry rejected: "+e.getMessage());}
     }
 }

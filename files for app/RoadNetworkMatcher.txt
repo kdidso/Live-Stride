@@ -17,7 +17,11 @@ final class RoadNetworkMatcher {
     private int votes;
     private long voteTime,lastTime,lastTrailTime,outsideSince;
     private Point votePoint,lastPoint;
-    private Path activePath;
+    private Path activePath,turnApproachPath;
+    private double turnApproachOffset;
+    private long turnApproachTime,confirmedTurnUntil;
+    private Path confirmedTurn,confirmedOutgoing,confirmedIncoming;
+    private double confirmedOutgoingOffset,confirmedIncomingOffset,confirmedTurnAlong;
     private long crossingSince,lastCrossingAt;
     private static final double MAX_CROSSING_GAP=20,MAX_CROSSING_SIDE=12;
 
@@ -89,7 +93,7 @@ final class RoadNetworkMatcher {
     private RoadCoverage.Status status(Point p){return coverage==null?RoadCoverage.Status.UNKNOWN:coverage.status(lat(p),lon(p));}
     private void clearVote(){vote="";votes=0;votePoint=null;voteTime=0;}
     void release(){active="";activePath=null;offsets.clear();lastPoint=null;lastTime=0;outsideSince=0;crossingSince=0;lastCrossingAt=0;clearVote();}
-    void reset(){release();observations.clear();lastTrailTime=0;origin=false;roads.clear();trails.clear();}
+    void reset(){confirmedTurn=null;turnApproachPath=null;turnApproachTime=0;release();observations.clear();lastTrailTime=0;origin=false;roads.clear();trails.clear();}
     private static double alignment(Projection q,Point movement){double n=Math.hypot(movement.x,movement.y);return n>.1?Math.abs((movement.x*q.ny-movement.y*q.nx)/n):0;}
 
     boolean isEstablished(TrailNetworkMatcher.Fix f) {
@@ -190,12 +194,105 @@ final class RoadNetworkMatcher {
         return false;
     }
 
+    private boolean currentPath(Path path) {
+        if(path==null)return false;
+        for(Path road:roads)if(road.id.equals(path.id)&&Math.abs(road.level-path.level)<.1
+                &&road.points.get(0).distance(path.points.get(0))<=.3
+                &&road.points.get(road.points.size()-1).distance(path.points.get(path.points.size()-1))<=.3)return true;
+        return false;
+    }
+    // A connected turn is supported by the existing finalization window, never
+    // inferred from polygon overlap or a single diagonal observation.
+    private TrailNetworkMatcher.Decision supportedTurn(TrailNetworkMatcher.Fix f,Point p) {
+        if(coverage==null||!coverage.available||coverage.truncated||evidence==null||evidence.truncated) {confirmedTurn=null;return null;}
+        if(confirmedTurn!=null) {
+            Projection q=confirmedTurn.project(p);
+            double advance=lastPoint==null?3:Math.max(2,Math.min(6,lastPoint.distance(p)*1.3+1));
+            if(q.along>confirmedTurnAlong+advance)q=confirmedTurn.project(confirmedTurn.at(confirmedTurnAlong+advance));
+            if(confirmedTurnAlong<35&&q.along>35)q=confirmedTurn.project(confirmedTurn.at(35));
+            if(currentPath(confirmedIncoming)&&currentPath(confirmedOutgoing)&&f.time<=confirmedTurnUntil&&q.along>=confirmedTurnAlong-2
+                    &&q.along-confirmedTurnAlong<=8*Math.max(.1,(f.time-lastTime)/1000.)+5&&q.distance<=Math.max(6,Math.min(10,f.accuracy*2))
+                    &&status(q.p)==RoadCoverage.Status.INSIDE) {
+                confirmedTurnAlong=q.along;
+                boolean outgoing=q.along>35+.5;
+                activePath=outgoing?confirmedOutgoing:confirmedIncoming;active=activePath.id;
+                offset=outgoing?confirmedOutgoingOffset:confirmedIncomingOffset;
+                offsets.clear();for(int i=0;i<3;i++)offsets.addLast(offset);
+                lastPoint=p;lastTime=f.time;clearVote();
+                return new TrailNetworkMatcher.Decision(f,lat(q.p),lon(q.p),true,"road:"+active,"road_connected_turn");
+            }
+            confirmedTurn=null;
+        }
+        Path approach=turnApproachPath;double approachOffset=turnApproachOffset;
+        if(!currentPath(approach)||coverage==null||!coverage.available||coverage.truncated
+                ||evidence==null||evidence.truncated||f.time-turnApproachTime>20000)return null;
+        TrailNetworkMatcher.Fix futureFirst=null,futureLast=null;int count=0;Point prior=null;
+        List<TrailNetworkMatcher.Fix> future=new ArrayList<>();
+        for(TrailNetworkMatcher.Fix sample:observations)if(sample.time>f.time&&sample.time<=f.time+8000
+                &&sample.accuracy>=0&&sample.accuracy<=10&&!sample.routeSwitchHeld) {
+            Point q=xy(sample.lat,sample.lon);
+            if(prior==null||q.distance(prior)>=.7){future.add(sample);prior=q;}
+        }
+        count=future.size();if(count<5)return null;futureFirst=future.get(count-5);futureLast=future.get(count-1);
+        if(futureLast.time-futureFirst.time<3000)return null;
+        Point a=xy(futureFirst.lat,futureFirst.lon),b=xy(futureLast.lat,futureLast.lon);
+        Point movement=new Point(b.x-a.x,b.y-a.y);if(a.distance(b)<6)return null;
+        Path selected=null,selectedTurn=null;Projection selectedProjection=null;double selectedOffset=0;
+        for(int tip:new int[]{0,approach.points.size()-1}) {
+            Point joint=approach.points.get(tip);if(joint.distance(p)>30)continue;
+            Point inward=approach.points.get(tip==0?1:approach.points.size()-2);
+            double ix=joint.x-inward.x,iy=joint.y-inward.y,in=Math.hypot(ix,iy);if(in<.1)continue;
+            ix/=in;iy/=in;
+            for(Path next:roads)if(!next.id.equals(approach.id)&&Math.abs(next.level-approach.level)<.1) {
+                for(int vertex=0;vertex<next.points.size();vertex++)if(joint.distance(next.points.get(vertex))<=.3)
+                    for(int sign:new int[]{-1,1}) {
+                        int away=vertex+sign;if(away<0||away>=next.points.size())continue;
+                        Point end=next.points.get(away);double ox=end.x-joint.x,oy=end.y-joint.y,on=Math.hypot(ox,oy);if(on<6)continue;
+                        ox/=on;oy/=on;double dot=ix*ox+iy*oy;
+                        if(dot<-.65||dot>.75||(movement.x*ox+movement.y*oy)/a.distance(b)<.85)continue;
+                        Projection endProjection=next.project(b);
+                        if(endProjection.distance>Math.max(5,Math.min(8,f.accuracy*1.5)))continue;
+                        // Future movement must actually enter the outgoing arm.
+                        if((b.x-joint.x)*ox+(b.y-joint.y)*oy<3)continue;
+                        Projection base=approach.project(joint);
+                        Point shifted=new Point(joint.x+base.nx*approachOffset,joint.y+base.ny*approachOffset);
+                        double side=base.nx*(-iy)+base.ny*ix,turnOffset=approachOffset*side;
+                        Point outShift=new Point(joint.x-oy*turnOffset,joint.y+ox*turnOffset);
+                        double den=ix*oy-iy*ox;if(Math.abs(den)<.1)continue;
+                        double t=((outShift.x-shifted.x)*oy-(outShift.y-shifted.y)*ox)/den;
+                        Point corner=new Point(shifted.x+t*ix,shifted.y+t*iy);
+                        if(corner.distance(joint)>20)continue;
+                        List<Point> route=Arrays.asList(new Point(corner.x-ix*35,corner.y-iy*35),corner,new Point(corner.x+ox*35,corner.y+oy*35));
+                        Path turn=new Path(approach,route);Projection q=turn.project(p);
+                        if(q.distance>5||status(q.p)!=RoadCoverage.Status.INSIDE)continue;
+                        // More than one supported arm is an unresolved junction.
+                        if(selected!=null)return null;
+                        selected=next;selectedTurn=turn;selectedProjection=q;
+                        Point outPoint=new Point(corner.x+ox*5,corner.y+oy*5);
+                        Projection nq=next.project(outPoint);selectedOffset=nq.cross(outPoint);
+                    }
+            }
+        }
+        if(selected==null)return null;
+        confirmedTurn=selectedTurn;confirmedIncoming=approach;confirmedIncomingOffset=approachOffset;confirmedOutgoing=selected;confirmedOutgoingOffset=selectedOffset;confirmedTurnUntil=f.time+8000;confirmedTurnAlong=selectedProjection.along;
+        Point output=selectedProjection.p;
+        boolean outgoing=selectedProjection.along>35+.5;
+        active=approach.id;activePath=approach;offset=approachOffset;
+        if(outgoing) {
+            active=selected.id;activePath=selected;offset=selectedOffset;offsets.clear();
+            for(int i=0;i<3;i++)offsets.addLast(offset);
+        }
+        turnApproachPath=activePath;turnApproachOffset=offset;turnApproachTime=f.time;
+        lastPoint=p;lastTime=f.time;clearVote();
+        return new TrailNetworkMatcher.Decision(f,lat(output),lon(output),true,"road:"+active,"road_connected_turn");
+    }
+
     TrailNetworkMatcher.Decision resolve(TrailNetworkMatcher.Decision original,boolean structureOwns){
         TrailNetworkMatcher.Fix f=original.fix;
-        if(original.matched){lastTrailTime=f.time;release();return original;}
-        if(structureOwns||original.structureHint!=null||"driver_mode".equals(original.reason)){release();return original;}
-        if(f.routeSwitchHeld){clearVote();return original;}
-        if(f.accuracy<0||f.accuracy>10||roads.isEmpty()){clearVote();return original;}
+        if(original.matched){confirmedTurn=null;turnApproachPath=null;lastTrailTime=f.time;release();return original;}
+        if(structureOwns||original.structureHint!=null||"driver_mode".equals(original.reason)){confirmedTurn=null;turnApproachPath=null;release();return original;}
+        if(f.routeSwitchHeld){confirmedTurn=null;turnApproachPath=null;clearVote();return original;}
+        if(f.accuracy<0||f.accuracy>10||roads.isEmpty()){confirmedTurn=null;turnApproachPath=null;clearVote();return original;}
         if(lastTime>0&&f.time-lastTime>15000)release();
         Point p=xy(f.lat,f.lon);TrailNetworkMatcher.Fix first=null,last=null;
         List<TrailNetworkMatcher.Fix> samples=new ArrayList<>();
@@ -205,6 +302,7 @@ final class RoadNetworkMatcher {
         if(first==null||samples.size()<4||last.time-first.time<3000){clearVote();return original;}
         Point a=xy(first.lat,first.lon),b=xy(last.lat,last.lon),motion=new Point(b.x-a.x,b.y-a.y);
         if(a.distance(b)<6){clearVote();return original;}
+        TrailNetworkMatcher.Decision turn=supportedTurn(f,p);if(turn!=null)return turn;
         boolean inside=status(p)==RoadCoverage.Status.INSIDE;
         boolean crossing=!inside&&protectsCrosswalk(f);
         boolean justCrossed=inside&&lastCrossingAt>0&&f.time-lastCrossingAt<=3000;
@@ -214,8 +312,8 @@ final class RoadNetworkMatcher {
         if(inside)outsideSince=0;
         else if(!offsets.isEmpty()&&outsideSince==0)outsideSince=f.time;
         boolean outward=!inside&&activePath!=null&&Math.abs(activePath.project(b).cross(b)-activePath.project(a).cross(a))>3;
-        BridgeTunnelMatcher.Point edge=!inside&&!crossing&&!outward&&coverage!=null&&!offsets.isEmpty()&&f.time-outsideSince<2000
-                ?coverage.nearest(f.lat,f.lon,Math.min(4,f.accuracy)):null;
+        BridgeTunnelMatcher.Point edge=!inside&&!crossing&&!outward&&coverage!=null&&!offsets.isEmpty()&&f.time-outsideSince<6000
+                ?coverage.nearest(f.lat,f.lon,f.time-outsideSince<2000?Math.min(4,f.accuracy):1):null;
         List<Choice> choices=new ArrayList<>();double search=Math.min(45,20+2*f.accuracy);
         List<Path> localRoads=crossing?Collections.singletonList(establishedPathAt(f)):roads;
         for(Path path:localRoads){
@@ -252,7 +350,9 @@ final class RoadNetworkMatcher {
                 if(q.distance>Math.min(8,Math.max(4,f.accuracy*1.25)))continue;
             }
             List<Double> cross=new ArrayList<>();int supports=0;
-            for(TrailNetworkMatcher.Fix sample:samples){Point sp=xy(sample.lat,sample.lon);Projection sq=path.project(sp);cross.add(sq.cross(sp));if(!area||status(sp)==RoadCoverage.Status.INSIDE||crossing&&Math.abs(sq.cross(sp)-offset)<=2.5)supports++;}
+            for(TrailNetworkMatcher.Fix sample:samples){Point sp=xy(sample.lat,sample.lon);Projection sq=path.project(sp);cross.add(sq.cross(sp));if(!area||status(sp)==RoadCoverage.Status.INSIDE
+                        ||edge!=null&&path.id.equals(active)&&coverage.nearest(sample.lat,sample.lon,1)!=null
+                        ||crossing&&Math.abs(sq.cross(sp)-offset)<=2.5)supports++;}
             if(supports<3)continue;
             Collections.sort(cross);double spread=cross.get(cross.size()-1)-cross.get(0);
             // Direction carries more weight than proximity within a road body.
@@ -313,6 +413,7 @@ final class RoadNetworkMatcher {
             // Preserve holes and coverage gaps. Do not snap to subdivision edges.
             if(status(output)!=RoadCoverage.Status.INSIDE){output=edge==null?p:xy(edge.lat,edge.lon);offset=best.q.cross(output);}
         }
+        if(offsets.size()>=3){turnApproachPath=activePath;turnApproachOffset=offset;turnApproachTime=f.time;}
         lastPoint=p;lastTime=f.time;if(crossing)lastCrossingAt=f.time;
         TrailNetworkMatcher.Decision result=new TrailNetworkMatcher.Decision(f,lat(output),lon(output),true,"road:"+active,crossing?"road_crosswalk_continuity":best.area?"road_buffer_offset":"road_line_only");
         // A large first correction is a positioning change, not distance run.

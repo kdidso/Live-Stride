@@ -223,14 +223,19 @@ final class BridgeTunnelMatcher {
         final boolean forward;
         final long timeMs;
         final boolean confirmed;
+        final boolean portalApproach;
         StructureHint(String segmentId, boolean forward, long timeMs) {
             this(segmentId, forward, timeMs, false);
         }
         StructureHint(String segmentId, boolean forward, long timeMs, boolean confirmed) {
+            this(segmentId,forward,timeMs,confirmed,false);
+        }
+        StructureHint(String segmentId, boolean forward, long timeMs, boolean confirmed, boolean portalApproach) {
             this.segmentId = segmentId;
             this.forward = forward;
             this.timeMs = timeMs;
             this.confirmed = confirmed;
+            this.portalApproach = portalApproach;
         }
     }
 
@@ -241,6 +246,7 @@ final class BridgeTunnelMatcher {
     void setNetworkPoint(Point point, long timeMs) { networkPoint=point;networkPointTime=timeMs; }
 
     private StructureHint entryHint;
+    private boolean portalApproachEntry;
     private long rawRecoveryStartedAtMs;
 
     void setEntryHint(StructureHint hint) { entryHint = hint; }
@@ -365,7 +371,15 @@ final class BridgeTunnelMatcher {
                 lastRawTimeMs = timeMs;
                 return result;
             }
+            double predictionDt=Math.max(0,Math.min(2,(timeMs-lastMatchedTimeMs)/1000.));
             advanceProgress(timeMs);
+            if(portalApproachEntry&&state==State.STRUCTURE&&"tunnel".equals(structureType)
+                    &&accuracyIsGood&&entryHint!=null&&entryHint.confirmed&&entryHint.timeMs==timeMs
+                    &&activeStructureIds.contains(entryHint.segmentId)&&hasRecentForwardProgress(activeRoute,rawPoint,timeMs)) {
+                Projection supported=project(activeRoute,rawPoint);
+                if(supported.distanceMeters<=STRICT_ENTRY_RADIUS_METERS&&supported.alongMeters>progressMeters+3)
+                    progressMeters=Math.min(supported.alongMeters,progressMeters+2*predictionDt);
+            }
             Point predicted = pointAlong(activeRoute, progressMeters);
 
             if (state == State.STRUCTURE && progressMeters >= activeRouteLengthMeters) {
@@ -692,6 +706,7 @@ final class BridgeTunnelMatcher {
         activeStructureId = best.id;
         activeStructureIds = structurePath.segmentIds;
         structureEntryStartedAtMs = timeMs;
+        portalApproachEntry=entryHint!=null&&entryHint.portalApproach;
         structureEntryRawAnchor = lastRawPoint;
         structureEntryRawAnchorTimeMs = lastRawTimeMs;
         tentativeEntryStartPoint = rawPoint;
@@ -1000,6 +1015,7 @@ final class BridgeTunnelMatcher {
         activeStructureId = "";
         activeStructureIds = new HashSet<>();
         structureEntryStartedAtMs = 0L;
+        portalApproachEntry=false;
         structureEntryRawAnchor = null;
         structureEntryRawAnchorTimeMs = 0L;
         tentativeEntryStartPoint = null;

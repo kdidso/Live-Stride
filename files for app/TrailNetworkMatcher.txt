@@ -237,6 +237,8 @@ final class TrailNetworkMatcher {
     private String continuityFamily="";
     private double continuityAlong, continuityCross, continuityDirection, continuityAccuracy;
     private long continuityTime, turnUntil;
+    private long continuitySince;
+    private int continuityFixes;
     private double turnCross;
     private XY lastEmitted;
     private boolean lastEmittedMatched;
@@ -418,10 +420,58 @@ final class TrailNetworkMatcher {
         seen.remove(node);
     }
 
+    private boolean interiorForkBranch(Source established,Source branch) {
+        if(established==null||branch.segment.isStructure()||established.segment.family.equals(branch.segment.family)
+                ||Math.abs(established.segment.layer-branch.segment.layer)>.1)return false;
+        for(XY end:new XY[]{branch.line.p.get(0),branch.line.p.get(branch.line.p.size()-1)})
+            for(int i=1;i<established.line.p.size()-1;i++)if(end.distance(established.line.p.get(i))<=.3)return true;
+        return false;
+    }
+    private boolean endContinuation(Source established,Source next) {
+        if(established==null||Math.abs(established.segment.layer-next.segment.layer)>.1)return false;
+        if(established.segment.family.equals(next.segment.family))return true;
+        for(XY a:new XY[]{established.line.p.get(0),established.line.p.get(established.line.p.size()-1)})
+            for(XY b:new XY[]{next.line.p.get(0),next.line.p.get(next.line.p.size()-1)})if(a.distance(b)<=.3)return true;
+        return false;
+    }
+    private boolean confirmedForkDeparture(Source branch,Fix fix) {
+        Fix first=null,last=null;XY previous=null;int count=0;
+        List<Fix> observations=new ArrayList<>(history);observations.add(fix);
+        for(Fix f:observations) {
+            if(fix.time-f.time>5000||f.accuracy<0||f.accuracy>10||f.routeSwitchHeld)continue;
+            XY point=xy(f.lat,f.lon);Projection q=branch.line.project(point);
+            if(q.distance>Math.max(2,Math.min(3,f.accuracy*.5))){first=null;last=null;previous=null;count=0;continue;}
+            if(previous==null||point.distance(previous)>=.7){if(first==null)first=f;last=f;previous=point;count++;}
+        }
+        return first!=null&&last!=null&&count>=4&&last.time-first.time>=3000
+                &&xy(first.lat,first.lon).distance(xy(last.lat,last.lon))>=6;
+    }
     private List<Candidate> candidates(Fix fix,XY p) {
         int cx=(int)Math.floor(p.x/100),cy=(int)Math.floor(p.y/100);Set<Integer> nearby=new HashSet<>(longEdges);
         for(int x=cx-1;x<=cx+1;x++)for(int y=cy-1;y<=cy+1;y++)nearby.addAll(grid.getOrDefault(cell(x,y),Collections.emptySet()));
         List<Candidate> result=new ArrayList<>();
+        Source established=null;
+        if(continuityFixes>=4&&fix.time-continuityTime<=20000&&fix.accuracy>=0&&fix.accuracy<=10&&!fix.routeSwitchHeld) {
+            for(Edge edge:edges)if(edge.source.segment.family.equals(continuityFamily)){established=edge.source;break;}
+            if(established!=null&&(established.segment.isStructure()||established.line.project(p).distance>20))established=null;
+        }
+        Map<Source,Boolean> forkSupport=new HashMap<>();
+        Map<Source,List<Source>> forkEntries=new HashMap<>();
+        if(established!=null) {
+            Set<Source> sources=new HashSet<>();for(Edge edge:edges)sources.add(edge.source);
+            for(Source branch:sources)if(interiorForkBranch(established,branch)) {
+                forkEntries.computeIfAbsent(branch,k->new ArrayList<>()).add(branch);
+                // The same departure proof is required for the structure at
+                // the end of a short side branch; otherwise the HMM can skip
+                // the connector and jump straight to its bridge candidate.
+                for(XY end:new XY[]{branch.line.p.get(0),branch.line.p.get(branch.line.p.size()-1)}) {
+                    if(established.line.project(end).distance<=.3)continue;
+                    for(Source next:sources)if(next.segment.isStructure()&&branch.line.length<=40
+                            &&(end.distance(next.line.p.get(0))<=.3||end.distance(next.line.p.get(next.line.p.size()-1))<=.3))
+                        forkEntries.computeIfAbsent(next,k->new ArrayList<>()).add(branch);
+                }
+            }
+        }
         double sigma=Math.max(4,Math.min(12,fix.accuracy>=0?fix.accuracy:6));
         XY heading=null;
         for(Fix old:history)if(fix.time-old.time>=6000)heading=xy(old.lat,old.lon);
@@ -440,6 +490,12 @@ final class TrailNetworkMatcher {
             if(edge.source.segment.family.equals(continuityFamily) && fix.time-continuityTime<=20000 && d<=20)
                 candidateSigma = Math.max(6, sigma);
             double emission=.5*d*d/(candidateSigma*candidateSigma);
+            List<Source> entries=forkEntries.get(edge.source);
+            if(entries!=null) {
+                boolean supported=false;
+                for(Source entry:entries)if(forkSupport.computeIfAbsent(entry,s->confirmedForkDeparture(s,fix))) {supported=true;break;}
+                if(!supported)emission+=4;
+            }
             if(hn>5) {
                 XY a=edge.line.at(projected.along-3),b=edge.line.at(projected.along+3);
                 double dx=b.x-a.x,dy=b.y-a.y,norm=Math.hypot(dx,dy);
@@ -449,7 +505,18 @@ final class TrailNetworkMatcher {
             }
         }
         result.sort(Comparator.comparingDouble((Candidate c)->c.p.distance).thenComparingInt(c->c.edge));
-        if(result.size()>12)result=new ArrayList<>(result.subList(0,12));
+        if(result.size()>12) {
+            List<Candidate> kept=new ArrayList<>(result.subList(0,12));Set<String> retained=new HashSet<>();
+            // Dense nearby geometry must not crowd the established route and
+            // its real endpoint continuations out of the candidate list.
+            for(Candidate option:result)if(option.p.distance<=20) {
+                Source next=edges.get(option.edge).source;
+                if(endContinuation(established,next)&&retained.add(next.segment.family)&&!kept.contains(option)) {
+                    kept.add(option);if(kept.size()>=16)break;
+                }
+            }
+            result=kept;
+        }
         double freeEmission=3.5;
         // Reported accuracy can stay good during a short drift. Give an established
         // trail room to explain bounded displacement; real departures still compete.
@@ -589,12 +656,12 @@ final class TrailNetworkMatcher {
                 double firstAlong=source.line.project(first.xy).along;
                 double futureAlong=source.line.project(last.xy).along;
                 boolean supportsFuture=true;
-                if("bridge".equals(source.segment.brunnel)) {
+                if(source.segment.isStructure()) {
                     // Forward projection alone can increase even while GPS moves sideways
-                    // toward a different structure. A contested bridge needs lateral support
+                    // toward a different structure. A contested structure needs lateral support
                     // from the end of the same look-ahead window before prediction commits.
                     for(Edge alternative:edges) {
-                        if("tunnel".equals(alternative.source.segment.brunnel)
+                        if(alternative.source.segment.isStructure()&&!alternative.source.segment.family.equals(source.segment.family)
                                 && alternative.line.project(first.xy).distance<=SEARCH_METERS) {
                             supportsFuture=source.line.project(last.xy).distance<=7;
                             break;
@@ -606,18 +673,21 @@ final class TrailNetworkMatcher {
                 }
             }
         }
+        if(hint==null&&!matched)hint=uniquePortalApproach(first,last);
         if(matched) {
             Source source=edges.get(chosen.edge).source;
             double along=source.line.project(first.xy).along;
             double cross=signedCross(source,first.xy);
             if(!family.equals(continuityFamily)) {
                 continuityFamily=family;continuityCross=cross;continuityDirection=0;turnUntil=0;continuityAccuracy=first.fix.accuracy;
+                continuitySince=first.fix.time;continuityFixes=0;
             } else {
                 double delta=along-continuityAlong;
                 if(Math.abs(delta)>.5 && first.fix.time>=turnUntil) continuityDirection=Math.signum(delta);
                 if(first.fix.time>=turnUntil) continuityCross+=.2*(cross-continuityCross);
             }
             continuityAlong=along;continuityTime=first.fix.time;
+            continuityFixes++;
             if(first.fix.accuracy>=0)continuityAccuracy=Math.min(continuityAccuracy,first.fix.accuracy);
         }
         layers.removeFirst();
@@ -627,6 +697,45 @@ final class TrailNetworkMatcher {
         decision.anchorOnResume=matched && !lastEmittedMatched && lastEmitted!=null && lastEmitted.distance(output)>6;
         lastEmitted=matched?output:first.xy;lastEmittedMatched=matched;
         return decision;
+    }
+    /** A well-established approach can support the uniquely forward tunnel at
+     * its actual shared endpoint, before drift over the crossing wins proximity.
+     * Forks with another plausible forward branch still require branch evidence. */
+    private BridgeTunnelMatcher.StructureHint uniquePortalApproach(Layer first,Layer last) {
+        if(!first.allowTrail||continuityFixes<4||first.fix.time-continuitySince<3000
+                ||first.fix.time-continuityTime>2500||first.fix.accuracy<0||first.fix.accuracy>10
+                ||first.fix.routeSwitchHeld||last.fix.time-first.fix.time<LAG_MS)return null;
+        Source approach=null;for(Edge edge:edges)if(edge.source.segment.family.equals(continuityFamily)){approach=edge.source;break;}
+        if(approach==null||approach.segment.isStructure())return null;
+        boolean end=continuityDirection>0;if(continuityDirection==0)return null;
+        XY portal=approach.line.at(end?approach.line.length:0);
+        if(portal.distance(first.xy)>10||portal.distance(lastEmitted)>9)return null;
+        XY before=approach.line.at(end?approach.line.length-3:3);
+        double hx=portal.x-before.x,hy=portal.y-before.y,hn=Math.hypot(hx,hy);
+        Source tunnel=null;boolean forward=false;Set<String> seen=new HashSet<>();
+        for(Edge edge:edges) {
+            Source candidate=edge.source;if(!seen.add(candidate.segment.id)||candidate.segment.family.equals(continuityFamily)
+                    ||Math.abs(candidate.segment.layer-approach.segment.layer)>.1)continue;
+            boolean start=portal.distance(candidate.line.at(0))<=.3,finish=portal.distance(candidate.line.at(candidate.line.length))<=.3;
+            if(!start&&!finish)continue;
+            XY away=candidate.line.at(start?Math.min(8,candidate.line.length):Math.max(0,candidate.line.length-8));
+            double dx=away.x-portal.x,dy=away.y-portal.y,dn=Math.hypot(dx,dy);
+            double alignment=hn>.01&&dn>.01?(hx*dx+hy*dy)/(hn*dn):-1;
+            if("tunnel".equals(candidate.segment.brunnel)&&alignment>=Math.cos(Math.toRadians(55))) {
+                if(tunnel!=null)return null;tunnel=candidate;forward=start;
+            }else if(alignment>=Math.cos(Math.toRadians(80)))return null;
+            // A turn already explained by a different mapped branch is not
+            // permission to predict through the tunnel, regardless of approach.
+            if(!candidate.segment.isStructure()) {
+                Projection future=candidate.line.project(last.xy);
+                double progress=start?future.along:candidate.line.length-future.along;
+                if(progress>=4&&future.distance<=5)return null;
+            }
+        }
+        if(tunnel==null)return null;
+        Projection a=tunnel.line.project(first.xy),b=tunnel.line.project(last.xy);
+        if(a.distance>7||(b.along-a.along)*(forward?1:-1)<3)return null;
+        return new BridgeTunnelMatcher.StructureHint(tunnel.segment.id,forward,first.fix.time,true,true);
     }
     List<Decision> flush() {
         List<Decision> out=new ArrayList<>();while(!layers.isEmpty())out.add(emit());return out;
